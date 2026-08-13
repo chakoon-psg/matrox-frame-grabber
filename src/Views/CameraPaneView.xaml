@@ -94,24 +94,6 @@
                                 IsEnabled="{Binding CanSetAcqRate}" />
                     </StackPanel>
 
-                    <!-- ROI (sensor height) — check to crop for higher fps, uncheck for full frame -->
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3"
-                                IsEnabled="{Binding SupportsRoi}">
-                        <Label Content="ROI H" Width="52" />
-                        <CheckBox Content="ROI" Width="46" VerticalAlignment="Center"
-                                  IsChecked="{Binding RoiEnabled}"
-                                  ToolTip="On: crop sensor height for higher fps. Off: full frame." />
-                        <Button Content="½" Click="RoiHalf_Click" IsEnabled="{Binding CanSetRoi}" ToolTip="Half height" />
-                        <Button Content="¼" Click="RoiQuarter_Click" Margin="3,0,6,0"
-                                IsEnabled="{Binding CanSetRoi}" ToolTip="Quarter height" />
-                        <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
-                                 Text="{Binding RoiHeightInput, UpdateSourceTrigger=PropertyChanged}"
-                                 IsEnabled="{Binding CanSetRoi}" />
-                        <TextBlock Text="{Binding RoiHint}" Margin="4,0,6,0"
-                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
-                        <Button Content="Apply" Click="ApplyRoi_Click" IsEnabled="{Binding CanSetRoi}" />
-                    </StackPanel>
-
                     <!-- Trigger -->
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
                         <Label Content="Trig" Width="34" />

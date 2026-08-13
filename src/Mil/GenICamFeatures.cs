@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Text;
 using Matrox.MatroxImagingLibrary;
@@ -30,35 +29,30 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException) { return false; }
         }
 
-        /// <summary>
-        /// Runs a feature write with MIL error prints suppressed, so an invalid/out-of-range value
-        /// (e.g. AcquisitionFrameRate above the current max) throws a catchable MILException instead
-        /// of popping a native modal error dialog. Returns false on any failure.
-        /// </summary>
-        private bool WriteQuiet(string name, Action write)
+        /// <summary>Writes a string/enum feature (e.g. TriggerMode="On"). Returns false if unavailable.</summary>
+        public bool SetString(string name, string value)
         {
             if (!Available(name)) return false;
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
             try
             {
-                write();
+                MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_STRING, value);
                 return true;
             }
             catch (MILException) { return false; }
-            finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
         }
 
-        /// <summary>Writes a string/enum feature (e.g. TriggerMode="On"). Returns false if unavailable.</summary>
-        public bool SetString(string name, string value) =>
-            WriteQuiet(name, () => MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_STRING, value));
-
         /// <summary>Writes a double feature (e.g. ExposureTime). Returns false if unavailable.</summary>
-        public bool SetDouble(string name, double value) =>
-            WriteQuiet(name, () =>
+        public bool SetDouble(string name, double value)
+        {
+            if (!Available(name)) return false;
+            try
             {
                 double v = value;
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_DOUBLE, ref v);
-            });
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
 
         /// <summary>Reads a double feature property (M_FEATURE_VALUE / _MIN / _MAX / ...).</summary>
         public bool TryGetDouble(long inquireType, string name, out double value)
@@ -114,12 +108,17 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>Writes a boolean feature (e.g. AcquisitionFrameRateEnable).</summary>
-        public bool SetBool(string name, bool value) =>
-            WriteQuiet(name, () =>
+        public bool SetBool(string name, bool value)
+        {
+            if (!Available(name)) return false;
+            try
             {
                 bool v = value;
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_BOOLEAN, ref v);
-            });
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
 
         /// <summary>Reads a boolean feature's current value.</summary>
         public bool TryGetBool(string name, out bool value)
@@ -136,31 +135,16 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException) { return false; }
         }
 
-        /// <summary>Writes an integer feature (e.g. Width, Height, OffsetY).</summary>
-        public bool SetInt64(string name, long value) =>
-            WriteQuiet(name, () =>
-            {
-                long v = value;
-                MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_INT64, ref v);
-            });
-
-        /// <summary>Reads an integer feature's current value (M_FEATURE_VALUE / _MIN / _MAX / _INC).</summary>
-        public bool TryGetInt64(long inquireType, string name, out long value)
+        /// <summary>Executes a command feature (e.g. TriggerSoftware).</summary>
+        public bool ExecuteCommand(string name)
         {
-            value = 0;
-            if (!HasDigitizer) return false;
+            if (!Available(name)) return false;
             try
             {
-                long v = 0;
-                MIL.MdigInquireFeature(Digitizer, inquireType, name, MIL.M_TYPE_INT64, ref v);
-                value = v;
+                MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_COMMAND);
                 return true;
             }
             catch (MILException) { return false; }
         }
-
-        /// <summary>Executes a command feature (e.g. TriggerSoftware).</summary>
-        public bool ExecuteCommand(string name) =>
-            WriteQuiet(name, () => MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_COMMAND));
     }
 }
