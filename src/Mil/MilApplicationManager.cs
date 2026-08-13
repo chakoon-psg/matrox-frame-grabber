@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Matrox.MatroxImagingLibrary;
+using MatroxFrameGrabber.Infrastructure;
 
 namespace MatroxFrameGrabber.Mil
 {
@@ -29,6 +30,9 @@ namespace MatroxFrameGrabber.Mil
         private readonly List<CameraChannel> _channels = new List<CameraChannel>();
         public IReadOnlyList<CameraChannel> Channels => _channels;
 
+        /// <summary>App-wide output folder + resolution settings, shared by all channels.</summary>
+        public OutputSettings Output { get; } = OutputSettings.Load();
+
         /// <summary>The system descriptor that was actually allocated (for status display).</summary>
         public string AllocatedSystemDescriptor { get; private set; }
 
@@ -51,6 +55,7 @@ namespace MatroxFrameGrabber.Mil
             for (int i = 0; i < ChannelCount; i++)
             {
                 var channel = new CameraChannel(i);
+                channel.Output = Output;
                 channel.Allocate(_sysId, cameraAvailable: i < DigitizerCount, dcfName: "M_DEFAULT");
                 _channels.Add(channel);
             }

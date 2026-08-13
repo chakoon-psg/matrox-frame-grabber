@@ -4,24 +4,39 @@
         xmlns:local="clr-namespace:MatroxFrameGrabber.Views"
         xmlns:milwpf="milwpf"
         Loaded="Window_Loaded"
+        SourceInitialized="Window_SourceInitialized"
         Closing="Window_Closing"
-        PreviewKeyDown="Window_PreviewKeyDown"
         Title="Matrox Rapixo CXP - 4 Camera Viewer"
         Width="1360" Height="820"
-        Background="#202020">
+        Background="{StaticResource BgBrush}">
 
     <Grid>
         <!-- Main content: toolbar + 2x2 camera grid -->
         <DockPanel x:Name="MainContent" LastChildFill="True">
-            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8"
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,8,8,4"
                         VerticalAlignment="Center">
-                <Button Content="Start All" MinWidth="90" Padding="10,4"
+                <Button Content="Start All" MinWidth="80" Padding="10,4"
                         Command="{Binding StartAllCommand}" />
-                <Button Content="Stop All" MinWidth="90" Margin="0,0,16,0" Padding="10,4"
+                <Button Content="Stop All" MinWidth="80" Padding="10,4"
                         Command="{Binding StopAllCommand}" />
-                <TextBlock Text="{Binding SystemStatus}" Foreground="White"
-                           VerticalAlignment="Center" FontSize="14" />
+                <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
+                              Margin="8,0,16,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
+                              IsEnabled="{Binding AnyCanRecord}"
+                              ToolTip="Record all running cameras (requires MIL sequence-compression license)" />
+                <TextBlock Text="Output:" VerticalAlignment="Center" Margin="0,0,4,0" />
+                <TextBox Width="300" VerticalContentAlignment="Center" IsReadOnly="True"
+                         Text="{Binding Output.OutputFolder, Mode=OneWay}"
+                         ToolTip="{Binding Output.OutputFolder}" />
+                <Button Content="Browse…" Padding="8,4" Margin="4,0,4,0" Click="BrowseFolder_Click" />
+                <Button Content="Open" Padding="8,4" Margin="0,0,16,0" Click="OpenFolder_Click" />
+                <TextBlock Text="Resolution:" VerticalAlignment="Center" Margin="0,0,4,0" />
+                <ComboBox Width="100" VerticalContentAlignment="Center"
+                          ItemsSource="{Binding ResolutionOptions}"
+                          SelectedItem="{Binding Output.Resolution}" />
             </StackPanel>
+
+            <TextBlock DockPanel.Dock="Top" Text="{Binding SystemStatus}"
+                       Margin="8,0,8,4" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
 
             <Grid Margin="2">
                 <Grid.RowDefinitions>

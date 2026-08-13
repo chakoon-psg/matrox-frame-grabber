@@ -77,18 +77,29 @@ namespace MatroxFrameGrabber.Views
             var channel = Channel;
             if (channel == null) return;
 
-            var dialog = new SaveFileDialog
-            {
-                Title = $"{channel.Name}: save snapshot",
-                FileName = $"{channel.Name.Replace(' ', '_')}.png",
-                Filter = "PNG (*.png)|*.png|BMP (*.bmp)|*.bmp|TIFF (*.tif)|*.tif|JPEG (*.jpg)|*.jpg"
-            };
-            if (dialog.ShowDialog() != true)
-                return;
-
-            if (!channel.SaveSnapshot(dialog.FileName))
+            string path = channel.SaveSnapshotToOutput();
+            if (path == null)
                 MessageBox.Show("Failed to save snapshot.", channel.Name,
                     MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void Record_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+
+            if (!channel.IsRecording && !channel.IsGrabbing)
+            {
+                MessageBox.Show("Start the camera before recording.", channel.Name,
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            bool wasRecording = channel.IsRecording;
+            channel.ToggleRecording();
+            if (!wasRecording && !channel.IsRecording)
+                MessageBox.Show("Failed to start recording (ffmpeg not found or failed to launch).",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
         // ----- Settings strip -----

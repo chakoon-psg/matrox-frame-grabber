@@ -13,7 +13,7 @@
             <Setter Property="VerticalAlignment" Value="Center" />
             <Setter Property="FontSize" Value="11" />
         </Style>
-        <Style TargetType="Button">
+        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Padding" Value="6,2" />
             <Setter Property="Margin" Value="0,0,3,0" />
             <Setter Property="FontSize" Value="11" />
@@ -29,12 +29,16 @@
 
         <!-- Header: camera name + per-camera toolbar -->
         <Grid DockPanel.Dock="Top" Margin="0,0,0,2">
-            <TextBlock Text="{Binding Name}" ToolTip="{Binding CameraInfo}"
+            <TextBlock Text="{Binding OutputName}" ToolTip="{Binding CameraInfo}"
                        Foreground="#4FC3F7" FontSize="14" FontWeight="Bold"
                        HorizontalAlignment="Left" VerticalAlignment="Center" />
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="▶ Start" Click="Start_Click" IsEnabled="{Binding CameraPresent}" />
                 <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding CameraPresent}" />
+                <ToggleButton Content="● Rec" Style="{StaticResource RecToggle}" FontSize="11"
+                              Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
+                              IsEnabled="{Binding CanRecord}"
+                              ToolTip="Record this camera to MP4 (output folder)" />
                 <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" />
                 <Button Content="Fit" Click="Fit_Click" IsEnabled="{Binding CameraPresent}" />
                 <Button Content="1:1" Click="OneToOne_Click" IsEnabled="{Binding CameraPresent}" />
@@ -51,6 +55,16 @@
                   IsExpanded="False" Margin="0,2,0,0">
             <Border Background="#2A2A2A" BorderBrush="#404040" BorderThickness="1" Padding="5">
                 <StackPanel>
+                    <!-- Output name (used as snapshot/recording filename prefix) -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                        <Label Content="Name" Width="34" />
+                        <TextBox Width="140" FontSize="11" VerticalContentAlignment="Center"
+                                 Text="{Binding OutputName, UpdateSourceTrigger=LostFocus}"
+                                 ToolTip="File name prefix for snapshots/recordings" />
+                        <TextBlock Text="_yyyyMMdd_HHmmss.png / .mp4" Margin="6,0,0,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                    </StackPanel>
+
                     <!-- Exposure -->
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
                         <Label Content="Exp" Width="34" />

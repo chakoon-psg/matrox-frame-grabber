@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Matrox.MatroxImagingLibrary;
+using MatroxFrameGrabber.Infrastructure;
 
 namespace MatroxFrameGrabber.Mil
 {
@@ -48,6 +49,7 @@ namespace MatroxFrameGrabber.Mil
 
         private class ChannelHookData
         {
+            public CameraChannel Owner;
             public MIL_ID DisplayBuffer;
             public long FrameCount;
         }
@@ -92,11 +94,23 @@ namespace MatroxFrameGrabber.Mil
         private string _blueRatioInput = "";
         private string _cameraInfo = "";
 
+        // Output naming + recording (ffmpeg-based MP4).
+        private string _outputName;
+        private readonly object _recordLock = new object();
+        private FfmpegRecorder _recorder;
+        private MIL_ID _captureBuf = MIL.M_NULL;   // packed BGR24 / mono at encode size (for MbufGet)
+        private MIL_ID _resizeBuf = MIL.M_NULL;    // downscale intermediate (M_NULL if no resize)
+        private double _feedScale = 1.0;
+        private int _recW, _recH, _recBpp;
+        private bool _isRecording;
+        private string _recordFilePath;
+
         #endregion
 
         public CameraChannel(int index)
         {
             _index = index;
+            _outputName = $"Camera {_index}";
         }
 
         #region Basic properties (bound in XAML)
@@ -107,6 +121,31 @@ namespace MatroxFrameGrabber.Mil
         public bool IsGrabbing => _isGrabbing;
         public long FrameCount => _hookData?.FrameCount ?? 0;
         public double FrameRate => _frameRate;
+
+        /// <summary>Editable base name used as the snapshot/recording filename prefix.</summary>
+        public string OutputName
+        {
+            get => _outputName;
+            set
+            {
+                string v = string.IsNullOrWhiteSpace(value) ? $"Camera {_index}" : value;
+                if (_outputName == v) return;
+                _outputName = v;
+                RaisePropertyChanged(nameof(OutputName));
+            }
+        }
+
+        /// <summary>True while a recording is in progress for this camera.</summary>
+        public bool IsRecording
+        {
+            get { lock (_recordLock) { return _isRecording; } }
+        }
+
+        /// <summary>Whether the board provides a hardware H.264 encoder for recording.</summary>
+        public bool CanRecord { get; private set; }
+
+        /// <summary>Shared app-wide output settings (folder + resolution). Set by the manager.</summary>
+        public OutputSettings Output { get; set; }
 
         public string DcfName
         {
@@ -120,8 +159,9 @@ namespace MatroxFrameGrabber.Mil
             {
                 if (!CameraPresent)
                     return "No camera";
+                string rec = IsRecording ? "  ● REC" : "";
                 if (_isGrabbing)
-                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)";
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){rec}";
                 if (_grabBuffers.Count < MIN_USABLE_GRAB_BUFFERS)
                     return $"Low memory: only {_grabBuffers.Count} grab buffer(s)";
                 return $"Ready  ({_grabBuffers.Count} buffers)";
@@ -278,6 +318,11 @@ namespace MatroxFrameGrabber.Mil
                     sizeX = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
                     sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
                     bufType = MIL.MdigInquire(_digId, MIL.M_TYPE, MIL.M_NULL);
+
+                    // Recording is done by piping frames to ffmpeg (the MIL license here does not
+                    // permit Mseq compression). Enable the Rec button only if ffmpeg is available.
+                    CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
+                    RaisePropertyChanged(nameof(CanRecord));
                 }
             }
 
@@ -400,6 +445,7 @@ namespace MatroxFrameGrabber.Mil
 
             _hookData = new ChannelHookData
             {
+                Owner = this,
                 DisplayBuffer = _dispBufId,
                 FrameCount = 0
             };
@@ -418,6 +464,8 @@ namespace MatroxFrameGrabber.Mil
         {
             if (!_isGrabbing)
                 return;
+
+            StopRecording();   // no frames will be fed once the grab stops
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
@@ -458,14 +506,51 @@ namespace MatroxFrameGrabber.Mil
             MIL.MdigGetHookInfo(hookId, MIL.M_MODIFIED_BUFFER + MIL.M_BUFFER_ID, ref grabbedBuffer);
 
             data.FrameCount++;
-
-            // ---- Per-frame processing ----
-            // Copy the freshly grabbed frame to the display buffer. Add real inspection here
-            // (Blob / Pattern / Measurement) writing results into data.DisplayBuffer as needed.
-            MIL.MbufCopy(grabbedBuffer, data.DisplayBuffer);
-            // -------------------------------
-
+            data.Owner?.OnGrabbedFrame(grabbedBuffer, data.DisplayBuffer);
             return 0;
+        }
+
+        /// <summary>
+        /// Per-frame work on the acquisition thread: copy to the display buffer, and (if
+        /// recording) feed the frame to the encoder. Add real inspection here as needed.
+        /// </summary>
+        private void OnGrabbedFrame(MIL_ID grabbedBuffer, MIL_ID displayBuffer)
+        {
+            // ---- Per-frame processing / display update ----
+            MIL.MbufCopy(grabbedBuffer, displayBuffer);
+
+            // ---- Recording feed (guarded so start/stop can't race the feed) ----
+            lock (_recordLock)
+            {
+                if (!_isRecording || _recorder == null || _captureBuf == MIL.M_NULL)
+                    return;
+
+                // Only pay the extraction cost (resize + convert + MbufGet) when the encoder can
+                // actually accept the frame. When ffmpeg is behind we skip it and return fast, so
+                // the live display keeps its frame rate (we record only what the encoder can take).
+                if (!_recorder.HasRoom)
+                    return;
+
+                try
+                {
+                    // Downscale if a preset is active, then convert to a packed buffer we can read.
+                    MIL_ID src = grabbedBuffer;
+                    if (_resizeBuf != MIL.M_NULL)
+                    {
+                        MIL.MimResize(grabbedBuffer, _resizeBuf, _feedScale, _feedScale, MIL.M_BILINEAR);
+                        src = _resizeBuf;
+                    }
+                    MIL.MbufCopy(src, _captureBuf);
+
+                    byte[] frame = new byte[_recW * _recH * _recBpp];
+                    MIL.MbufGet(_captureBuf, frame);
+                    _recorder.WriteFrame(frame);
+                }
+                catch (MILException)
+                {
+                    // Drop this frame rather than tear down mid-callback.
+                }
+            }
         }
 
         #endregion
@@ -490,26 +575,206 @@ namespace MatroxFrameGrabber.Mil
             MIL.MdispPan(_dispId, MIL.M_NULL, MIL.M_NULL);
         }
 
-        /// <summary>Saves the current display image to a standard image file (format by extension).</summary>
-        public bool SaveSnapshot(string path)
+        /// <summary>
+        /// Saves the current frame to the configured output folder as
+        /// {OutputName}_{yyyyMMdd_HHmmss}.png, applying the resolution preset.
+        /// Returns the saved path, or null on failure.
+        /// </summary>
+        public string SaveSnapshotToOutput()
         {
-            if (_dispBufId == MIL.M_NULL || string.IsNullOrWhiteSpace(path))
-                return false;
+            OutputSettings settings = Output;
+            if (_dispBufId == MIL.M_NULL || settings == null)
+                return null;
             try
             {
-                long format = MIL.M_PNG;
-                string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
-                if (ext == ".bmp") format = MIL.M_BMP;
-                else if (ext == ".tif" || ext == ".tiff") format = MIL.M_TIFF;
-                else if (ext == ".jpg" || ext == ".jpeg") format = MIL.M_JPEG_LOSSY;
-                MIL.MbufExport(path, format, _dispBufId);
-                return true;
+                string path = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.png");
+
+                MIL_INT srcH = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+                double scale = settings.ScaleFactorFor(srcH);
+                if (scale < 0.999)
+                {
+                    MIL_ID tmp = AllocScaledBuffer(_dispBufId, scale);
+                    MIL.MimResize(_dispBufId, tmp, scale, scale, MIL.M_BILINEAR);
+                    MIL.MbufExport(path, MIL.M_PNG, tmp);
+                    MIL.MbufFree(tmp);
+                }
+                else
+                {
+                    MIL.MbufExport(path, MIL.M_PNG, _dispBufId);
+                }
+                return path;
             }
             catch (MILException)
             {
-                return false;
+                return null;
             }
         }
+
+        #endregion
+
+        #region Recording (H.264 / MP4 via Mseq)
+
+        /// <summary>
+        /// Starts recording this camera to {OutputName}_{timestamp}.mp4 in the output folder,
+        /// at the configured resolution preset. Requires <see cref="CanRecord"/>.
+        /// </summary>
+        public bool StartRecording()
+        {
+            OutputSettings settings = Output;
+            if (!CameraPresent || settings == null)
+                return false;
+
+            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(settings.FfmpegPath);
+            if (ffmpeg == null)
+                return false;
+
+            lock (_recordLock)
+            {
+                if (_isRecording)
+                    return true;
+                try
+                {
+                    _recordFilePath = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.mp4");
+
+                    MIL_INT band = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
+                    MIL_INT srcType = MIL.MbufInquire(_dispBufId, MIL.M_TYPE, MIL.M_NULL);
+                    long srcW = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                    long srcH = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+
+                    double scale = settings.ScaleFactorFor(srcH);
+                    long w = scale < 0.999 ? (long)(srcW * scale) : srcW;
+                    long h = scale < 0.999 ? (long)(srcH * scale) : srcH;
+                    w &= ~1L; h &= ~1L;                 // even dimensions for H.264
+                    if (w < 2 || h < 2) { return false; }
+
+                    bool color = (long)band >= 3;
+                    string pixFmt = color ? "bgr24" : "gray";
+                    _recBpp = color ? 3 : 1;
+                    _recW = (int)w;
+                    _recH = (int)h;
+                    _feedScale = scale;
+
+                    // Packed buffer we can pull interleaved bytes from with MbufGet.
+                    long capAttr = color ? (MIL.M_IMAGE + MIL.M_PROC + MIL.M_PACKED + MIL.M_BGR24)
+                                         : (MIL.M_IMAGE + MIL.M_PROC);
+                    MIL.MbufAllocColor(_sysId, color ? 3 : 1, w, h, 8 + MIL.M_UNSIGNED, capAttr, ref _captureBuf);
+
+                    // Downscale intermediate (same format as source) only when a preset shrinks it.
+                    if (scale < 0.999)
+                        MIL.MbufAllocColor(_sysId, band, w, h, srcType, MIL.M_IMAGE + MIL.M_PROC, ref _resizeBuf);
+
+                    double fps = _frameRate > 1.0 ? _frameRate : InquireNominalFps();
+
+                    _recorder = new FfmpegRecorder();
+                    if (!_recorder.Start(ffmpeg, _recordFilePath, _recW, _recH, fps, pixFmt, out _))
+                    {
+                        _recorder = null;
+                        CleanupRecordingBuffers();
+                        return false;
+                    }
+                    _isRecording = true;
+                }
+                catch (Exception)
+                {
+                    _recorder?.Stop();
+                    _recorder = null;
+                    CleanupRecordingBuffers();
+                    return false;
+                }
+            }
+
+            RaisePropertyChanged(nameof(IsRecording));
+            RaisePropertyChanged(nameof(StatusText));
+            return true;
+        }
+
+        /// <summary>Stops recording and finalizes the .mp4 file.</summary>
+        public void StopRecording()
+        {
+            FfmpegRecorder recorder;
+            MIL_ID cap, rez;
+            lock (_recordLock)
+            {
+                if (!_isRecording)
+                    return;
+                _isRecording = false;          // stop the hook from feeding first
+                recorder = _recorder; _recorder = null;
+                cap = _captureBuf; _captureBuf = MIL.M_NULL;
+                rez = _resizeBuf; _resizeBuf = MIL.M_NULL;
+                _feedScale = 1.0;
+            }
+
+            // Finalize outside the lock (ffmpeg flush can take a moment; don't stall the grab hook).
+            recorder?.Stop();
+            if (cap != MIL.M_NULL) MIL.MbufFree(cap);
+            if (rez != MIL.M_NULL) MIL.MbufFree(rez);
+
+            RaisePropertyChanged(nameof(IsRecording));
+            RaisePropertyChanged(nameof(StatusText));
+        }
+
+        /// <summary>Starts recording if idle, stops it if already recording.</summary>
+        public bool ToggleRecording()
+        {
+            if (IsRecording)
+            {
+                StopRecording();
+                return false;
+            }
+            return StartRecording();
+        }
+
+        // Frees only the MIL buffers (used on a failed start; the recorder is handled by the caller).
+        private void CleanupRecordingBuffers()
+        {
+            if (_captureBuf != MIL.M_NULL) { MIL.MbufFree(_captureBuf); _captureBuf = MIL.M_NULL; }
+            if (_resizeBuf != MIL.M_NULL) { MIL.MbufFree(_resizeBuf); _resizeBuf = MIL.M_NULL; }
+            _feedScale = 1.0;
+        }
+
+        private double InquireNominalFps()
+        {
+            try
+            {
+                double fps = 0;
+                MIL.MdigInquire(_digId, MIL.M_SELECTED_FRAME_RATE, ref fps);
+                if (fps > 1.0)
+                    return fps;
+            }
+            catch (MILException)
+            {
+            }
+            return 30.0;
+        }
+
+        #endregion
+
+        #region Output helpers
+
+        /// <summary>Allocates a destination buffer scaled from <paramref name="src"/> by <paramref name="scale"/>.</summary>
+        private MIL_ID AllocScaledBuffer(MIL_ID src, double scale, bool evenDims = false)
+        {
+            MIL_INT band = MIL.MbufInquire(src, MIL.M_SIZE_BAND, MIL.M_NULL);
+            MIL_INT type = MIL.MbufInquire(src, MIL.M_TYPE, MIL.M_NULL);
+            long srcW = MIL.MbufInquire(src, MIL.M_SIZE_X, MIL.M_NULL);
+            long srcH = MIL.MbufInquire(src, MIL.M_SIZE_Y, MIL.M_NULL);
+            long dstW = Math.Max(2, (long)(srcW * scale));
+            long dstH = Math.Max(2, (long)(srcH * scale));
+            if (evenDims) { dstW &= ~1L; dstH &= ~1L; }   // H.264 needs even dimensions
+            MIL_ID dst = MIL.M_NULL;
+            MIL.MbufAllocColor(_sysId, band, dstW, dstH, type, MIL.M_IMAGE + MIL.M_PROC, ref dst);
+            return dst;
+        }
+
+        private string SafeName()
+        {
+            string s = _outputName;
+            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
+                s = s.Replace(c, '_');
+            return s.Replace(' ', '_');
+        }
+
+        private static string Timestamp() => DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
         #endregion
 
@@ -589,6 +854,59 @@ namespace MatroxFrameGrabber.Mil
             TryGetFeatureString("DeviceVendorName", out vendor);
             string who = string.Join(" ", new[] { vendor, model }).Trim();
             CameraInfo = string.IsNullOrEmpty(who) ? $"{sx}×{sy}" : $"{who}  {sx}×{sy}";
+        }
+
+        /// <summary>
+        /// One-line dump of the acquisition-limiting settings for this camera (exposure, frame-rate
+        /// features, link speed, payload) — used to diagnose why the measured rate is below spec.
+        /// </summary>
+        public string DumpDiagnostics()
+        {
+            if (_digId == MIL.M_NULL)
+                return $"{OutputName}: no camera";
+
+            var sb = new StringBuilder();
+            MIL_INT sx = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+            MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+            sb.Append($"{OutputName}: {sx}x{sy}");
+
+            // Reading a feature name the camera does not expose raises a MIL error (and a modal
+            // error dialog) — suppress printing while probing speculative feature names.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
+            {
+            if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, "ExposureTime", out double exp))
+                sb.Append($"  Exposure={exp:F0}us(=>{(exp > 0 ? 1e6 / exp : 0):F0}fps max)");
+            if (TryGetFeatureString("ExposureAuto", out string expAuto) && !string.IsNullOrEmpty(expAuto))
+                sb.Append($"  ExposureAuto={expAuto}");
+
+            foreach (string f in new[] { "AcquisitionFrameRate", "AcquisitionFrameRateMax",
+                                         "ResultingFrameRate", "AcquisitionMaxFrameRate",
+                                         "DeviceLinkSpeedBps", "DeviceLinkThroughputLimit" })
+            {
+                if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, f, out double v))
+                    sb.Append($"  {f}={v:F0}");
+            }
+            foreach (string f in new[] { "AcquisitionFrameRateEnable", "CxpLinkConfiguration",
+                                         "CxpLinkConfigurationStatus", "DeviceLinkThroughputLimitMode" })
+            {
+                if (TryGetFeatureString(f, out string s) && !string.IsNullOrEmpty(s))
+                    sb.Append($"  {f}={s}");
+            }
+
+            try
+            {
+                MIL_INT payload = MIL.MdigInquire(_digId, MIL.M_GC_PAYLOAD_SIZE, MIL.M_NULL);
+                sb.Append($"  payload={(long)payload}B");
+            }
+            catch (MILException) { }
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+            }
+
+            return sb.ToString();
         }
 
         private void RefreshExposureReadback()
