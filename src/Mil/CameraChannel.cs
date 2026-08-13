@@ -98,6 +98,9 @@ namespace MatroxFrameGrabber.Mil
         private string _outputName;
         private RecordingSession _recording;
 
+        // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
+        private readonly GenICamFeatures _features = new GenICamFeatures();
+
         #endregion
 
         public CameraChannel(int index)
@@ -388,6 +391,7 @@ namespace MatroxFrameGrabber.Mil
                 }
             }
 
+            _features.Digitizer = _digId;   // may be M_NULL (no camera) — features then fail softly
             RefreshFeatureState();
 
             RaisePropertyChanged(nameof(CameraPresent));
@@ -423,6 +427,7 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigFree(_digId);
                 _digId = MIL.M_NULL;
             }
+            _features.Digitizer = MIL.M_NULL;
         }
 
         /// <summary>Frees every MIL resource owned by this channel (not the shared system).</summary>
@@ -914,21 +919,7 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>Fires one software trigger (executes the TriggerSoftware command feature).</summary>
-        public bool FireSoftwareTrigger()
-        {
-            if (_digId == MIL.M_NULL || !FeatureAvailable(F_TRIGGER_SOFTWARE))
-                return false;
-            try
-            {
-                // Command features are executed via the 4-argument overload (no value).
-                MIL.MdigControlFeature(_digId, MIL.M_FEATURE_VALUE, F_TRIGGER_SOFTWARE, MIL.M_TYPE_COMMAND);
-                return true;
-            }
-            catch (MILException)
-            {
-                return false;
-            }
-        }
+        public bool FireSoftwareTrigger() => _features.ExecuteCommand(F_TRIGGER_SOFTWARE);
 
         /// <summary>Opens the interactive GenICam feature browser for full camera configuration.</summary>
         public void OpenFeatureBrowser()
@@ -963,111 +954,14 @@ namespace MatroxFrameGrabber.Mil
 
         #endregion
 
-        #region Feature helpers
+        #region Feature helpers (delegate to GenICamFeatures)
 
-        private bool FeatureAvailable(string name)
-        {
-            if (_digId == MIL.M_NULL)
-                return false;
-            try
-            {
-                bool present = false;
-                MIL.MdigInquireFeature(_digId, MIL.M_FEATURE_PRESENT, name, MIL.M_TYPE_BOOLEAN, ref present);
-                return present;
-            }
-            catch (MILException)
-            {
-                return false;
-            }
-        }
-
-        private bool TrySetFeatureString(string name, string value)
-        {
-            if (!FeatureAvailable(name))
-                return false;
-            try
-            {
-                MIL.MdigControlFeature(_digId, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_STRING, value);
-                return true;
-            }
-            catch (MILException)
-            {
-                return false;
-            }
-        }
-
-        private bool SetFeatureDouble(string name, double value)
-        {
-            if (!FeatureAvailable(name))
-                return false;
-            try
-            {
-                double v = value;
-                MIL.MdigControlFeature(_digId, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_DOUBLE, ref v);
-                return true;
-            }
-            catch (MILException)
-            {
-                return false;
-            }
-        }
-
-        private bool TryGetFeatureDouble(long inquireType, string name, out double value)
-        {
-            value = 0;
-            try
-            {
-                double v = 0;
-                MIL.MdigInquireFeature(_digId, inquireType, name, MIL.M_TYPE_DOUBLE, ref v);
-                value = v;
-                return true;
-            }
-            catch (MILException)
-            {
-                return false;
-            }
-        }
-
-        private bool TryGetFeatureString(string name, out string value)
-        {
-            value = "";
-            try
-            {
-                var sb = new StringBuilder(256);
-                MIL.MdigInquireFeature(_digId, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_STRING, sb);
-                value = sb.ToString();
-                return true;
-            }
-            catch (MILException)
-            {
-                return false;
-            }
-        }
-
-        private List<string> GetEnumEntries(string feature)
-        {
-            var list = new List<string>();
-            if (!FeatureAvailable(feature))
-                return list;
-            try
-            {
-                MIL_INT count = 0;
-                MIL.MdigInquireFeature(_digId, MIL.M_FEATURE_ENUM_ENTRY_COUNT, feature, MIL.M_TYPE_MIL_INT, ref count);
-                long n = count;
-                for (long i = 0; i < n; i++)
-                {
-                    var sb = new StringBuilder(256);
-                    MIL.MdigInquireFeature(_digId, MIL.M_FEATURE_ENUM_ENTRY_NAME + i, feature, MIL.M_TYPE_STRING, sb);
-                    string name = sb.ToString();
-                    if (!string.IsNullOrEmpty(name))
-                        list.Add(name);
-                }
-            }
-            catch (MILException)
-            {
-            }
-            return list;
-        }
+        private bool FeatureAvailable(string name) => _features.Available(name);
+        private bool TrySetFeatureString(string name, string value) => _features.SetString(name, value);
+        private bool SetFeatureDouble(string name, double value) => _features.SetDouble(name, value);
+        private bool TryGetFeatureDouble(long inquireType, string name, out double value) => _features.TryGetDouble(inquireType, name, out value);
+        private bool TryGetFeatureString(string name, out string value) => _features.TryGetString(name, out value);
+        private List<string> GetEnumEntries(string feature) => _features.EnumEntries(feature);
 
         #endregion
 
