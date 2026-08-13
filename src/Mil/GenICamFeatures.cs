@@ -135,6 +135,34 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException) { return false; }
         }
 
+        /// <summary>Writes an integer feature (e.g. Width, Height, OffsetY).</summary>
+        public bool SetInt64(string name, long value)
+        {
+            if (!Available(name)) return false;
+            try
+            {
+                long v = value;
+                MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_INT64, ref v);
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
+
+        /// <summary>Reads an integer feature's current value (M_FEATURE_VALUE / _MIN / _MAX / _INC).</summary>
+        public bool TryGetInt64(long inquireType, string name, out long value)
+        {
+            value = 0;
+            if (!HasDigitizer) return false;
+            try
+            {
+                long v = 0;
+                MIL.MdigInquireFeature(Digitizer, inquireType, name, MIL.M_TYPE_INT64, ref v);
+                value = v;
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
+
         /// <summary>Executes a command feature (e.g. TriggerSoftware).</summary>
         public bool ExecuteCommand(string name)
         {
