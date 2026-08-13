@@ -101,6 +101,10 @@ namespace MatroxFrameGrabber.Mil
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
 
+        // Camera-disconnect detection (polled in RefreshStats; 2 strikes to avoid false positives).
+        private bool _cameraLost;
+        private int _lostPolls;
+
         #endregion
 
         public CameraChannel(int index)
@@ -166,6 +170,8 @@ namespace MatroxFrameGrabber.Mil
             {
                 if (!CameraPresent)
                     return "No camera";
+                if (_cameraLost)
+                    return "⚠ Camera disconnected — press Stop";
                 string rec = _recording?.StatusSuffix() ?? "";
                 if (_isGrabbing)
                     return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){rec}";
@@ -403,6 +409,7 @@ namespace MatroxFrameGrabber.Mil
             }
 
             _features.Digitizer = _digId;   // may be M_NULL (no camera) — features then fail softly
+            _cameraLost = false; _lostPolls = 0;
             RefreshFeatureState();
 
             RaisePropertyChanged(nameof(CameraPresent));
@@ -518,6 +525,9 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Raised when a recording stops on its own (ffmpeg died); carries the error text.</summary>
         public event Action<CameraChannel, string> RecordingFailed;
 
+        /// <summary>Raised when the camera is detected as disconnected while grabbing.</summary>
+        public event Action<CameraChannel> CameraLost;
+
         public void RefreshStats()
         {
             if (_isGrabbing && _digId != MIL.M_NULL)
@@ -525,6 +535,26 @@ namespace MatroxFrameGrabber.Mil
                 double rate = 0.0;
                 MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_RATE, ref rate);
                 _frameRate = rate;
+
+                // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
+                bool present;
+                try { present = MIL.MdigInquire(_digId, MIL.M_CAMERA_PRESENT, MIL.M_NULL) != MIL.M_NO; }
+                catch (MILException) { present = false; }
+
+                if (!present)
+                {
+                    if (!_cameraLost && ++_lostPolls >= 2)
+                    {
+                        _cameraLost = true;
+                        StopRecording();   // safe; leave StopGrab to the user (M_STOP on a dead port is risky)
+                        CameraLost?.Invoke(this);
+                    }
+                }
+                else if (_cameraLost || _lostPolls > 0)
+                {
+                    _cameraLost = false;   // recovered
+                    _lostPolls = 0;
+                }
             }
 
             // If ffmpeg died mid-recording, finalize and surface the error to the UI.

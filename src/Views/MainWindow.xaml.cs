@@ -38,9 +38,12 @@ namespace MatroxFrameGrabber.Views
                 _manager = new MilApplicationManager();
                 _manager.Allocate();
 
-                // Surface unexpected recording stops (e.g. ffmpeg died) to the user.
+                // Surface unexpected recording stops (e.g. ffmpeg died) and camera loss.
                 foreach (var ch in _manager.Channels)
+                {
                     ch.RecordingFailed += OnRecordingFailed;
+                    ch.CameraLost += OnCameraLost;
+                }
 
                 _viewModel = new MainViewModel(_manager);
                 DataContext = _viewModel;
@@ -57,6 +60,12 @@ namespace MatroxFrameGrabber.Views
         {
             MessageBox.Show($"Recording stopped: {error}", channel.Name,
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void OnCameraLost(CameraChannel channel)
+        {
+            MessageBox.Show("Camera was disconnected. Press Stop, reconnect it, then Start again.",
+                channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
         private void Window_SourceInitialized(object sender, EventArgs e)
