@@ -39,6 +39,8 @@ namespace MatroxFrameGrabber.Mil
         private const string F_TRIGGER_MODE = "TriggerMode";
         private const string F_TRIGGER_SOURCE = "TriggerSource";
         private const string F_TRIGGER_SOFTWARE = "TriggerSoftware";
+        private const string F_ACQ_RATE = "AcquisitionFrameRate";
+        private const string F_ACQ_RATE_ENABLE = "AcquisitionFrameRateEnable";
         private const string F_BALANCE_WHITE_AUTO = "BalanceWhiteAuto";
         private const string F_BALANCE_RATIO_SELECTOR = "BalanceRatioSelector";
         private const string F_BALANCE_RATIO = "BalanceRatio";
@@ -81,6 +83,11 @@ namespace MatroxFrameGrabber.Mil
         private bool _supportsExposure;
         private bool _supportsExposureAuto;
         private bool _supportsTrigger;
+        private bool _supportsAcqRate;
+        private bool _supportsAcqRateEnable;
+        private bool _acqRateEnabled;
+        private string _acqRateInput = "";
+        private double _acqRateMax;
         private string _exposureInput = "";
         private double _exposureMin;
         private double _exposureMax;
@@ -211,6 +218,37 @@ namespace MatroxFrameGrabber.Mil
                 RefreshExposureReadback();
             }
         }
+
+        // ----- Acquisition frame-rate cap (Acq Rate) -----
+
+        /// <summary>True if the camera exposes AcquisitionFrameRate.</summary>
+        public bool SupportsAcqRate { get => _supportsAcqRate; private set { _supportsAcqRate = value; RaisePropertyChanged(nameof(SupportsAcqRate)); RaisePropertyChanged(nameof(CanSetAcqRate)); } }
+
+        /// <summary>True if the camera has an AcquisitionFrameRateEnable toggle (the "Limit" checkbox).</summary>
+        public bool SupportsAcqRateEnable { get => _supportsAcqRateEnable; private set { _supportsAcqRateEnable = value; RaisePropertyChanged(nameof(SupportsAcqRateEnable)); } }
+
+        /// <summary>"Limit" — enable the configured acquisition rate (off = free-run at max).</summary>
+        public bool AcqRateEnabled
+        {
+            get => _acqRateEnabled;
+            set
+            {
+                if (_acqRateEnabled == value) return;
+                if (SetFeatureBool(F_ACQ_RATE_ENABLE, value))
+                    _acqRateEnabled = value;
+                RaisePropertyChanged(nameof(AcqRateEnabled));
+                RaisePropertyChanged(nameof(CanSetAcqRate));
+                RefreshAcqRateReadback();
+            }
+        }
+
+        /// <summary>Manual rate is editable when supported and (if there's an Enable) it is on.</summary>
+        public bool CanSetAcqRate => _supportsAcqRate && (!_supportsAcqRateEnable || _acqRateEnabled);
+
+        /// <summary>Target acquisition rate (fps) as text for the input box.</summary>
+        public string AcqRateInput { get => _acqRateInput; set { _acqRateInput = value; RaisePropertyChanged(nameof(AcqRateInput)); } }
+
+        public string AcqRateHint => _supportsAcqRate ? $"fps  · max {_acqRateMax:0}" : "fps";
 
         public bool TriggerOn
         {
@@ -790,6 +828,25 @@ namespace MatroxFrameGrabber.Mil
                 TriggerSources = new List<string>();
             }
 
+            SupportsAcqRate = FeatureAvailable(F_ACQ_RATE);
+            SupportsAcqRateEnable = FeatureAvailable(F_ACQ_RATE_ENABLE);
+            if (_supportsAcqRate)
+            {
+                TryGetFeatureDouble(MIL.M_FEATURE_MAX, F_ACQ_RATE, out _acqRateMax);
+                if (_supportsAcqRateEnable && TryGetFeatureBool(F_ACQ_RATE_ENABLE, out bool en))
+                {
+                    _acqRateEnabled = en;
+                    RaisePropertyChanged(nameof(AcqRateEnabled));
+                }
+                else if (!_supportsAcqRateEnable)
+                {
+                    _acqRateEnabled = true;   // no enable feature: the rate always applies
+                }
+                RaisePropertyChanged(nameof(CanSetAcqRate));
+                RaisePropertyChanged(nameof(AcqRateHint));
+                RefreshAcqRateReadback();
+            }
+
             SupportsWhiteBalance = FeatureAvailable(F_BALANCE_WHITE_AUTO) || FeatureAvailable(F_BALANCE_RATIO);
             if (_supportsWhiteBalance)
             {
@@ -900,6 +957,38 @@ namespace MatroxFrameGrabber.Mil
             return TrySetFeatureString(F_EXPOSURE_AUTO, on ? "Continuous" : "Off");
         }
 
+        private void RefreshAcqRateReadback()
+        {
+            if (_supportsAcqRate && TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_ACQ_RATE, out double v))
+                AcqRateInput = v.ToString("0.##", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Applies the acquisition-rate cap (enables it first if the camera has the toggle).</summary>
+        public bool ApplyAcqRate()
+        {
+            if (!_supportsAcqRate)
+                return false;
+            if (!double.TryParse(_acqRateInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double fps))
+                return false;
+
+            if (_supportsAcqRateEnable && !_acqRateEnabled)
+            {
+                if (SetFeatureBool(F_ACQ_RATE_ENABLE, true))
+                {
+                    _acqRateEnabled = true;
+                    RaisePropertyChanged(nameof(AcqRateEnabled));
+                    RaisePropertyChanged(nameof(CanSetAcqRate));
+                }
+            }
+
+            bool ok = SetFeatureDouble(F_ACQ_RATE, fps);
+            // Max can change with the enable/exposure state.
+            TryGetFeatureDouble(MIL.M_FEATURE_MAX, F_ACQ_RATE, out _acqRateMax);
+            RaisePropertyChanged(nameof(AcqRateHint));
+            RefreshAcqRateReadback();
+            return ok;
+        }
+
         private void RefreshWhiteBalanceReadback()
         {
             RedRatioInput = ReadBalanceRatio("Red");
@@ -1000,8 +1089,10 @@ namespace MatroxFrameGrabber.Mil
         private bool FeatureAvailable(string name) => _features.Available(name);
         private bool TrySetFeatureString(string name, string value) => _features.SetString(name, value);
         private bool SetFeatureDouble(string name, double value) => _features.SetDouble(name, value);
+        private bool SetFeatureBool(string name, bool value) => _features.SetBool(name, value);
         private bool TryGetFeatureDouble(long inquireType, string name, out double value) => _features.TryGetDouble(inquireType, name, out value);
         private bool TryGetFeatureString(string name, out string value) => _features.TryGetString(name, out value);
+        private bool TryGetFeatureBool(string name, out bool value) => _features.TryGetBool(name, out value);
         private List<string> GetEnumEntries(string feature) => _features.EnumEntries(feature);
 
         #endregion

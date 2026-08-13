@@ -112,6 +112,15 @@ namespace MatroxFrameGrabber.Views
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
+        private void ApplyAcqRate_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyAcqRate())
+                MessageBox.Show("Failed to set acquisition rate (value out of range or feature unavailable).",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         private void SoftTrigger_Click(object sender, RoutedEventArgs e) => Channel?.FireSoftwareTrigger();
 
         private void WhiteBalanceOnce_Click(object sender, RoutedEventArgs e) => Channel?.WhiteBalanceOnce();

@@ -107,6 +107,34 @@ namespace MatroxFrameGrabber.Mil
             return list;
         }
 
+        /// <summary>Writes a boolean feature (e.g. AcquisitionFrameRateEnable).</summary>
+        public bool SetBool(string name, bool value)
+        {
+            if (!Available(name)) return false;
+            try
+            {
+                bool v = value;
+                MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_BOOLEAN, ref v);
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
+
+        /// <summary>Reads a boolean feature's current value.</summary>
+        public bool TryGetBool(string name, out bool value)
+        {
+            value = false;
+            if (!HasDigitizer) return false;
+            try
+            {
+                bool v = false;
+                MIL.MdigInquireFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_BOOLEAN, ref v);
+                value = v;
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
+
         /// <summary>Executes a command feature (e.g. TriggerSoftware).</summary>
         public bool ExecuteCommand(string name)
         {
