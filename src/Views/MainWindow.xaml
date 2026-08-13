@@ -33,6 +33,14 @@
                 <ComboBox Width="100" VerticalContentAlignment="Center"
                           ItemsSource="{Binding ResolutionOptions}"
                           SelectedItem="{Binding Output.Resolution}" />
+                <TextBlock Text="Acq Rate:" VerticalAlignment="Center" Margin="16,0,4,0" />
+                <TextBox Width="48" VerticalContentAlignment="Center"
+                         Text="{Binding GlobalAcqRate, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="fps" VerticalAlignment="Center" Margin="4,0,4,0"
+                           Foreground="{StaticResource MutedTextBrush}" />
+                <Button Content="Set all" Padding="10,4"
+                        Command="{Binding SetAllAcqRateCommand}" IsEnabled="{Binding AnyCanAcqRate}"
+                        ToolTip="Apply this AcquisitionFrameRate (fps) to all cameras" />
             </StackPanel>
 
             <TextBlock DockPanel.Dock="Top" Text="{Binding SystemStatus}"

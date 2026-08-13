@@ -24,6 +24,7 @@ namespace MatroxFrameGrabber.ViewModels
             // so gating these on a single "running" flag would desync.
             StartAllCommand = new RelayCommand(StartAll);
             StopAllCommand = new RelayCommand(StopAll);
+            SetAllAcqRateCommand = new RelayCommand(SetAllAcqRate);
 
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -73,8 +74,29 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
+        /// <summary>True if at least one camera exposes AcquisitionFrameRate (enables "Set all").</summary>
+        public bool AnyCanAcqRate
+        {
+            get
+            {
+                foreach (var channel in _manager.Channels)
+                    if (channel.SupportsAcqRate)
+                        return true;
+                return false;
+            }
+        }
+
+        private string _globalAcqRate = "60";
+        /// <summary>The fps value applied to every camera by "Set all".</summary>
+        public string GlobalAcqRate
+        {
+            get => _globalAcqRate;
+            set { _globalAcqRate = value; RaiseChanged(nameof(GlobalAcqRate)); }
+        }
+
         public RelayCommand StartAllCommand { get; }
         public RelayCommand StopAllCommand { get; }
+        public RelayCommand SetAllAcqRateCommand { get; }
 
         private void StartAll()
         {
@@ -87,6 +109,18 @@ namespace MatroxFrameGrabber.ViewModels
             foreach (var channel in _manager.Channels)
                 channel.RefreshStats();
             RaiseChanged(nameof(AnyRecording));
+        }
+
+        /// <summary>Applies <see cref="GlobalAcqRate"/> fps to every camera that supports it.</summary>
+        private void SetAllAcqRate()
+        {
+            foreach (var channel in _manager.Channels)
+            {
+                if (!channel.SupportsAcqRate)
+                    continue;
+                channel.AcqRateInput = _globalAcqRate;
+                channel.ApplyAcqRate();
+            }
         }
 
         /// <summary>Starts recording on all grabbing cameras, or stops all if any are recording.</summary>
