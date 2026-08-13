@@ -64,12 +64,8 @@ namespace MatroxFrameGrabber.Views
                 FullscreenRequested?.Invoke(this, channel);
         }
 
-        // ----- Toolbar -----
+        // ----- Toolbar (Start/Stop/Fit/1:1 are ICommands on the channel; these need view context) -----
 
-        private void Start_Click(object sender, RoutedEventArgs e) => Channel?.StartGrab();
-        private void Stop_Click(object sender, RoutedEventArgs e) => Channel?.StopGrab();
-        private void Fit_Click(object sender, RoutedEventArgs e) => Channel?.FitToWindow();
-        private void OneToOne_Click(object sender, RoutedEventArgs e) => Channel?.ZoomActual();
         private void Fullscreen_Click(object sender, RoutedEventArgs e) => RequestFullscreen();
 
         private void Snapshot_Click(object sender, RoutedEventArgs e)

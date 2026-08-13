@@ -33,15 +33,15 @@
                        Foreground="#4FC3F7" FontSize="14" FontWeight="Bold"
                        HorizontalAlignment="Left" VerticalAlignment="Center" />
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="▶ Start" Click="Start_Click" IsEnabled="{Binding CameraPresent}" />
-                <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding CameraPresent}" />
+                <Button Content="▶ Start" Command="{Binding StartCommand}" />
+                <Button Content="■ Stop" Command="{Binding StopCommand}" />
                 <ToggleButton Content="● Rec" Style="{StaticResource RecToggle}" FontSize="11"
                               Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
                               ToolTip="Record this camera to MP4 (output folder)" />
                 <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" />
-                <Button Content="Fit" Click="Fit_Click" IsEnabled="{Binding CameraPresent}" />
-                <Button Content="1:1" Click="OneToOne_Click" IsEnabled="{Binding CameraPresent}" />
+                <Button Content="Fit" Command="{Binding FitCommand}" />
+                <Button Content="1:1" Command="{Binding OneToOneCommand}" />
                 <Button Content="⤢" Click="Fullscreen_Click" ToolTip="Fullscreen (double-click view; ESC to return)" />
             </StackPanel>
         </Grid>

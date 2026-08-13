@@ -107,7 +107,18 @@ namespace MatroxFrameGrabber.Mil
         {
             _index = index;
             _outputName = $"Camera {_index}";
+
+            StartCommand = new RelayCommand(StartGrab, () => CameraPresent);
+            StopCommand = new RelayCommand(StopGrab, () => CameraPresent);
+            FitCommand = new RelayCommand(FitToWindow, () => CameraPresent);
+            OneToOneCommand = new RelayCommand(ZoomActual, () => CameraPresent);
         }
+
+        // View/acquisition commands for the pane toolbar (dialog-free actions).
+        public RelayCommand StartCommand { get; }
+        public RelayCommand StopCommand { get; }
+        public RelayCommand FitCommand { get; }
+        public RelayCommand OneToOneCommand { get; }
 
         #region Basic properties (bound in XAML)
 
