@@ -25,10 +25,13 @@ namespace MatroxFrameGrabber.Infrastructure
                 "MatroxFrameGrabber");
         private static readonly string SettingsPath = Path.Combine(SettingsDir, "settings.json");
 
-        private string _outputFolder =
+        private static readonly string DefaultFolder =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "MatroxCapture");
+
+        private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
         private string _ffmpegPath = "";
+        private bool _loading;   // suppresses Save() while Load() applies persisted values
 
         /// <summary>Optional explicit path to ffmpeg.exe. Empty = auto-detect.</summary>
         public string FfmpegPath
@@ -40,7 +43,11 @@ namespace MatroxFrameGrabber.Infrastructure
         public string OutputFolder
         {
             get => _outputFolder;
-            set { if (_outputFolder != value) { _outputFolder = value; RaiseChanged(nameof(OutputFolder)); Save(); } }
+            set
+            {
+                string v = string.IsNullOrWhiteSpace(value) ? DefaultFolder : value;
+                if (_outputFolder != v) { _outputFolder = v; RaiseChanged(nameof(OutputFolder)); Save(); }
+            }
         }
 
         public OutputResolution Resolution
@@ -79,31 +86,50 @@ namespace MatroxFrameGrabber.Infrastructure
 
         #region Persistence
 
+        // Plain DTO so (de)serialization never runs through the observable setters (which Save()).
+        private class Dto
+        {
+            public string OutputFolder { get; set; }
+            [JsonConverter(typeof(JsonStringEnumConverter))]
+            public OutputResolution Resolution { get; set; }
+            public string FfmpegPath { get; set; }
+        }
+
+        private static readonly JsonSerializerOptions JsonOpts =
+            new JsonSerializerOptions { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
+
         public static OutputSettings Load()
         {
+            var s = new OutputSettings { _loading = true };
             try
             {
                 if (File.Exists(SettingsPath))
                 {
-                    var loaded = JsonSerializer.Deserialize<OutputSettings>(File.ReadAllText(SettingsPath));
-                    if (loaded != null)
-                        return loaded;
+                    var dto = JsonSerializer.Deserialize<Dto>(File.ReadAllText(SettingsPath), JsonOpts);
+                    if (dto != null)
+                    {
+                        s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
+                        s._resolution = dto.Resolution;
+                        s._ffmpegPath = dto.FfmpegPath ?? "";
+                    }
                 }
             }
             catch
             {
-                // Corrupt/unreadable settings — fall back to defaults.
+                // Corrupt/unreadable settings — keep defaults.
             }
-            return new OutputSettings();
+            s._loading = false;
+            return s;
         }
 
         public void Save()
         {
+            if (_loading) return;   // don't rewrite while applying loaded values
             try
             {
                 Directory.CreateDirectory(SettingsDir);
-                File.WriteAllText(SettingsPath,
-                    JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+                var dto = new Dto { OutputFolder = _outputFolder, Resolution = _resolution, FfmpegPath = _ffmpegPath };
+                File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }
             catch
             {

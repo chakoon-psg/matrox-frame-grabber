@@ -15,15 +15,17 @@ namespace MatroxFrameGrabber.ViewModels
     {
         private readonly MilApplicationManager _manager;
         private readonly DispatcherTimer _statsTimer;
-        private bool _isRunning;
 
         public MainViewModel(MilApplicationManager manager)
         {
             _manager = manager;
 
-            StartAllCommand = new RelayCommand(StartAll, () => !_isRunning);
-            StopAllCommand = new RelayCommand(StopAll, () => _isRunning);
+            // Always enabled: cameras can also be started/stopped individually from their panes,
+            // so gating these on a single "running" flag would desync.
+            StartAllCommand = new RelayCommand(StartAll);
+            StopAllCommand = new RelayCommand(StopAll);
 
+            // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += (s, e) =>
             {
@@ -31,6 +33,7 @@ namespace MatroxFrameGrabber.ViewModels
                     channel.RefreshStats();
                 RaiseChanged(nameof(AnyRecording));
             };
+            _statsTimer.Start();
         }
 
         /// <summary>The camera channels, bound by index in the XAML.</summary>
@@ -76,19 +79,13 @@ namespace MatroxFrameGrabber.ViewModels
         private void StartAll()
         {
             _manager.StartAll();
-            _isRunning = true;
-            _statsTimer.Start();
-            RefreshCommandStates();
         }
 
         private void StopAll()
         {
             _manager.StopAll();
-            _isRunning = false;
-            _statsTimer.Stop();
             foreach (var channel in _manager.Channels)
                 channel.RefreshStats();
-            RefreshCommandStates();
             RaiseChanged(nameof(AnyRecording));
         }
 
@@ -110,12 +107,6 @@ namespace MatroxFrameGrabber.ViewModels
         public void Shutdown()
         {
             _statsTimer.Stop();
-        }
-
-        private void RefreshCommandStates()
-        {
-            StartAllCommand.RaiseCanExecuteChanged();
-            StopAllCommand.RaiseCanExecuteChanged();
         }
 
         #region INotifyPropertyChanged

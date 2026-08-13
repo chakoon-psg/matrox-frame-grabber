@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
 using MatroxFrameGrabber.Infrastructure;
 
@@ -98,12 +100,18 @@ namespace MatroxFrameGrabber.Mil
         private string _outputName;
         private readonly object _recordLock = new object();
         private FfmpegRecorder _recorder;
+        private volatile bool _isRecording;        // volatile: read on the hook + UI/timer threads
         private MIL_ID _captureBuf = MIL.M_NULL;   // packed BGR24 / mono at encode size (for MbufGet)
         private MIL_ID _resizeBuf = MIL.M_NULL;    // downscale intermediate (M_NULL if no resize)
-        private double _feedScale = 1.0;
+        private double _feedScaleX = 1.0, _feedScaleY = 1.0;
         private int _recW, _recH, _recBpp;
-        private bool _isRecording;
+        private int _recShift;                     // right-shift for >8-bit sources (0 = none)
         private string _recordFilePath;
+        private DateTime _recordStart;
+        private volatile bool _recordFailed;
+        private string _lastRecordError;
+        private Task _finalizeTask;
+        private ConcurrentQueue<byte[]> _framePool; // reused frame buffers to avoid per-frame LOH allocs
 
         #endregion
 
@@ -136,12 +144,12 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>True while a recording is in progress for this camera.</summary>
-        public bool IsRecording
-        {
-            get { lock (_recordLock) { return _isRecording; } }
-        }
+        public bool IsRecording => _isRecording;   // volatile field, no lock needed to read
 
-        /// <summary>Whether the board provides a hardware H.264 encoder for recording.</summary>
+        /// <summary>Last recording error surfaced to the UI (null if none).</summary>
+        public string LastRecordError => _lastRecordError;
+
+        /// <summary>Whether recording is possible (ffmpeg available).</summary>
         public bool CanRecord { get; private set; }
 
         /// <summary>Shared app-wide output settings (folder + resolution). Set by the manager.</summary>
@@ -159,7 +167,13 @@ namespace MatroxFrameGrabber.Mil
             {
                 if (!CameraPresent)
                     return "No camera";
-                string rec = IsRecording ? "  ● REC" : "";
+                string rec = "";
+                if (_isRecording)
+                {
+                    int secs = (int)(DateTime.Now - _recordStart).TotalSeconds;
+                    long dropped = _recorder?.DroppedFrames ?? 0;
+                    rec = $"  ● REC {secs / 60:00}:{secs % 60:00}" + (dropped > 0 ? $" (dropped {dropped})" : "");
+                }
                 if (_isGrabbing)
                     return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){rec}";
                 if (_grabBuffers.Count < MIN_USABLE_GRAB_BUFFERS)
@@ -191,8 +205,8 @@ namespace MatroxFrameGrabber.Mil
             set
             {
                 if (_exposureAuto == value) return;
-                SetExposureAuto(value);
-                _exposureAuto = value;
+                if (SetExposureAuto(value))     // only commit if the camera accepted it
+                    _exposureAuto = value;
                 RaisePropertyChanged(nameof(ExposureAuto));
                 RaisePropertyChanged(nameof(CanSetExposureManually));
                 RefreshExposureReadback();
@@ -236,8 +250,8 @@ namespace MatroxFrameGrabber.Mil
             set
             {
                 if (_whiteBalanceAuto == value) return;
-                SetWhiteBalanceAuto(value);
-                _whiteBalanceAuto = value;
+                if (SetWhiteBalanceAuto(value))
+                    _whiteBalanceAuto = value;
                 RaisePropertyChanged(nameof(WhiteBalanceAuto));
                 RaisePropertyChanged(nameof(CanSetBalanceManually));
                 RefreshWhiteBalanceReadback();
@@ -297,20 +311,27 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
                 try
                 {
-                    MIL.MdigAlloc(_sysId, MIL.M_DEV0 + _index, _dcfName, MIL.M_DEFAULT, ref _digId);
-                }
-                catch (MILException)
-                {
-                    _digId = MIL.M_NULL;
-                }
+                    try
+                    {
+                        MIL.MdigAlloc(_sysId, MIL.M_DEV0 + _index, _dcfName, MIL.M_DEFAULT, ref _digId);
+                    }
+                    catch (MILException)
+                    {
+                        _digId = MIL.M_NULL;
+                    }
 
-                if (_digId != MIL.M_NULL &&
-                    MIL.MdigInquire(_digId, MIL.M_CAMERA_PRESENT, MIL.M_NULL) == MIL.M_NO)
-                {
-                    MIL.MdigFree(_digId);
-                    _digId = MIL.M_NULL;
+                    if (_digId != MIL.M_NULL &&
+                        MIL.MdigInquire(_digId, MIL.M_CAMERA_PRESENT, MIL.M_NULL) == MIL.M_NO)
+                    {
+                        MIL.MdigFree(_digId);
+                        _digId = MIL.M_NULL;
+                    }
                 }
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                finally
+                {
+                    // Always restore error printing, even if an unexpected exception escaped above.
+                    MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                }
 
                 if (_digId != MIL.M_NULL)
                 {
@@ -319,8 +340,7 @@ namespace MatroxFrameGrabber.Mil
                     sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
                     bufType = MIL.MdigInquire(_digId, MIL.M_TYPE, MIL.M_NULL);
 
-                    // Recording is done by piping frames to ffmpeg (the MIL license here does not
-                    // permit Mseq compression). Enable the Rec button only if ffmpeg is available.
+                    // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
                     CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
                     RaisePropertyChanged(nameof(CanRecord));
                 }
@@ -362,24 +382,30 @@ namespace MatroxFrameGrabber.Mil
                 // M_THROW_EXCEPTION enabled a shortfall would otherwise abort startup, so each
                 // allocation is guarded and we simply stop once the pool is exhausted.
                 MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
-                for (int i = 0; i < REQUESTED_GRAB_BUFFERS; i++)
+                try
                 {
-                    MIL_ID buf = MIL.M_NULL;
-                    try
+                    for (int i = 0; i < REQUESTED_GRAB_BUFFERS; i++)
                     {
-                        MIL.MbufAllocColor(_sysId, sizeBand, sizeX, sizeY, bufType,
-                            MIL.M_IMAGE + MIL.M_GRAB + MIL.M_PROC, ref buf);
+                        MIL_ID buf = MIL.M_NULL;
+                        try
+                        {
+                            MIL.MbufAllocColor(_sysId, sizeBand, sizeX, sizeY, bufType,
+                                MIL.M_IMAGE + MIL.M_GRAB + MIL.M_PROC, ref buf);
+                        }
+                        catch (MILException)
+                        {
+                            buf = MIL.M_NULL;
+                        }
+                        if (buf == MIL.M_NULL)
+                            break;
+                        MIL.MbufClear(buf, 0);
+                        _grabBuffers.Add(buf);
                     }
-                    catch (MILException)
-                    {
-                        buf = MIL.M_NULL;
-                    }
-                    if (buf == MIL.M_NULL)
-                        break;
-                    MIL.MbufClear(buf, 0);
-                    _grabBuffers.Add(buf);
                 }
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                finally
+                {
+                    MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                }
             }
 
             RefreshFeatureState();
@@ -391,7 +417,10 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
         private void FreeCamera()
         {
-            StopGrab();
+            StopGrab();   // also stops recording (kicks off async finalize)
+
+            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
+            try { _finalizeTask?.Wait(15000); } catch { }
 
             foreach (MIL_ID buf in _grabBuffers)
             {
@@ -452,8 +481,19 @@ namespace MatroxFrameGrabber.Mil
             _hookHandle = GCHandle.Alloc(_hookData);
             _hookDelegate = new MIL_DIG_HOOK_FUNCTION_PTR(ProcessFrame);
 
-            MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
-                MIL.M_START, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
+            try
+            {
+                MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
+                    MIL.M_START, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
+            }
+            catch (MILException)
+            {
+                // Don't leak the pinned hook data / delegate if the grab failed to start.
+                if (_hookHandle.IsAllocated) _hookHandle.Free();
+                _hookDelegate = null;
+                _hookData = null;
+                throw;
+            }
 
             _isGrabbing = true;
             RaisePropertyChanged(nameof(IsGrabbing));
@@ -479,6 +519,9 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(StatusText));
         }
 
+        /// <summary>Raised when a recording stops on its own (ffmpeg died); carries the error text.</summary>
+        public event Action<CameraChannel, string> RecordingFailed;
+
         public void RefreshStats()
         {
             if (_isGrabbing && _digId != MIL.M_NULL)
@@ -486,6 +529,15 @@ namespace MatroxFrameGrabber.Mil
                 double rate = 0.0;
                 MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_RATE, ref rate);
                 _frameRate = rate;
+            }
+
+            // If ffmpeg died mid-recording, finalize and surface the error to the UI.
+            if (_recordFailed && _isRecording)
+            {
+                _recordFailed = false;
+                string err = _lastRecordError;
+                StopRecording();
+                RecordingFailed?.Invoke(this, err ?? "Recording stopped unexpectedly.");
             }
 
             RaisePropertyChanged(nameof(FrameRate));
@@ -519,6 +571,10 @@ namespace MatroxFrameGrabber.Mil
             // ---- Per-frame processing / display update ----
             MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
+            // Fast volatile check avoids taking the lock every frame when not recording.
+            if (!_isRecording)
+                return;
+
             // ---- Recording feed (guarded so start/stop can't race the feed) ----
             lock (_recordLock)
             {
@@ -533,16 +589,22 @@ namespace MatroxFrameGrabber.Mil
 
                 try
                 {
-                    // Downscale if a preset is active, then convert to a packed buffer we can read.
+                    // Downscale (fill destination exactly) if a preset is active.
                     MIL_ID src = grabbedBuffer;
                     if (_resizeBuf != MIL.M_NULL)
                     {
-                        MIL.MimResize(grabbedBuffer, _resizeBuf, _feedScale, _feedScale, MIL.M_BILINEAR);
+                        MIL.MimResize(grabbedBuffer, _resizeBuf, _feedScaleX, _feedScaleY, MIL.M_BILINEAR);
                         src = _resizeBuf;
                     }
-                    MIL.MbufCopy(src, _captureBuf);
 
-                    byte[] frame = new byte[_recW * _recH * _recBpp];
+                    // Convert into the packed capture buffer; for >8-bit sources take the top 8 bits.
+                    if (_recShift > 0)
+                        MIL.MimShift(src, _captureBuf, -_recShift);
+                    else
+                        MIL.MbufCopy(src, _captureBuf);
+
+                    byte[] frame = _framePool != null && _framePool.TryDequeue(out byte[] b)
+                        ? b : new byte[_recW * _recH * _recBpp];
                     MIL.MbufGet(_captureBuf, frame);
                     _recorder.WriteFrame(frame);
                 }
@@ -551,6 +613,14 @@ namespace MatroxFrameGrabber.Mil
                     // Drop this frame rather than tear down mid-callback.
                 }
             }
+        }
+
+        // Returns a written frame buffer to the pool (called from the ffmpeg writer thread).
+        private void ReturnFrameBuffer(byte[] buf)
+        {
+            var pool = _framePool;
+            if (pool != null && buf != null && buf.Length == _recW * _recH * _recBpp && pool.Count < 12)
+                pool.Enqueue(buf);
         }
 
         #endregion
@@ -612,7 +682,7 @@ namespace MatroxFrameGrabber.Mil
 
         #endregion
 
-        #region Recording (H.264 / MP4 via Mseq)
+        #region Recording (H.264 / MP4 via ffmpeg)
 
         /// <summary>
         /// Starts recording this camera to {OutputName}_{timestamp}.mp4 in the output folder,
@@ -621,66 +691,91 @@ namespace MatroxFrameGrabber.Mil
         public bool StartRecording()
         {
             OutputSettings settings = Output;
-            if (!CameraPresent || settings == null)
+            if (!CameraPresent || settings == null || _isRecording)
                 return false;
 
             string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(settings.FfmpegPath);
             if (ffmpeg == null)
-                return false;
-
-            lock (_recordLock)
             {
-                if (_isRecording)
-                    return true;
-                try
+                _lastRecordError = "ffmpeg was not found. Install it or set the ffmpeg path in settings.";
+                return false;
+            }
+
+            _lastRecordError = null;
+            _recordFailed = false;
+
+            // --- Build everything OUTSIDE the record lock so the acquisition hook is never stalled ---
+            MIL_ID captureBuf = MIL.M_NULL, resizeBuf = MIL.M_NULL;
+            FfmpegRecorder recorder = null;
+            try
+            {
+                string path = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.mp4");
+
+                MIL_INT band = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
+                MIL_INT srcType = MIL.MbufInquire(_dispBufId, MIL.M_TYPE, MIL.M_NULL);
+                MIL_INT srcBit = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BIT, MIL.M_NULL);
+                long srcW = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                long srcH = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+
+                double scale = settings.ScaleFactorFor(srcH);
+                long w = scale < 0.999 ? (long)(srcW * scale) : srcW;
+                long h = scale < 0.999 ? (long)(srcH * scale) : srcH;
+                w &= ~1L; h &= ~1L;                 // even dimensions for H.264
+                if (w < 2 || h < 2) { _lastRecordError = "Resolution too small."; return false; }
+
+                bool color = (long)band >= 3;
+                string pixFmt = color ? "bgr24" : "gray";
+                int bpp = color ? 3 : 1;
+                int shift = (long)srcBit > 8 ? (int)((long)srcBit - 8) : 0;
+
+                // Packed buffer we can pull interleaved bytes from with MbufGet.
+                long capAttr = color ? (MIL.M_IMAGE + MIL.M_PROC + MIL.M_PACKED + MIL.M_BGR24)
+                                     : (MIL.M_IMAGE + MIL.M_PROC);
+                MIL.MbufAllocColor(_sysId, color ? 3 : 1, w, h, 8 + MIL.M_UNSIGNED, capAttr, ref captureBuf);
+
+                // Downscale intermediate (same format as source) only when a preset shrinks it.
+                if (scale < 0.999)
+                    MIL.MbufAllocColor(_sysId, band, w, h, srcType, MIL.M_IMAGE + MIL.M_PROC, ref resizeBuf);
+
+                double fps = _frameRate > 1.0 ? _frameRate : InquireNominalFps();
+
+                recorder = new FfmpegRecorder();
+                recorder.FrameReturned = ReturnFrameBuffer;
+                recorder.Failed += OnRecorderFailed;
+                if (!recorder.Start(ffmpeg, path, (int)w, (int)h, fps, pixFmt, out string err))
                 {
-                    _recordFilePath = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.mp4");
-
-                    MIL_INT band = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
-                    MIL_INT srcType = MIL.MbufInquire(_dispBufId, MIL.M_TYPE, MIL.M_NULL);
-                    long srcW = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
-                    long srcH = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
-
-                    double scale = settings.ScaleFactorFor(srcH);
-                    long w = scale < 0.999 ? (long)(srcW * scale) : srcW;
-                    long h = scale < 0.999 ? (long)(srcH * scale) : srcH;
-                    w &= ~1L; h &= ~1L;                 // even dimensions for H.264
-                    if (w < 2 || h < 2) { return false; }
-
-                    bool color = (long)band >= 3;
-                    string pixFmt = color ? "bgr24" : "gray";
-                    _recBpp = color ? 3 : 1;
-                    _recW = (int)w;
-                    _recH = (int)h;
-                    _feedScale = scale;
-
-                    // Packed buffer we can pull interleaved bytes from with MbufGet.
-                    long capAttr = color ? (MIL.M_IMAGE + MIL.M_PROC + MIL.M_PACKED + MIL.M_BGR24)
-                                         : (MIL.M_IMAGE + MIL.M_PROC);
-                    MIL.MbufAllocColor(_sysId, color ? 3 : 1, w, h, 8 + MIL.M_UNSIGNED, capAttr, ref _captureBuf);
-
-                    // Downscale intermediate (same format as source) only when a preset shrinks it.
-                    if (scale < 0.999)
-                        MIL.MbufAllocColor(_sysId, band, w, h, srcType, MIL.M_IMAGE + MIL.M_PROC, ref _resizeBuf);
-
-                    double fps = _frameRate > 1.0 ? _frameRate : InquireNominalFps();
-
-                    _recorder = new FfmpegRecorder();
-                    if (!_recorder.Start(ffmpeg, _recordFilePath, _recW, _recH, fps, pixFmt, out _))
-                    {
-                        _recorder = null;
-                        CleanupRecordingBuffers();
-                        return false;
-                    }
-                    _isRecording = true;
-                }
-                catch (Exception)
-                {
-                    _recorder?.Stop();
-                    _recorder = null;
-                    CleanupRecordingBuffers();
+                    _lastRecordError = string.IsNullOrEmpty(err) ? "ffmpeg failed to launch." : err;
+                    recorder.Stop();
+                    if (captureBuf != MIL.M_NULL) MIL.MbufFree(captureBuf);
+                    if (resizeBuf != MIL.M_NULL) MIL.MbufFree(resizeBuf);
                     return false;
                 }
+
+                // --- Publish under the lock (fast) ---
+                lock (_recordLock)
+                {
+                    _recordFilePath = path;
+                    _captureBuf = captureBuf;
+                    _resizeBuf = resizeBuf;
+                    _recBpp = bpp;
+                    _recW = (int)w;
+                    _recH = (int)h;
+                    _recShift = shift;
+                    _feedScaleX = (double)w / srcW;
+                    _feedScaleY = (double)h / srcH;
+                    _framePool = new ConcurrentQueue<byte[]>();
+                    _recorder = recorder;
+                    _recordStart = DateTime.Now;
+                    _isRecording = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _lastRecordError = ex.Message;
+                try { recorder?.Stop(); } catch { }
+                if (captureBuf != MIL.M_NULL) try { MIL.MbufFree(captureBuf); } catch { }
+                if (resizeBuf != MIL.M_NULL) try { MIL.MbufFree(resizeBuf); } catch { }
+                return false;
             }
 
             RaisePropertyChanged(nameof(IsRecording));
@@ -688,7 +783,7 @@ namespace MatroxFrameGrabber.Mil
             return true;
         }
 
-        /// <summary>Stops recording and finalizes the .mp4 file.</summary>
+        /// <summary>Stops recording and finalizes the .mp4 file (finalization runs asynchronously).</summary>
         public void StopRecording()
         {
             FfmpegRecorder recorder;
@@ -701,13 +796,17 @@ namespace MatroxFrameGrabber.Mil
                 recorder = _recorder; _recorder = null;
                 cap = _captureBuf; _captureBuf = MIL.M_NULL;
                 rez = _resizeBuf; _resizeBuf = MIL.M_NULL;
-                _feedScale = 1.0;
+                _framePool = null;
             }
 
-            // Finalize outside the lock (ffmpeg flush can take a moment; don't stall the grab hook).
-            recorder?.Stop();
-            if (cap != MIL.M_NULL) MIL.MbufFree(cap);
-            if (rez != MIL.M_NULL) MIL.MbufFree(rez);
+            // Finalize on a background task so the UI (and window close) never freezes on the
+            // ffmpeg flush. Free() waits on this task before tearing down the MIL system.
+            _finalizeTask = Task.Run(() =>
+            {
+                try { recorder?.Stop(); } catch { }
+                try { if (cap != MIL.M_NULL) MIL.MbufFree(cap); } catch { }
+                try { if (rez != MIL.M_NULL) MIL.MbufFree(rez); } catch { }
+            });
 
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -716,7 +815,7 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Starts recording if idle, stops it if already recording.</summary>
         public bool ToggleRecording()
         {
-            if (IsRecording)
+            if (_isRecording)
             {
                 StopRecording();
                 return false;
@@ -724,12 +823,11 @@ namespace MatroxFrameGrabber.Mil
             return StartRecording();
         }
 
-        // Frees only the MIL buffers (used on a failed start; the recorder is handled by the caller).
-        private void CleanupRecordingBuffers()
+        // Called (on a background thread) when ffmpeg dies unexpectedly mid-recording.
+        private void OnRecorderFailed()
         {
-            if (_captureBuf != MIL.M_NULL) { MIL.MbufFree(_captureBuf); _captureBuf = MIL.M_NULL; }
-            if (_resizeBuf != MIL.M_NULL) { MIL.MbufFree(_resizeBuf); _resizeBuf = MIL.M_NULL; }
-            _feedScale = 1.0;
+            _recordFailed = true;
+            _lastRecordError = _recorder?.LastError ?? "ffmpeg stopped unexpectedly.";
         }
 
         private double InquireNominalFps()
@@ -771,7 +869,9 @@ namespace MatroxFrameGrabber.Mil
             string s = _outputName;
             foreach (char c in System.IO.Path.GetInvalidFileNameChars())
                 s = s.Replace(c, '_');
-            return s.Replace(' ', '_');
+            s = s.Replace(' ', '_');
+            // Always suffix the channel index so two cameras sharing a name don't collide.
+            return $"{s}_ch{_index}";
         }
 
         private static string Timestamp() => DateTime.Now.ToString("yyyyMMdd_HHmmss");

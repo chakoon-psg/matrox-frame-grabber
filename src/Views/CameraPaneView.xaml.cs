@@ -98,8 +98,11 @@ namespace MatroxFrameGrabber.Views
             bool wasRecording = channel.IsRecording;
             channel.ToggleRecording();
             if (!wasRecording && !channel.IsRecording)
-                MessageBox.Show("Failed to start recording (ffmpeg not found or failed to launch).",
+            {
+                string reason = channel.LastRecordError ?? "ffmpeg not found or failed to launch.";
+                MessageBox.Show($"Failed to start recording:\n{reason}",
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         // ----- Settings strip -----

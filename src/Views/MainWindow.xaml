@@ -22,7 +22,7 @@
                 <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
                               Margin="8,0,16,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
                               IsEnabled="{Binding AnyCanRecord}"
-                              ToolTip="Record all running cameras (requires MIL sequence-compression license)" />
+                              ToolTip="Record all running cameras to MP4 (via ffmpeg)" />
                 <TextBlock Text="Output:" VerticalAlignment="Center" Margin="0,0,4,0" />
                 <TextBox Width="300" VerticalContentAlignment="Center" IsReadOnly="True"
                          Text="{Binding Output.OutputFolder, Mode=OneWay}"
