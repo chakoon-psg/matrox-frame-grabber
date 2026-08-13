@@ -121,6 +121,44 @@ namespace MatroxFrameGrabber.Views
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
+        private System.Windows.Threading.DispatcherTimer _rawTimer;
+
+        private void RawRecord_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+
+            if (channel.IsRawRecording)
+            {
+                StopRawTimer();
+                channel.StopRawRecording();
+                return;
+            }
+
+            if (!channel.StartRawRecording(out string error))
+            {
+                MessageBox.Show(error ?? "Failed to start RAW recording.", channel.Name,
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            int seconds = channel.Output?.RawDurationSeconds ?? 0;
+            if (seconds > 0)
+            {
+                _rawTimer = new System.Windows.Threading.DispatcherTimer
+                {
+                    Interval = TimeSpan.FromSeconds(seconds)
+                };
+                _rawTimer.Tick += (s, a) => { StopRawTimer(); Channel?.StopRawRecording(); };
+                _rawTimer.Start();
+            }
+        }
+
+        private void StopRawTimer()
+        {
+            if (_rawTimer != null) { _rawTimer.Stop(); _rawTimer = null; }
+        }
+
         private void SoftTrigger_Click(object sender, RoutedEventArgs e) => Channel?.FireSoftwareTrigger();
 
         private void WhiteBalanceOnce_Click(object sender, RoutedEventArgs e) => Channel?.WhiteBalanceOnce();

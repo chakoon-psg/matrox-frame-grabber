@@ -31,7 +31,15 @@ namespace MatroxFrameGrabber.Infrastructure
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
         private string _ffmpegPath = "";
+        private int _rawDurationSeconds = 10;
         private bool _loading;   // suppresses Save() while Load() applies persisted values
+
+        /// <summary>Auto-stop duration for lossless RAW recording, in seconds. 0 = manual stop.</summary>
+        public int RawDurationSeconds
+        {
+            get => _rawDurationSeconds;
+            set { int v = value < 0 ? 0 : value; if (_rawDurationSeconds != v) { _rawDurationSeconds = v; RaiseChanged(nameof(RawDurationSeconds)); Save(); } }
+        }
 
         /// <summary>Optional explicit path to ffmpeg.exe. Empty = auto-detect.</summary>
         public string FfmpegPath
@@ -93,6 +101,7 @@ namespace MatroxFrameGrabber.Infrastructure
             [JsonConverter(typeof(JsonStringEnumConverter))]
             public OutputResolution Resolution { get; set; }
             public string FfmpegPath { get; set; }
+            public int RawDurationSeconds { get; set; } = 10;
         }
 
         private static readonly JsonSerializerOptions JsonOpts =
@@ -111,6 +120,7 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
+                        s._rawDurationSeconds = dto.RawDurationSeconds < 0 ? 0 : dto.RawDurationSeconds;
                     }
                 }
             }
@@ -128,7 +138,7 @@ namespace MatroxFrameGrabber.Infrastructure
             try
             {
                 Directory.CreateDirectory(SettingsDir);
-                var dto = new Dto { OutputFolder = _outputFolder, Resolution = _resolution, FfmpegPath = _ffmpegPath };
+                var dto = new Dto { OutputFolder = _outputFolder, Resolution = _resolution, FfmpegPath = _ffmpegPath, RawDurationSeconds = _rawDurationSeconds };
                 File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }
             catch

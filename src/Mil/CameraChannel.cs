@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
 using MatroxFrameGrabber.Infrastructure;
 
@@ -105,6 +108,20 @@ namespace MatroxFrameGrabber.Mil
         private string _outputName;
         private RecordingSession _recording;
 
+        // Lossless RAW-Bayer recording (band=1 → disk, all frames; offline ffmpeg → color MP4).
+        private const int RAW_GRAB_BUFFERS = 24;     // deep ring; band=1 frames are ~3x smaller
+        private const int RAW_DISPLAY_EVERY = 6;     // grayscale preview ~30fps at 184fps
+        private volatile RawFrameWriter _rawWriter;
+        private bool _rawRecording;
+        private bool _rawResumeGrab;
+        private bool _rawConverting;
+        private string _rawPath;
+        private int _rawW, _rawH, _rawDisplayCounter;
+        private DateTime _rawStartTime;
+        private volatile bool _rawFinishedPending;
+        private bool _rawFinishedOk;
+        private string _rawFinishedMessage;
+
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
 
@@ -179,6 +196,10 @@ namespace MatroxFrameGrabber.Mil
                     return "No camera";
                 if (_cameraLost)
                     return "⚠ Camera disconnected — press Stop";
+                if (_rawRecording)
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){RawStatusSuffix()}";
+                if (_rawConverting)
+                    return "Converting raw → MP4…";
                 string rec = _recording?.StatusSuffix() ?? "";
                 if (_isGrabbing)
                     return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){rec}";
@@ -335,11 +356,6 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         private void AllocateCamera()
         {
-            MIL_INT sizeBand = DEFAULT_SIZE_BAND;
-            MIL_INT sizeX = DEFAULT_SIZE_X;
-            MIL_INT sizeY = DEFAULT_SIZE_Y;
-            MIL_INT bufType = 8 + MIL.M_UNSIGNED;
-
             if (_cameraAvailable)
             {
                 // A fixed-digitizer board (e.g. Rapixo CXP with 4 ports) reports all its
@@ -384,15 +400,40 @@ namespace MatroxFrameGrabber.Mil
                     catch (MILException) { }
                     finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
 
-                    sizeBand = MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
-                    sizeX = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
-                    sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
-                    bufType = MIL.MdigInquire(_digId, MIL.M_TYPE, MIL.M_NULL);
-
                     // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
                     CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
                     RaisePropertyChanged(nameof(CanRecord));
                 }
+            }
+
+            AllocateBuffers(REQUESTED_GRAB_BUFFERS);
+
+            _features.Digitizer = _digId;   // may be M_NULL (no camera) — features then fail softly
+            _cameraLost = false; _lostPolls = 0;
+            RefreshFeatureState();
+
+            RaisePropertyChanged(nameof(CameraPresent));
+            RaisePropertyChanged(nameof(StatusText));
+        }
+
+        /// <summary>
+        /// Allocates the display buffer + grab-buffer ring sized to the digitizer's CURRENT payload
+        /// (band reflects the Bayer-conversion state: 3 = color, 1 = raw Bayer). Assumes the digitizer
+        /// is already allocated; also called when switching to/from raw-Bayer recording.
+        /// </summary>
+        private void AllocateBuffers(int grabCount)
+        {
+            MIL_INT sizeBand = DEFAULT_SIZE_BAND;
+            MIL_INT sizeX = DEFAULT_SIZE_X;
+            MIL_INT sizeY = DEFAULT_SIZE_Y;
+            MIL_INT bufType = 8 + MIL.M_UNSIGNED;
+
+            if (_digId != MIL.M_NULL)
+            {
+                sizeBand = MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
+                sizeX = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+                sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+                bufType = MIL.MdigInquire(_digId, MIL.M_TYPE, MIL.M_NULL);
             }
 
             // Display buffer (viewable + processable). The hook copies frames here, so it is
@@ -433,7 +474,7 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
                 try
                 {
-                    for (int i = 0; i < REQUESTED_GRAB_BUFFERS; i++)
+                    for (int i = 0; i < grabCount; i++)
                     {
                         MIL_ID buf = MIL.M_NULL;
                         try
@@ -456,23 +497,11 @@ namespace MatroxFrameGrabber.Mil
                     MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
                 }
             }
-
-            _features.Digitizer = _digId;   // may be M_NULL (no camera) — features then fail softly
-            _cameraLost = false; _lostPolls = 0;
-            RefreshFeatureState();
-
-            RaisePropertyChanged(nameof(CameraPresent));
-            RaisePropertyChanged(nameof(StatusText));
         }
 
-        /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
-        private void FreeCamera()
+        /// <summary>Frees the grab ring + display buffer, keeping the digitizer and display alive.</summary>
+        private void FreeBuffers()
         {
-            StopGrab();   // also stops recording (kicks off async finalize)
-
-            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
-            _recording?.WaitFinalize(15000);
-
             foreach (MIL_ID buf in _grabBuffers)
             {
                 if (buf != MIL.M_NULL)
@@ -488,6 +517,22 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MbufFree(_dispBufId);
                 _dispBufId = MIL.M_NULL;
             }
+        }
+
+        /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
+        private void FreeCamera()
+        {
+            // Stop any raw capture first so the board's Bayer conversion is restored to color
+            // (it's a persistent setting) and the .raw file is flushed before we free MIL resources.
+            if (_rawRecording)
+                StopRawRecording();
+
+            StopGrab();   // also stops recording (kicks off async finalize)
+
+            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
+            _recording?.WaitFinalize(15000);
+
+            FreeBuffers();
 
             if (_digId != MIL.M_NULL)
             {
@@ -614,6 +659,14 @@ namespace MatroxFrameGrabber.Mil
                 RecordingFailed?.Invoke(this, err ?? "Recording stopped unexpectedly.");
             }
 
+            // Surface a completed raw-MP4 conversion (set by the background convert task).
+            if (_rawFinishedPending)
+            {
+                _rawFinishedPending = false;
+                RaisePropertyChanged(nameof(StatusText));
+                RawRecordingFinished?.Invoke(this, _rawFinishedOk, _rawFinishedMessage);
+            }
+
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
             RaisePropertyChanged(nameof(StatusText));
@@ -642,6 +695,21 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         private void OnGrabbedFrame(MIL_ID grabbedBuffer, MIL_ID displayBuffer)
         {
+            // ---- Lossless RAW capture: write EVERY frame to disk; throttled grayscale preview ----
+            RawFrameWriter rw = _rawWriter;
+            if (rw != null)
+            {
+                byte[] buf = rw.Rent();
+                MIL.MbufGet(grabbedBuffer, buf);     // band-1 8-bit → frameBytes
+                rw.Enqueue(buf);
+                if (++_rawDisplayCounter >= RAW_DISPLAY_EVERY)
+                {
+                    _rawDisplayCounter = 0;
+                    MIL.MbufCopy(grabbedBuffer, displayBuffer);   // band1 → band1 (grayscale)
+                }
+                return;
+            }
+
             // ---- Per-frame processing / display update ----
             MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
@@ -716,7 +784,7 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         public bool StartRecording()
         {
-            if (!CameraPresent || _recording == null)
+            if (!CameraPresent || _recording == null || _rawRecording)
                 return false;
             double fps = _frameRate > 1.0 ? _frameRate : InquireNominalFps();
             bool ok = _recording.Start(_dispBufId, Output, SafeName(), fps, out _);
@@ -744,6 +812,217 @@ namespace MatroxFrameGrabber.Mil
                 return false;
             }
             return StartRecording();
+        }
+
+        #endregion
+
+        #region Lossless RAW-Bayer recording
+
+        /// <summary>True while a lossless raw-Bayer capture is in progress.</summary>
+        public bool IsRawRecording => _rawRecording;
+
+        /// <summary>Raised (on the UI thread, via RefreshStats) when a raw recording's MP4 conversion
+        /// finishes; ok=false carries an error message.</summary>
+        public event Action<CameraChannel, bool, string> RawRecordingFinished;
+
+        /// <summary>Enables/disables the board's hardware Bayer→RGB conversion (disabled = raw band=1).</summary>
+        private bool SetBayerConversion(bool enable)
+        {
+            if (_digId == MIL.M_NULL) return false;
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try { MIL.MdigControl(_digId, MIL.M_BAYER_CONVERSION, enable ? MIL.M_ENABLE : MIL.M_DISABLE); return true; }
+            catch (MILException) { return false; }
+            finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
+        }
+
+        /// <summary>
+        /// Starts a lossless capture: disables hardware Bayer conversion (raw band=1), grabs every frame
+        /// to a .raw file with a deep DMA ring, and shows a throttled grayscale preview. Pair with
+        /// <see cref="StopRawRecording"/>; it restores color and transcodes the .raw to a color MP4.
+        /// </summary>
+        public bool StartRawRecording(out string error)
+        {
+            error = null;
+            if (_digId == MIL.M_NULL) { error = "No camera."; return false; }
+            if (_rawRecording) return true;
+            if (IsRecording) { error = "Stop the color recording first."; return false; }
+            if (!CanRecord) { error = "ffmpeg was not found (needed to convert the recording)."; return false; }
+
+            string folder;
+            try { folder = Output?.EnsureFolder(); }
+            catch (Exception e) { error = "Output folder error: " + e.Message; return false; }
+            if (string.IsNullOrEmpty(folder)) { error = "No output folder set."; return false; }
+
+            _rawResumeGrab = _isGrabbing;
+            if (_isGrabbing) StopGrab();
+
+            SetBayerConversion(false);          // board sends raw Bayer band=1 (~3x smaller)
+            FreeBuffers();
+            AllocateBuffers(RAW_GRAB_BUFFERS);  // band=1 display + deep band=1 grab ring
+
+            _rawW = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+            _rawH = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+            int band = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
+
+            if (band != 1)
+            {
+                // Camera has no Bayer filter (mono) or the board ignored the request — abort safely.
+                error = "This camera does not support raw Bayer (band=1) capture.";
+                RestoreColorAfterRaw();
+                return false;
+            }
+
+            _rawPath = Path.Combine(folder, $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}.raw");
+            try
+            {
+                _rawWriter = new RawFrameWriter(_rawPath, _rawW * _rawH * band);
+            }
+            catch (Exception e)
+            {
+                error = "Could not open output file: " + e.Message;
+                RestoreColorAfterRaw();
+                return false;
+            }
+
+            _rawDisplayCounter = 0;
+            _rawStartTime = DateTime.Now;
+            _rawRecording = true;
+            StartGrab();
+
+            RaisePropertyChanged(nameof(IsRawRecording));
+            RaisePropertyChanged(nameof(StatusText));
+            return true;
+        }
+
+        /// <summary>Stops the raw capture, restores color grabbing, and kicks off async MP4 conversion.</summary>
+        public void StopRawRecording()
+        {
+            if (!_rawRecording)
+                return;
+
+            if (_isGrabbing) StopGrab();
+
+            RawFrameWriter w = _rawWriter;
+            _rawWriter = null;
+            _rawRecording = false;
+
+            long written = 0; bool writeFailed = false; string writeErr = null;
+            if (w != null)
+            {
+                w.CompleteAndWait(20000);
+                written = w.FramesWritten;
+                writeFailed = w.Failed;
+                writeErr = w.LastError;
+                w.Dispose();
+            }
+
+            double elapsed = Math.Max(0.001, (DateTime.Now - _rawStartTime).TotalSeconds);
+            double fps = written > 0 ? written / elapsed : InquireNominalFps();
+
+            RestoreColorAfterRaw();
+
+            // Transcode the raw Bayer file to a color MP4 in the background (playback-realtime-ish).
+            _rawConverting = true;
+            RaisePropertyChanged(nameof(StatusText));
+            string rawPath = _rawPath;
+            int w2 = _rawW, h2 = _rawH;
+            _ = ConvertRawToMp4Async(rawPath, w2, h2, fps, writeFailed, writeErr);
+        }
+
+        /// <summary>Re-enables color Bayer conversion, restores normal buffers, and resumes grabbing.</summary>
+        private void RestoreColorAfterRaw()
+        {
+            _rawWriter = null;
+            _rawRecording = false;
+            SetBayerConversion(true);
+            FreeBuffers();
+            AllocateBuffers(REQUESTED_GRAB_BUFFERS);
+            if (_rawResumeGrab) StartGrab();
+            RaisePropertyChanged(nameof(IsRawRecording));
+            RaisePropertyChanged(nameof(StatusText));
+        }
+
+        private async Task ConvertRawToMp4Async(string rawPath, int width, int height, double fps,
+            bool writeFailed, string writeErr)
+        {
+            bool ok = false;
+            string message;
+            try
+            {
+                string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath);
+                string mp4 = Path.ChangeExtension(rawPath, ".mp4");
+
+                if (writeFailed)
+                    message = "Disk write failed: " + (writeErr ?? "unknown");
+                else if (ffmpeg == null)
+                    message = "ffmpeg not found; raw file kept: " + rawPath;
+                else if (!File.Exists(rawPath))
+                    message = "Raw file missing: " + rawPath;
+                else
+                {
+                    var psi = new ProcessStartInfo(ffmpeg)
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardError = true
+                    };
+                    foreach (string a in new[]
+                    {
+                        "-hide_banner", "-loglevel", "error",
+                        "-f", "rawvideo", "-pixel_format", "bayer_rggb8",
+                        "-video_size", $"{width}x{height}",
+                        "-framerate", fps.ToString("F3", CultureInfo.InvariantCulture),
+                        "-i", rawPath,
+                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart", "-y", mp4
+                    })
+                        psi.ArgumentList.Add(a);
+
+                    using var proc = Process.Start(psi);
+                    string stderr = await proc.StandardError.ReadToEndAsync();
+                    await proc.WaitForExitAsync();
+
+                    if (proc.ExitCode == 0)
+                    {
+                        ok = true;
+                        message = mp4;
+                        try { File.Delete(rawPath); } catch { /* keep raw if delete fails */ }
+                    }
+                    else
+                    {
+                        message = "ffmpeg failed (raw kept). " + TailLine(stderr);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                message = "Conversion error: " + e.Message;
+            }
+
+            // Surface the result on the UI thread via RefreshStats (mirrors RecordingFailed).
+            _rawFinishedOk = ok;
+            _rawFinishedMessage = message;
+            _rawConverting = false;
+            _rawFinishedPending = true;
+        }
+
+        private static string TailLine(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return "";
+            string[] lines = s.Trim().Split('\n');
+            return lines[lines.Length - 1].Trim();
+        }
+
+        private string RawStatusSuffix()
+        {
+            if (_rawRecording)
+            {
+                var t = DateTime.Now - _rawStartTime;
+                return $"  ● REC RAW {(int)t.TotalMinutes:00}:{t.Seconds:00}";
+            }
+            if (_rawConverting)
+                return "  (converting → MP4…)";
+            return "";
         }
 
         private double InquireNominalFps()

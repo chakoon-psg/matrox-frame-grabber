@@ -33,6 +33,7 @@ namespace MatroxFrameGrabber.ViewModels
                 foreach (var channel in _manager.Channels)
                     channel.RefreshStats();
                 RaiseChanged(nameof(AnyRecording));
+                RaiseChanged(nameof(AnyRawRecording));
             };
             _statsTimer.Start();
         }
@@ -121,6 +122,64 @@ namespace MatroxFrameGrabber.ViewModels
                 channel.AcqRateInput = _globalAcqRate;
                 channel.ApplyAcqRate();
             }
+        }
+
+        /// <summary>True if any camera is currently doing a lossless RAW recording.</summary>
+        public bool AnyRawRecording
+        {
+            get
+            {
+                foreach (var channel in _manager.Channels)
+                    if (channel.IsRawRecording)
+                        return true;
+                return false;
+            }
+        }
+
+        /// <summary>Auto-stop duration (seconds) for RAW recording; 0 = manual. Persisted via Output.</summary>
+        public string RawSeconds
+        {
+            get => Output.RawDurationSeconds.ToString();
+            set
+            {
+                if (int.TryParse(value, out int s))
+                    Output.RawDurationSeconds = s;
+                RaiseChanged(nameof(RawSeconds));
+            }
+        }
+
+        private DispatcherTimer _rawAllTimer;
+
+        /// <summary>Starts a lossless RAW recording on every present camera, or stops all if any are.</summary>
+        public void ToggleRawAll()
+        {
+            if (AnyRawRecording)
+            {
+                StopRawAll();
+                return;
+            }
+
+            foreach (var channel in _manager.Channels)
+                if (channel.CameraPresent)
+                    channel.StartRawRecording(out _);
+            RaiseChanged(nameof(AnyRawRecording));
+
+            int seconds = Output.RawDurationSeconds;
+            if (seconds > 0)
+            {
+                _rawAllTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(seconds) };
+                _rawAllTimer.Tick += (s, e) => StopRawAll();
+                _rawAllTimer.Start();
+            }
+        }
+
+        private void StopRawAll()
+        {
+            if (_rawAllTimer != null) { _rawAllTimer.Stop(); _rawAllTimer = null; }
+            foreach (var channel in _manager.Channels)
+                if (channel.IsRawRecording)
+                    channel.StopRawRecording();
+            RaiseChanged(nameof(AnyRawRecording));
         }
 
         /// <summary>Starts recording on all grabbing cameras, or stops all if any are recording.</summary>

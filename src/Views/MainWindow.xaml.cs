@@ -43,6 +43,7 @@ namespace MatroxFrameGrabber.Views
                 {
                     ch.RecordingFailed += OnRecordingFailed;
                     ch.CameraLost += OnCameraLost;
+                    ch.RawRecordingFinished += OnRawRecordingFinished;
                 }
 
                 _viewModel = new MainViewModel(_manager);
@@ -125,6 +126,19 @@ namespace MatroxFrameGrabber.Views
         private void RecordAll_Click(object sender, RoutedEventArgs e)
         {
             _viewModel?.ToggleRecordAll();
+        }
+
+        private void RawAll_Click(object sender, RoutedEventArgs e)
+        {
+            _viewModel?.ToggleRawAll();
+        }
+
+        // Only surface RAW conversion FAILURES (success just leaves the .mp4 in the output folder).
+        private void OnRawRecordingFinished(CameraChannel channel, bool ok, string message)
+        {
+            if (!ok)
+                MessageBox.Show($"RAW recording could not be converted:\n{message}", channel.Name,
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
         // ----- Fullscreen -----

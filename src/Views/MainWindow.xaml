@@ -20,9 +20,18 @@
                 <Button Content="Stop All" MinWidth="80" Padding="10,4"
                         Command="{Binding StopAllCommand}" />
                 <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
-                              Margin="8,0,16,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
+                              Margin="8,0,6,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
                               IsEnabled="{Binding AnyCanRecord}"
-                              ToolTip="Record all running cameras to MP4 (via ffmpeg)" />
+                              ToolTip="Record all running cameras to MP4 (live color, may drop frames at high fps)" />
+                <ToggleButton Content="⬤ RAW All" Style="{StaticResource RecToggle}" Padding="10,4"
+                              Margin="0,0,4,0" Click="RawAll_Click" IsChecked="{Binding AnyRawRecording, Mode=OneWay}"
+                              IsEnabled="{Binding AnyCanRecord}"
+                              ToolTip="Lossless RAW record all cameras: every frame at full fps → color MP4" />
+                <TextBox Width="34" VerticalContentAlignment="Center"
+                         Text="{Binding RawSeconds, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="RAW auto-stop seconds (0 = manual stop)" />
+                <TextBlock Text="s" VerticalAlignment="Center" Margin="3,0,16,0"
+                           Foreground="{StaticResource MutedTextBrush}" />
                 <TextBlock Text="Output:" VerticalAlignment="Center" Margin="0,0,4,0" />
                 <TextBox Width="300" VerticalContentAlignment="Center" IsReadOnly="True"
                          Text="{Binding Output.OutputFolder, Mode=OneWay}"
