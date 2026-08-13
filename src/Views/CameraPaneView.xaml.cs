@@ -121,7 +121,6 @@ namespace MatroxFrameGrabber.Views
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
-        private void RoiFull_Click(object sender, RoutedEventArgs e) => Channel?.ApplyRoiFraction(1);
         private void RoiHalf_Click(object sender, RoutedEventArgs e) => Channel?.ApplyRoiFraction(2);
         private void RoiQuarter_Click(object sender, RoutedEventArgs e) => Channel?.ApplyRoiFraction(4);
 

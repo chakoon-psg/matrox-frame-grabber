@@ -94,6 +94,7 @@ namespace MatroxFrameGrabber.Mil
         private string _acqRateInput = "";
         private double _acqRateMax;
         private bool _supportsRoi;
+        private bool _roiEnabled;
         private string _roiHeightInput = "";
         private long _roiHeightMax;
         private long _roiHeightMin;
@@ -263,7 +264,40 @@ namespace MatroxFrameGrabber.Mil
         // ----- Region of interest (ROI height) -----
 
         /// <summary>True if the camera exposes a settable Height (sensor ROI).</summary>
-        public bool SupportsRoi { get => _supportsRoi; private set { _supportsRoi = value; RaisePropertyChanged(nameof(SupportsRoi)); } }
+        public bool SupportsRoi { get => _supportsRoi; private set { _supportsRoi = value; RaisePropertyChanged(nameof(SupportsRoi)); RaisePropertyChanged(nameof(CanSetRoi)); } }
+
+        /// <summary>
+        /// Master ROI toggle. Checking it applies the chosen ROI height (defaulting to half the
+        /// sensor if none is set yet); unchecking restores the full sensor frame.
+        /// </summary>
+        public bool RoiEnabled
+        {
+            get => _roiEnabled;
+            set
+            {
+                if (_roiEnabled == value) return;
+                _roiEnabled = value;
+                RaisePropertyChanged(nameof(RoiEnabled));
+                RaisePropertyChanged(nameof(CanSetRoi));
+                if (!_supportsRoi) return;
+
+                if (value)
+                {
+                    // Default to half height if no sensible custom target is set yet.
+                    if (!long.TryParse(_roiHeightInput, NumberStyles.Integer, CultureInfo.InvariantCulture, out long h)
+                        || h <= 0 || h >= _roiHeightMax)
+                        RoiHeightInput = (_roiHeightMax / 2).ToString(CultureInfo.InvariantCulture);
+                    ApplyRoi();
+                }
+                else
+                {
+                    ApplyRoiFraction(1);   // full frame
+                }
+            }
+        }
+
+        /// <summary>ROI height controls (presets / box / Apply) are usable only while ROI is on.</summary>
+        public bool CanSetRoi => _supportsRoi && _roiEnabled;
 
         /// <summary>Target ROI height (sensor rows) as text for the input box.</summary>
         public string RoiHeightInput { get => _roiHeightInput; set { _roiHeightInput = value; RaisePropertyChanged(nameof(RoiHeightInput)); } }
@@ -901,6 +935,15 @@ namespace MatroxFrameGrabber.Mil
                 RaisePropertyChanged(nameof(RoiHeightMax));
                 RaisePropertyChanged(nameof(RoiHint));
                 RefreshRoiReadback();
+
+                // Reflect the camera's actual state: a Height below the sensor max means an ROI is
+                // active (e.g. persisted from a previous run), so the checkbox shows checked.
+                if (_features.TryGetInt64(MIL.M_FEATURE_VALUE, F_HEIGHT, out long curHeight))
+                {
+                    _roiEnabled = _roiHeightMax > 0 && curHeight < _roiHeightMax;
+                    RaisePropertyChanged(nameof(RoiEnabled));
+                    RaisePropertyChanged(nameof(CanSetRoi));
+                }
             }
 
             SupportsWhiteBalance = FeatureAvailable(F_BALANCE_WHITE_AUTO) || FeatureAvailable(F_BALANCE_RATIO);
