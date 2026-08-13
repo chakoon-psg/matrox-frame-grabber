@@ -1,0 +1,7 @@
+# Normalize line endings; let Git decide text vs binary.
+* text=auto
+
+# Windows-specific project files stay CRLF
+*.sln text eol=crlf
+*.slnx text eol=crlf
+*.csproj text eol=crlf

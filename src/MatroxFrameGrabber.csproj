@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- net6.0-windows matches the shipped MIL C# WPF examples and the installed
+         WindowsDesktop 6.0 runtime. The MIL NuGet packages only support x64/arm64,
+         so the whole app is pinned to x64. -->
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>MatroxFrameGrabber</RootNamespace>
+    <AssemblyName>MatroxFrameGrabber</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Matrox.MatroxImagingLibrary" Version="10.*" />
+    <PackageReference Include="Matrox.MatroxImagingLibrary.WPF" Version="10.*" />
+  </ItemGroup>
+
+</Project>
