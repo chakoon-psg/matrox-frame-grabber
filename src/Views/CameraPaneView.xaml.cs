@@ -121,6 +121,19 @@ namespace MatroxFrameGrabber.Views
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
+        private void RoiFull_Click(object sender, RoutedEventArgs e) => Channel?.ApplyRoiFraction(1);
+        private void RoiHalf_Click(object sender, RoutedEventArgs e) => Channel?.ApplyRoiFraction(2);
+        private void RoiQuarter_Click(object sender, RoutedEventArgs e) => Channel?.ApplyRoiFraction(4);
+
+        private void ApplyRoi_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyRoi())
+                MessageBox.Show("Failed to set ROI height (value out of range or feature unavailable).",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         private void SoftTrigger_Click(object sender, RoutedEventArgs e) => Channel?.FireSoftwareTrigger();
 
         private void WhiteBalanceOnce_Click(object sender, RoutedEventArgs e) => Channel?.WhiteBalanceOnce();

@@ -94,6 +94,20 @@
                                 IsEnabled="{Binding CanSetAcqRate}" />
                     </StackPanel>
 
+                    <!-- ROI (sensor height) — smaller = higher fps -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3"
+                                IsEnabled="{Binding SupportsRoi}">
+                        <Label Content="ROI H" Width="52" />
+                        <Button Content="Full" Click="RoiFull_Click" ToolTip="Full sensor height" />
+                        <Button Content="½" Click="RoiHalf_Click" Margin="3,0,0,0" ToolTip="Half height" />
+                        <Button Content="¼" Click="RoiQuarter_Click" Margin="3,0,6,0" ToolTip="Quarter height" />
+                        <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                                 Text="{Binding RoiHeightInput, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Text="{Binding RoiHint}" Margin="4,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                        <Button Content="Apply" Click="ApplyRoi_Click" />
+                    </StackPanel>
+
                     <!-- Trigger -->
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
                         <Label Content="Trig" Width="34" />

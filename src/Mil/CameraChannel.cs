@@ -41,6 +41,11 @@ namespace MatroxFrameGrabber.Mil
         private const string F_TRIGGER_SOFTWARE = "TriggerSoftware";
         private const string F_ACQ_RATE = "AcquisitionFrameRate";
         private const string F_ACQ_RATE_ENABLE = "AcquisitionFrameRateEnable";
+        private const string F_WIDTH = "Width";
+        private const string F_HEIGHT = "Height";
+        private const string F_HEIGHT_MAX = "HeightMax";   // fixed sensor height (offset-independent)
+        private const string F_OFFSET_X = "OffsetX";
+        private const string F_OFFSET_Y = "OffsetY";
         private const string F_BALANCE_WHITE_AUTO = "BalanceWhiteAuto";
         private const string F_BALANCE_RATIO_SELECTOR = "BalanceRatioSelector";
         private const string F_BALANCE_RATIO = "BalanceRatio";
@@ -88,6 +93,11 @@ namespace MatroxFrameGrabber.Mil
         private bool _acqRateEnabled;
         private string _acqRateInput = "";
         private double _acqRateMax;
+        private bool _supportsRoi;
+        private string _roiHeightInput = "";
+        private long _roiHeightMax;
+        private long _roiHeightMin;
+        private long _roiHeightInc;
         private string _exposureInput = "";
         private double _exposureMin;
         private double _exposureMax;
@@ -250,6 +260,19 @@ namespace MatroxFrameGrabber.Mil
 
         public string AcqRateHint => _supportsAcqRate ? $"fps  · max {_acqRateMax:0}" : "fps";
 
+        // ----- Region of interest (ROI height) -----
+
+        /// <summary>True if the camera exposes a settable Height (sensor ROI).</summary>
+        public bool SupportsRoi { get => _supportsRoi; private set { _supportsRoi = value; RaisePropertyChanged(nameof(SupportsRoi)); } }
+
+        /// <summary>Target ROI height (sensor rows) as text for the input box.</summary>
+        public string RoiHeightInput { get => _roiHeightInput; set { _roiHeightInput = value; RaisePropertyChanged(nameof(RoiHeightInput)); } }
+
+        /// <summary>Full sensor height (Height max), used by the Full/½/¼ presets.</summary>
+        public long RoiHeightMax => _roiHeightMax;
+
+        public string RoiHint => _supportsRoi ? $"rows · max {_roiHeightMax}  (fewer = higher fps)" : "";
+
         public bool TriggerOn
         {
             get => _triggerOn;
@@ -335,11 +358,6 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         private void AllocateCamera()
         {
-            MIL_INT sizeBand = DEFAULT_SIZE_BAND;
-            MIL_INT sizeX = DEFAULT_SIZE_X;
-            MIL_INT sizeY = DEFAULT_SIZE_Y;
-            MIL_INT bufType = 8 + MIL.M_UNSIGNED;
-
             if (_cameraAvailable)
             {
                 // A fixed-digitizer board (e.g. Rapixo CXP with 4 ports) reports all its
@@ -373,15 +391,40 @@ namespace MatroxFrameGrabber.Mil
 
                 if (_digId != MIL.M_NULL)
                 {
-                    sizeBand = MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
-                    sizeX = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
-                    sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
-                    bufType = MIL.MdigInquire(_digId, MIL.M_TYPE, MIL.M_NULL);
-
                     // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
                     CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
                     RaisePropertyChanged(nameof(CanRecord));
                 }
+            }
+
+            AllocateBuffers();
+
+            _features.Digitizer = _digId;   // may be M_NULL (no camera) — features then fail softly
+            _cameraLost = false; _lostPolls = 0;
+            RefreshFeatureState();
+
+            RaisePropertyChanged(nameof(CameraPresent));
+            RaisePropertyChanged(nameof(StatusText));
+        }
+
+        /// <summary>
+        /// Allocates the display buffer + grab-buffer ring sized to the digitizer's CURRENT payload
+        /// (defaults when there is no camera). Assumes the digitizer is already allocated; called on
+        /// first allocation and again after an ROI change (which resizes the digitizer payload).
+        /// </summary>
+        private void AllocateBuffers()
+        {
+            MIL_INT sizeBand = DEFAULT_SIZE_BAND;
+            MIL_INT sizeX = DEFAULT_SIZE_X;
+            MIL_INT sizeY = DEFAULT_SIZE_Y;
+            MIL_INT bufType = 8 + MIL.M_UNSIGNED;
+
+            if (_digId != MIL.M_NULL)
+            {
+                sizeBand = MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
+                sizeX = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+                sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+                bufType = MIL.MdigInquire(_digId, MIL.M_TYPE, MIL.M_NULL);
             }
 
             // Display buffer (viewable + processable). The hook copies frames here, so it is
@@ -445,23 +488,11 @@ namespace MatroxFrameGrabber.Mil
                     MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
                 }
             }
-
-            _features.Digitizer = _digId;   // may be M_NULL (no camera) — features then fail softly
-            _cameraLost = false; _lostPolls = 0;
-            RefreshFeatureState();
-
-            RaisePropertyChanged(nameof(CameraPresent));
-            RaisePropertyChanged(nameof(StatusText));
         }
 
-        /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
-        private void FreeCamera()
+        /// <summary>Frees the grab ring + display buffer, keeping the digitizer and display alive.</summary>
+        private void FreeBuffers()
         {
-            StopGrab();   // also stops recording (kicks off async finalize)
-
-            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
-            _recording?.WaitFinalize(15000);
-
             foreach (MIL_ID buf in _grabBuffers)
             {
                 if (buf != MIL.M_NULL)
@@ -477,6 +508,17 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MbufFree(_dispBufId);
                 _dispBufId = MIL.M_NULL;
             }
+        }
+
+        /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
+        private void FreeCamera()
+        {
+            StopGrab();   // also stops recording (kicks off async finalize)
+
+            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
+            _recording?.WaitFinalize(15000);
+
+            FreeBuffers();
 
             if (_digId != MIL.M_NULL)
             {
@@ -847,6 +889,20 @@ namespace MatroxFrameGrabber.Mil
                 RefreshAcqRateReadback();
             }
 
+            SupportsRoi = FeatureAvailable(F_HEIGHT);
+            if (_supportsRoi)
+            {
+                // HeightMax is the fixed sensor height (independent of OffsetY); Height's dynamic
+                // M_FEATURE_MAX would shrink as the offset grows, so prefer HeightMax for presets.
+                if (!_features.TryGetInt64(MIL.M_FEATURE_VALUE, F_HEIGHT_MAX, out _roiHeightMax))
+                    _features.TryGetInt64(MIL.M_FEATURE_MAX, F_HEIGHT, out _roiHeightMax);
+                _features.TryGetInt64(MIL.M_FEATURE_MIN, F_HEIGHT, out _roiHeightMin);
+                _features.TryGetInt64(MIL.M_FEATURE_INCREMENT, F_HEIGHT, out _roiHeightInc);
+                RaisePropertyChanged(nameof(RoiHeightMax));
+                RaisePropertyChanged(nameof(RoiHint));
+                RefreshRoiReadback();
+            }
+
             SupportsWhiteBalance = FeatureAvailable(F_BALANCE_WHITE_AUTO) || FeatureAvailable(F_BALANCE_RATIO);
             if (_supportsWhiteBalance)
             {
@@ -987,6 +1043,91 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(AcqRateHint));
             RefreshAcqRateReadback();
             return ok;
+        }
+
+        private void RefreshRoiReadback()
+        {
+            if (_supportsRoi && _features.TryGetInt64(MIL.M_FEATURE_VALUE, F_HEIGHT, out long h))
+                RoiHeightInput = h.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Applies the ROI height typed in the input box (see <see cref="ApplyRoiHeight"/>).</summary>
+        public bool ApplyRoi()
+        {
+            if (!long.TryParse(_roiHeightInput, NumberStyles.Integer, CultureInfo.InvariantCulture, out long h))
+                return false;
+            return ApplyRoiHeight(h);
+        }
+
+        /// <summary>
+        /// Sets the ROI to a fraction of the full sensor height: 1 = full, 2 = half, 4 = quarter.
+        /// </summary>
+        public bool ApplyRoiFraction(int denominator)
+        {
+            if (!_supportsRoi || _roiHeightMax <= 0)
+                return false;
+            long h = denominator <= 1 ? _roiHeightMax : _roiHeightMax / denominator;
+            return ApplyRoiHeight(h);
+        }
+
+        /// <summary>
+        /// Shrinks/restores the sensor ROI to <paramref name="height"/> rows (clamped + aligned to the
+        /// camera's Height min/increment), vertically centered via OffsetY. Reallocates the display and
+        /// grab buffers to the new payload size so the image fills the pane (no corner cropping), and
+        /// resumes grabbing if it was active. A smaller ROI is the main lever for higher frame rates —
+        /// pair it with a shorter Exposure and a raised Acq Rate to actually run faster.
+        /// </summary>
+        public bool ApplyRoiHeight(long height)
+        {
+            if (_digId == MIL.M_NULL || !_supportsRoi)
+                return false;
+
+            bool wasGrabbing = _isGrabbing;
+            if (_isGrabbing)
+                StopGrab();
+
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
+            {
+                // Zero the offset FIRST — Height's dynamic max is (sensor height − OffsetY), so with a
+                // non-zero offset the max is shrunk and a full-frame restore would clamp too low. After
+                // zeroing, re-read the (now full) min/max/increment and clamp against those.
+                _features.SetInt64(F_OFFSET_Y, 0);
+
+                long hMax = _roiHeightMax;
+                if (!_features.TryGetInt64(MIL.M_FEATURE_MAX, F_HEIGHT, out long hMaxDyn) || hMaxDyn <= 0)
+                    hMaxDyn = hMax;
+                if (hMax <= 0) hMax = hMaxDyn;
+                long hMin = _roiHeightMin > 0 ? _roiHeightMin : 1;
+                long hInc = _roiHeightInc > 1 ? _roiHeightInc : 1;
+
+                if (height > hMax) height = hMax;
+                if (height < hMin) height = hMin;
+                if (hInc > 1) height -= (height - hMin) % hInc;   // align to hMin + k·inc
+
+                _features.SetInt64(F_HEIGHT, height);
+
+                _features.TryGetInt64(MIL.M_FEATURE_VALUE, F_HEIGHT, out long hNow);
+                long offset = (hMax - hNow) / 2;
+                if (_features.TryGetInt64(MIL.M_FEATURE_INCREMENT, F_OFFSET_Y, out long offInc) && offInc > 1)
+                    offset -= offset % offInc;
+                if (offset < 0) offset = 0;
+                _features.SetInt64(F_OFFSET_Y, offset);
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+            }
+
+            // Resize the display + grab buffers to the new digitizer payload.
+            FreeBuffers();
+            AllocateBuffers();
+
+            RefreshFeatureState();   // ROI/exposure/acq-rate readbacks + new max fps headroom
+            if (wasGrabbing)
+                StartGrab();
+            FitToWindow();
+            return true;
         }
 
         private void RefreshWhiteBalanceReadback()
