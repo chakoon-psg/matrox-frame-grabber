@@ -373,6 +373,17 @@ namespace MatroxFrameGrabber.Mil
 
                 if (_digId != MIL.M_NULL)
                 {
+                    // Force hardware Bayer→RGB conversion ON (color). M_BAYER_CONVERSION is a
+                    // PERSISTENT board setting: once disabled (e.g. to grab raw band-1 Bayer) it
+                    // stays off across grabs and app restarts, and the color pipeline then misreads
+                    // the mono/raw data as a tiled/garbled image. Re-assert it here, before inquiring
+                    // M_SIZE_BAND, so buffers are always 3-band color. (Softly ignored on mono
+                    // cameras that have no Bayer filter.)
+                    MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+                    try { MIL.MdigControl(_digId, MIL.M_BAYER_CONVERSION, MIL.M_ENABLE); }
+                    catch (MILException) { }
+                    finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
+
                     sizeBand = MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
                     sizeX = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
                     sizeY = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
