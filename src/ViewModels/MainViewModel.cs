@@ -7,6 +7,9 @@ using MatroxFrameGrabber.Mil;
 
 namespace MatroxFrameGrabber.ViewModels
 {
+    /// <summary>A per-camera settings group that can be copied to every other camera at once.</summary>
+    public enum CameraSettingKind { Exposure, AcqRate, Trigger, WhiteBalance }
+
     /// <summary>
     /// Binds the camera channels, output settings, and the Start/Stop/Record commands to the
     /// main window, and drives a UI-thread timer that refreshes per-channel live statistics.
@@ -24,7 +27,6 @@ namespace MatroxFrameGrabber.ViewModels
             // so gating these on a single "running" flag would desync.
             StartAllCommand = new RelayCommand(StartAll);
             StopAllCommand = new RelayCommand(StopAll);
-            SetAllAcqRateCommand = new RelayCommand(SetAllAcqRate);
 
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -75,29 +77,8 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>True if at least one camera exposes AcquisitionFrameRate (enables "Set all").</summary>
-        public bool AnyCanAcqRate
-        {
-            get
-            {
-                foreach (var channel in _manager.Channels)
-                    if (channel.SupportsAcqRate)
-                        return true;
-                return false;
-            }
-        }
-
-        private string _globalAcqRate = "60";
-        /// <summary>The fps value applied to every camera by "Set all".</summary>
-        public string GlobalAcqRate
-        {
-            get => _globalAcqRate;
-            set { _globalAcqRate = value; RaiseChanged(nameof(GlobalAcqRate)); }
-        }
-
         public RelayCommand StartAllCommand { get; }
         public RelayCommand StopAllCommand { get; }
-        public RelayCommand SetAllAcqRateCommand { get; }
 
         private void StartAll()
         {
@@ -114,16 +95,65 @@ namespace MatroxFrameGrabber.ViewModels
             RaiseChanged(nameof(AnyRawRecording));
         }
 
-        /// <summary>Applies <see cref="GlobalAcqRate"/> fps to every camera that supports it.</summary>
-        private void SetAllAcqRate()
+        /// <summary>
+        /// Copies one settings group from <paramref name="source"/> onto every other present
+        /// camera that supports it (applying it to the hardware). Returns the number updated.
+        /// </summary>
+        public int ApplyToAll(CameraChannel source, CameraSettingKind kind)
         {
+            if (source == null) return 0;
+            int count = 0;
             foreach (var channel in _manager.Channels)
             {
-                if (!channel.SupportsAcqRate)
-                    continue;
-                channel.AcqRateInput = _globalAcqRate;
-                channel.ApplyAcqRate();
+                if (channel == source || !channel.CameraPresent) continue;
+                if (ApplySettingFrom(source, channel, kind)) count++;
             }
+            return count;
+        }
+
+        private static bool ApplySettingFrom(CameraChannel src, CameraChannel dst, CameraSettingKind kind)
+        {
+            switch (kind)
+            {
+                case CameraSettingKind.Exposure:
+                    if (!dst.SupportsExposure) return false;
+                    if (dst.SupportsExposureAuto) dst.ExposureAuto = src.ExposureAuto;
+                    if (!src.ExposureAuto)
+                    {
+                        dst.ExposureInput = src.ExposureInput;
+                        dst.ApplyExposure();
+                    }
+                    return true;
+
+                case CameraSettingKind.AcqRate:
+                    if (!dst.SupportsAcqRate) return false;
+                    if (dst.SupportsAcqRateEnable) dst.AcqRateEnabled = src.AcqRateEnabled;
+                    if (dst.CanSetAcqRate)
+                    {
+                        dst.AcqRateInput = src.AcqRateInput;
+                        dst.ApplyAcqRate();
+                    }
+                    return true;
+
+                case CameraSettingKind.Trigger:
+                    if (!dst.SupportsTrigger) return false;
+                    dst.TriggerOn = src.TriggerOn;
+                    if (!string.IsNullOrEmpty(src.SelectedTriggerSource))
+                        dst.SelectedTriggerSource = src.SelectedTriggerSource;
+                    return true;
+
+                case CameraSettingKind.WhiteBalance:
+                    if (!dst.SupportsWhiteBalance) return false;
+                    dst.WhiteBalanceAuto = src.WhiteBalanceAuto;
+                    if (!src.WhiteBalanceAuto)
+                    {
+                        dst.RedRatioInput = src.RedRatioInput;
+                        dst.BlueRatioInput = src.BlueRatioInput;
+                        dst.ApplyBalanceRatios();
+                    }
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>True if any camera is currently doing a lossless RAW recording.</summary>

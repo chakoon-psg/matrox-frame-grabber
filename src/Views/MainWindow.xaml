@@ -13,61 +13,104 @@
     <Grid>
         <!-- Main content: toolbar + 2x2 camera grid -->
         <DockPanel x:Name="MainContent" LastChildFill="True">
-            <!-- WrapPanel so the toolbar reflows onto a 2nd line instead of clipping on narrow windows.
-                 Three groups (acquisition | recording | output+settings) separated by dividers. -->
-            <WrapPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,8,8,4">
-                <!-- Group 1: acquisition -->
-                <Button Content="Start All" Style="{StaticResource AccentButton}" MinWidth="80" Padding="10,4"
-                        Command="{Binding StartAllCommand}" />
-                <Button Content="Stop All" MinWidth="80" Padding="10,4" Margin="0,0,4,0"
-                        Click="StopAll_Click" ToolTip="Stop all cameras (confirms if any are recording)" />
+            <!-- Toolbar: only the always-needed actions stay visible. Occasional settings (RAW
+                 auto-stop/segment, output resolution) live behind the ⚙ popup; per-camera values
+                 (exposure, acq rate, trigger, WB) live in each pane with their own "All" button. -->
+            <DockPanel DockPanel.Dock="Top" Margin="8,6,8,4" LastChildFill="True">
+                <!-- System / digitizer summary pinned to the right -->
+                <TextBlock DockPanel.Dock="Right" Text="{Binding SystemStatus}" VerticalAlignment="Center"
+                           Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="8,0,0,0" />
 
-                <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
+                <WrapPanel Orientation="Horizontal">
+                    <!-- Acquisition -->
+                    <Button Content="Start All" Style="{StaticResource AccentButton}" MinWidth="80" Padding="10,4"
+                            Command="{Binding StartAllCommand}" />
+                    <Button Content="Stop All" MinWidth="80" Padding="10,4" Margin="0,0,4,0"
+                            Click="StopAll_Click" ToolTip="Stop all cameras (confirms if any are recording)" />
 
-                <!-- Group 2: recording (red = live H.264, orange = RAW lossless) -->
-                <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
-                              Margin="0,0,4,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
-                              IsEnabled="{Binding AnyCanRecord}"
-                              ToolTip="Record all running cameras (live color H.264, may drop frames at high fps)" />
-                <ToggleButton Content="◆ RAW All" Style="{StaticResource RawToggle}" Padding="10,4"
-                              Margin="0,0,6,0" Click="RawAll_Click" IsChecked="{Binding AnyRawRecording, Mode=OneWay}"
-                              IsEnabled="{Binding AnyCanRecord}"
-                              ToolTip="Lossless RAW record all cameras: every frame at full fps → color MP4" />
-                <TextBlock Text="auto-stop" VerticalAlignment="Center" Margin="0,0,3,0" Foreground="{StaticResource MutedTextBrush}" />
-                <TextBox Width="30" VerticalContentAlignment="Center"
-                         Text="{Binding RawSeconds, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="RAW recording auto-stop, in seconds (0 = manual / continuous)" />
-                <TextBlock Text="s (0=∞) · seg" VerticalAlignment="Center" Margin="3,0,3,0" Foreground="{StaticResource MutedTextBrush}" />
-                <TextBox Width="30" VerticalContentAlignment="Center"
-                         Text="{Binding RawSegSeconds, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Length of each RAW MP4 segment, in seconds (min 5). Continuous recording rolls a new file every N seconds." />
-                <TextBlock Text="s" VerticalAlignment="Center" Margin="3,0,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                    <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
 
-                <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
+                    <!-- Recording (red = live H.264, orange = RAW lossless) -->
+                    <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
+                                  Margin="0,0,4,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
+                                  IsEnabled="{Binding AnyCanRecord}"
+                                  ToolTip="Record all running cameras (live color H.264, may drop frames at high fps)" />
+                    <ToggleButton Content="◆ RAW All" Style="{StaticResource RawToggle}" Padding="10,4"
+                                  Margin="0,0,4,0" Click="RawAll_Click" IsChecked="{Binding AnyRawRecording, Mode=OneWay}"
+                                  IsEnabled="{Binding AnyCanRecord}"
+                                  ToolTip="Lossless RAW record all cameras: every frame at full fps → color MP4" />
 
-                <!-- Group 3: output + global camera settings -->
-                <TextBlock Text="Output:" VerticalAlignment="Center" Margin="0,0,4,0" />
-                <TextBox Width="240" VerticalContentAlignment="Center" IsReadOnly="True"
-                         Text="{Binding Output.OutputFolder, Mode=OneWay}"
-                         ToolTip="{Binding Output.OutputFolder}" />
-                <Button Content="Browse…" Padding="8,4" Margin="4,0,4,0" Click="BrowseFolder_Click" />
-                <Button Content="Open" Padding="8,4" Margin="0,0,8,0" Click="OpenFolder_Click" />
-                <TextBlock Text="Resolution:" VerticalAlignment="Center" Margin="0,0,4,0" />
-                <ComboBox Width="100" VerticalContentAlignment="Center"
-                          ItemsSource="{Binding ResolutionOptions}"
-                          SelectedItem="{Binding Output.Resolution}" />
-                <TextBlock Text="Acq Rate:" VerticalAlignment="Center" Margin="12,0,4,0" />
-                <TextBox Width="44" VerticalContentAlignment="Center"
-                         Text="{Binding GlobalAcqRate, UpdateSourceTrigger=PropertyChanged}" />
-                <TextBlock Text="fps" VerticalAlignment="Center" Margin="4,0,4,0"
-                           Foreground="{StaticResource MutedTextBrush}" />
-                <Button Content="Set all" Padding="10,4"
-                        Command="{Binding SetAllAcqRateCommand}" IsEnabled="{Binding AnyCanAcqRate}"
-                        ToolTip="Apply this AcquisitionFrameRate (fps) to all cameras" />
-            </WrapPanel>
+                    <!-- Recording settings popup (RAW auto-stop / segment length / output resolution) -->
+                    <Button x:Name="RecSettingsButton" Padding="8,4" Click="RecSettings_Click"
+                            ToolTip="Recording settings — RAW auto-stop, segment length, output resolution">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center" />
+                            <TextBlock Text="Rec" Margin="5,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Popup x:Name="RecSettingsPopup" PlacementTarget="{Binding ElementName=RecSettingsButton}"
+                           Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
+                        <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrushColor}"
+                                BorderThickness="1" CornerRadius="4" Padding="12" Margin="0,4,0,0">
+                            <StackPanel MinWidth="230">
+                                <TextBlock Text="Recording settings" FontWeight="SemiBold"
+                                           Foreground="#E0E0E0" Margin="0,0,0,10" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
 
-            <TextBlock DockPanel.Dock="Top" Text="{Binding SystemStatus}"
-                       Margin="8,0,8,4" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="RAW auto-stop"
+                                               VerticalAlignment="Center" Margin="0,0,12,7" Foreground="#D0D0D0" />
+                                    <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,7">
+                                        <TextBox Width="46" VerticalContentAlignment="Center"
+                                                 Text="{Binding RawSeconds, UpdateSourceTrigger=PropertyChanged}"
+                                                 ToolTip="RAW recording auto-stop, in seconds (0 = manual / continuous)" />
+                                        <TextBlock Text="s (0=∞)" VerticalAlignment="Center" Margin="5,0,0,0"
+                                                   Foreground="{StaticResource MutedTextBrush}" />
+                                    </StackPanel>
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="RAW segment"
+                                               VerticalAlignment="Center" Margin="0,0,12,7" Foreground="#D0D0D0" />
+                                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,7">
+                                        <TextBox Width="46" VerticalContentAlignment="Center"
+                                                 Text="{Binding RawSegSeconds, UpdateSourceTrigger=PropertyChanged}"
+                                                 ToolTip="Length of each RAW MP4 segment, in seconds (min 5)." />
+                                        <TextBlock Text="s" VerticalAlignment="Center" Margin="5,0,0,0"
+                                                   Foreground="{StaticResource MutedTextBrush}" />
+                                    </StackPanel>
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Resolution"
+                                               VerticalAlignment="Center" Margin="0,0,12,0" Foreground="#D0D0D0" />
+                                    <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Left" Width="110"
+                                              VerticalContentAlignment="Center"
+                                              ItemsSource="{Binding ResolutionOptions}"
+                                              SelectedItem="{Binding Output.Resolution}" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+
+                    <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
+
+                    <!-- Output folder -->
+                    <Button Padding="8,4" Margin="0,0,4,0" Click="OpenFolder_Click"
+                            ToolTip="{Binding Output.OutputFolder}">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" />
+                            <TextBlock Text="Open" Margin="5,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button Content="Browse…" Padding="8,4" Click="BrowseFolder_Click"
+                            ToolTip="Change the output folder for snapshots and recordings" />
+                </WrapPanel>
+            </DockPanel>
 
             <Grid Margin="2">
                 <Grid.RowDefinitions>
@@ -80,13 +123,17 @@
                 </Grid.ColumnDefinitions>
 
                 <local:CameraPaneView Grid.Row="0" Grid.Column="0" DataContext="{Binding Channels[0]}"
-                                      FullscreenRequested="Pane_FullscreenRequested" />
+                                      FullscreenRequested="Pane_FullscreenRequested"
+                                      ApplyToAllRequested="Pane_ApplyToAllRequested" />
                 <local:CameraPaneView Grid.Row="0" Grid.Column="1" DataContext="{Binding Channels[1]}"
-                                      FullscreenRequested="Pane_FullscreenRequested" />
+                                      FullscreenRequested="Pane_FullscreenRequested"
+                                      ApplyToAllRequested="Pane_ApplyToAllRequested" />
                 <local:CameraPaneView Grid.Row="1" Grid.Column="0" DataContext="{Binding Channels[2]}"
-                                      FullscreenRequested="Pane_FullscreenRequested" />
+                                      FullscreenRequested="Pane_FullscreenRequested"
+                                      ApplyToAllRequested="Pane_ApplyToAllRequested" />
                 <local:CameraPaneView Grid.Row="1" Grid.Column="1" DataContext="{Binding Channels[3]}"
-                                      FullscreenRequested="Pane_FullscreenRequested" />
+                                      FullscreenRequested="Pane_FullscreenRequested"
+                                      ApplyToAllRequested="Pane_ApplyToAllRequested" />
             </Grid>
         </DockPanel>
 

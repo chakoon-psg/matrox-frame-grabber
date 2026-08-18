@@ -90,6 +90,9 @@
                         <CheckBox Content="Auto" Margin="4,0,0,0"
                                   IsChecked="{Binding ExposureAuto}"
                                   IsEnabled="{Binding SupportsExposureAuto}" />
+                        <Button Content="≡ All" Click="ExposureAll_Click" Margin="8,0,0,0" FontSize="10"
+                                IsEnabled="{Binding SupportsExposure}"
+                                ToolTip="이 노출 설정을 모든 카메라에 적용" />
                     </StackPanel>
 
                     <!-- Acquisition frame-rate cap -->
@@ -104,6 +107,9 @@
                                    VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
                         <Button Content="Apply" Click="ApplyAcqRate_Click"
                                 IsEnabled="{Binding CanSetAcqRate}" />
+                        <Button Content="≡ All" Click="AcqRateAll_Click" Margin="8,0,0,0" FontSize="10"
+                                IsEnabled="{Binding SupportsAcqRate}"
+                                ToolTip="이 Acq Rate 설정을 모든 카메라에 적용" />
                     </StackPanel>
 
                     <!-- Trigger -->
@@ -117,6 +123,9 @@
                                   IsEnabled="{Binding SupportsTrigger}" />
                         <Button Content="Soft Trig" Click="SoftTrigger_Click"
                                 IsEnabled="{Binding SupportsTrigger}" />
+                        <Button Content="≡ All" Click="TriggerAll_Click" Margin="8,0,0,0" FontSize="10"
+                                IsEnabled="{Binding SupportsTrigger}"
+                                ToolTip="이 트리거 설정을 모든 카메라에 적용" />
                     </StackPanel>
 
                     <!-- White balance -->
@@ -134,6 +143,9 @@
                                  IsEnabled="{Binding CanSetBalanceManually}" />
                         <Button Content="Apply" Margin="4,0,0,0" Click="ApplyBalance_Click"
                                 IsEnabled="{Binding CanSetBalanceManually}" />
+                        <Button Content="≡ All" Click="WhiteBalanceAll_Click" Margin="8,0,0,0" FontSize="10"
+                                IsEnabled="{Binding SupportsWhiteBalance}"
+                                ToolTip="이 화이트밸런스 설정을 모든 카메라에 적용" />
                     </StackPanel>
 
                     <!-- DCF / feature browser -->

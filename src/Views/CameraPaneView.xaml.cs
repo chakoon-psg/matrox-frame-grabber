@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using Matrox.MatroxImagingLibrary.WPF;
 using MatroxFrameGrabber.Mil;
+using MatroxFrameGrabber.ViewModels;
 using Microsoft.Win32;
 
 namespace MatroxFrameGrabber.Views
@@ -17,6 +18,9 @@ namespace MatroxFrameGrabber.Views
     {
         /// <summary>Raised when the user requests fullscreen for this pane's camera.</summary>
         public event EventHandler<CameraChannel> FullscreenRequested;
+
+        /// <summary>Raised when a setting's "All" button is clicked (copy this camera's group to all).</summary>
+        public event EventHandler<CameraSettingKind> ApplyToAllRequested;
 
         private MILWPFDisplay _display;
 
@@ -120,6 +124,20 @@ namespace MatroxFrameGrabber.Views
                 MessageBox.Show("Failed to set acquisition rate (value out of range or feature unavailable).",
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+
+        // ----- "All" buttons: copy this camera's setting group to every other camera -----
+
+        private void ExposureAll_Click(object sender, RoutedEventArgs e) =>
+            ApplyToAllRequested?.Invoke(this, CameraSettingKind.Exposure);
+
+        private void AcqRateAll_Click(object sender, RoutedEventArgs e) =>
+            ApplyToAllRequested?.Invoke(this, CameraSettingKind.AcqRate);
+
+        private void TriggerAll_Click(object sender, RoutedEventArgs e) =>
+            ApplyToAllRequested?.Invoke(this, CameraSettingKind.Trigger);
+
+        private void WhiteBalanceAll_Click(object sender, RoutedEventArgs e) =>
+            ApplyToAllRequested?.Invoke(this, CameraSettingKind.WhiteBalance);
 
         private System.Windows.Threading.DispatcherTimer _rawTimer;
 

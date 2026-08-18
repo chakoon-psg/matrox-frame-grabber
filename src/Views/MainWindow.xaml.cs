@@ -142,6 +142,11 @@ namespace MatroxFrameGrabber.Views
             _viewModel?.ToggleRecordAll();
         }
 
+        private void RecSettings_Click(object sender, RoutedEventArgs e)
+        {
+            RecSettingsPopup.IsOpen = !RecSettingsPopup.IsOpen;
+        }
+
         private void RawAll_Click(object sender, RoutedEventArgs e)
         {
             string errors = _viewModel?.ToggleRawAll();
@@ -163,6 +168,13 @@ namespace MatroxFrameGrabber.Views
         private void Pane_FullscreenRequested(object sender, CameraChannel channel)
         {
             EnterFullscreen(channel);
+        }
+
+        // A pane's "All" button: copy that camera's setting group to every other camera.
+        private void Pane_ApplyToAllRequested(object sender, CameraSettingKind kind)
+        {
+            if ((sender as CameraPaneView)?.DataContext is CameraChannel source)
+                _viewModel?.ApplyToAll(source, kind);
         }
 
         private void EnterFullscreen(CameraChannel channel)
