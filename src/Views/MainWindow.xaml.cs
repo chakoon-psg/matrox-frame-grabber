@@ -80,6 +80,7 @@ namespace MatroxFrameGrabber.Views
             {
                 MessageBox.Show(_initError, "MIL Allocation Error",
                     MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
             }
         }
 
