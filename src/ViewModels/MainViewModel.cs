@@ -106,10 +106,12 @@ namespace MatroxFrameGrabber.ViewModels
 
         private void StopAll()
         {
+            StopRawAll();   // finalize any RAW recordings (+ cancel the auto-stop timer) first
             _manager.StopAll();
             foreach (var channel in _manager.Channels)
                 channel.RefreshStats();
             RaiseChanged(nameof(AnyRecording));
+            RaiseChanged(nameof(AnyRawRecording));
         }
 
         /// <summary>Applies <see cref="GlobalAcqRate"/> fps to every camera that supports it.</summary>

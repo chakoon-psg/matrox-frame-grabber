@@ -152,7 +152,31 @@ namespace MatroxFrameGrabber.Mil
         #region Basic properties (bound in XAML)
 
         public string Name => $"Camera {_index}";
+
+        /// <summary>Fixed physical-port tag (CAM0..CAM3), shown in the pane header for field reference.</summary>
+        public string PortTag => $"CAM{_index}";
+
         public MIL_ID DisplayId => _dispId;
+
+        /// <summary>True while EITHER a color or a RAW recording is active (drives the pane banner).</summary>
+        public bool RecordingActive => _rawRecording || IsRecording;
+
+        /// <summary>Prominent banner text shown over the live view while recording (mode + timer + drops).</summary>
+        public string RecordingBannerText
+        {
+            get
+            {
+                if (_rawRecording)
+                {
+                    var t = DateTime.Now - _rawStartTime;
+                    string drop = _rawMissed > 0 ? $"     ⚠ dropped {_rawMissed}" : "";
+                    return $"◆ RAW 무손실 녹화 중 — 프리뷰는 흑백입니다     {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
+                }
+                if (IsRecording)
+                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_recording?.StatusSuffix()}";
+                return "";
+            }
+        }
         public bool CameraPresent => _digId != MIL.M_NULL;
         public bool IsGrabbing => _isGrabbing;
         public long FrameCount => _hookData?.FrameCount ?? 0;
@@ -686,6 +710,8 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
             RaisePropertyChanged(nameof(StatusText));
+            RaisePropertyChanged(nameof(RecordingActive));
+            RaisePropertyChanged(nameof(RecordingBannerText));
         }
 
         private static MIL_INT ProcessFrame(MIL_INT hookType, MIL_ID hookId, IntPtr userDataPtr)
@@ -806,6 +832,8 @@ namespace MatroxFrameGrabber.Mil
             bool ok = _recording.Start(_dispBufId, Output, SafeName(), fps, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
+            RaisePropertyChanged(nameof(RecordingActive));
+            RaisePropertyChanged(nameof(RecordingBannerText));
             return ok;
         }
 
@@ -817,6 +845,8 @@ namespace MatroxFrameGrabber.Mil
             _recording.Stop();
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
+            RaisePropertyChanged(nameof(RecordingActive));
+            RaisePropertyChanged(nameof(RecordingBannerText));
         }
 
         /// <summary>Starts recording if idle, stops it if already recording.</summary>
@@ -914,6 +944,8 @@ namespace MatroxFrameGrabber.Mil
 
             RaisePropertyChanged(nameof(IsRawRecording));
             RaisePropertyChanged(nameof(StatusText));
+            RaisePropertyChanged(nameof(RecordingActive));
+            RaisePropertyChanged(nameof(RecordingBannerText));
             return true;
         }
 
@@ -964,6 +996,8 @@ namespace MatroxFrameGrabber.Mil
             if (_rawResumeGrab) { try { StartGrab(); } catch (MILException) { } }
             RaisePropertyChanged(nameof(IsRawRecording));
             RaisePropertyChanged(nameof(StatusText));
+            RaisePropertyChanged(nameof(RecordingActive));
+            RaisePropertyChanged(nameof(RecordingBannerText));
         }
 
         private async Task ConvertRawToMp4Async(string rawPath, int width, int height, double fps,

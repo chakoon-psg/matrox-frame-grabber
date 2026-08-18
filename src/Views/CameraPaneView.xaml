@@ -4,6 +4,7 @@
              xmlns:milwpf="milwpf">
 
     <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="#E0E0E0" />
         </Style>
@@ -25,25 +26,32 @@
         </Style>
     </UserControl.Resources>
 
-    <DockPanel Margin="3">
+    <Border Background="{StaticResource PanelBrush}" CornerRadius="4" Margin="3" Padding="5">
+    <DockPanel>
 
-        <!-- Header: camera name + per-camera toolbar -->
+        <!-- Header: [CAMn] port tag + editable name + per-camera toolbar -->
         <Grid DockPanel.Dock="Top" Margin="0,0,0,2">
-            <TextBlock Text="{Binding OutputName}" ToolTip="{Binding CameraInfo}"
-                       Foreground="#4FC3F7" FontSize="14" FontWeight="Bold"
-                       HorizontalAlignment="Left" VerticalAlignment="Center" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <Border Background="{StaticResource ControlBrush}" CornerRadius="3" Padding="4,0" Margin="0,0,6,0">
+                    <TextBlock Text="{Binding PortTag}" Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="{Binding OutputName}" ToolTip="{Binding CameraInfo}"
+                           Foreground="#4FC3F7" FontSize="14" FontWeight="Bold" VerticalAlignment="Center" />
+            </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="▶ Start" Command="{Binding StartCommand}" />
-                <Button Content="■ Stop" Command="{Binding StopCommand}" />
+                <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding CameraPresent}"
+                        Margin="0,0,10,0" ToolTip="Stop acquisition (confirms if recording)" />
                 <ToggleButton Content="● Rec" Style="{StaticResource RecToggle}" FontSize="11"
                               Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
-                              ToolTip="Record this camera to MP4 (live color, may drop frames at high fps)" />
-                <ToggleButton Content="⬤ RAW" Style="{StaticResource RecToggle}" FontSize="11"
+                              ToolTip="Live color H.264 recording — may drop frames at high fps" />
+                <ToggleButton Content="◆ RAW" Style="{StaticResource RawToggle}" FontSize="11"
                               Click="RawRecord_Click" IsChecked="{Binding IsRawRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
                               ToolTip="Lossless RAW recording: every frame at full fps → color MP4 (grayscale preview while recording)" />
-                <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" />
+                <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" Margin="10,0,3,0" />
                 <Button Content="Fit" Command="{Binding FitCommand}" />
                 <Button Content="1:1" Command="{Binding OneToOneCommand}" />
                 <Button Content="⤢" Click="Fullscreen_Click" ToolTip="Fullscreen (double-click view; ESC to return)" />
@@ -144,9 +152,29 @@
 
         <!-- Live view (fills remaining space). The MILWPFDisplay is created in code-behind
              once a channel with a valid DisplayId is bound (an id-0 control errors in MIL).
-             Double-click toggles fullscreen. -->
-        <Border x:Name="ViewBorder" Background="Black" BorderBrush="#404040" BorderThickness="1"
-                SizeChanged="ViewBorder_SizeChanged"
-                PreviewMouseLeftButtonDown="ViewBorder_PreviewMouseLeftButtonDown" />
+             Double-click toggles fullscreen. A recording banner overlays the top edge. -->
+        <Grid>
+            <Border x:Name="ViewBorder" Background="Black" BorderBrush="#404040" BorderThickness="1"
+                    SizeChanged="ViewBorder_SizeChanged"
+                    PreviewMouseLeftButtonDown="ViewBorder_PreviewMouseLeftButtonDown" />
+
+            <!-- Persistent recording banner: red = live H.264, orange = RAW lossless -->
+            <Border VerticalAlignment="Top" Padding="8,4"
+                    Visibility="{Binding RecordingActive, Converter={StaticResource BoolToVis}}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="{StaticResource RecBrush}" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsRawRecording}" Value="True">
+                                <Setter Property="Background" Value="{StaticResource RawBrush}" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding RecordingBannerText}" Foreground="White"
+                           FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+            </Border>
+        </Grid>
     </DockPanel>
+    </Border>
 </UserControl>

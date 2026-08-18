@@ -123,6 +123,19 @@ namespace MatroxFrameGrabber.Views
             }
         }
 
+        private void StopAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (_viewModel == null) return;
+
+            // Stopping all ends every in-progress recording (irreversible) — confirm, but only if recording.
+            if ((_viewModel.AnyRecording || _viewModel.AnyRawRecording) &&
+                MessageBox.Show("녹화 중인 카메라가 있습니다. 모두 중지하면 녹화가 종료됩니다. 계속할까요?",
+                    "Stop All", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            _viewModel.StopAllCommand.Execute(null);
+        }
+
         private void RecordAll_Click(object sender, RoutedEventArgs e)
         {
             _viewModel?.ToggleRecordAll();

@@ -14,6 +14,8 @@
     <Color x:Key="AccentHoverColor">#FF1177BB</Color>
     <Color x:Key="RecColor">#FFC62828</Color>
     <Color x:Key="RecHoverColor">#FFD84343</Color>
+    <Color x:Key="RawColor">#FFE65100</Color>
+    <Color x:Key="RawHoverColor">#FFF57C00</Color>
 
     <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}" />
     <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}" />
@@ -25,6 +27,7 @@
     <SolidColorBrush x:Key="MutedTextBrush" Color="{StaticResource MutedTextColor}" />
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
     <SolidColorBrush x:Key="RecBrush" Color="{StaticResource RecColor}" />
+    <SolidColorBrush x:Key="RawBrush" Color="{StaticResource RawColor}" />
 
     <!-- ===== Button ===== -->
     <Style TargetType="Button">
@@ -49,6 +52,9 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource ControlPressedBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="bd" Property="Opacity" Value="0.4" />
@@ -98,6 +104,39 @@
         </Setter>
     </Style>
 
+    <!-- RAW (lossless) toggle: orange when checked, to distinguish from red H.264 Rec -->
+    <Style x:Key="RawToggle" TargetType="ToggleButton">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="Background" Value="{StaticResource ControlBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushColor}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="8,3" />
+        <Setter Property="Margin" Value="0,0,4,0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Border x:Name="bd" CornerRadius="3" Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          Margin="{TemplateBinding Padding}" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="bd" Property="Background" Value="{StaticResource ControlHoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="bd" Property="Background" Value="{StaticResource RawBrush}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource RawBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="bd" Property="Opacity" Value="0.4" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ===== TextBox ===== -->
     <Style TargetType="TextBox">
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
@@ -109,10 +148,15 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TextBox">
-                    <Border CornerRadius="3" Background="{TemplateBinding Background}"
+                    <Border x:Name="bd" CornerRadius="3" Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
                         <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" />
                     </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>

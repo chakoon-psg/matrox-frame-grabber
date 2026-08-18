@@ -13,44 +13,54 @@
     <Grid>
         <!-- Main content: toolbar + 2x2 camera grid -->
         <DockPanel x:Name="MainContent" LastChildFill="True">
-            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,8,8,4"
-                        VerticalAlignment="Center">
-                <Button Content="Start All" MinWidth="80" Padding="10,4"
+            <!-- WrapPanel so the toolbar reflows onto a 2nd line instead of clipping on narrow windows.
+                 Three groups (acquisition | recording | output+settings) separated by dividers. -->
+            <WrapPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,8,8,4">
+                <!-- Group 1: acquisition -->
+                <Button Content="Start All" Style="{StaticResource AccentButton}" MinWidth="80" Padding="10,4"
                         Command="{Binding StartAllCommand}" />
-                <Button Content="Stop All" MinWidth="80" Padding="10,4"
-                        Command="{Binding StopAllCommand}" />
+                <Button Content="Stop All" MinWidth="80" Padding="10,4" Margin="0,0,4,0"
+                        Click="StopAll_Click" ToolTip="Stop all cameras (confirms if any are recording)" />
+
+                <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
+
+                <!-- Group 2: recording (red = live H.264, orange = RAW lossless) -->
                 <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
-                              Margin="8,0,6,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
+                              Margin="0,0,4,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
                               IsEnabled="{Binding AnyCanRecord}"
-                              ToolTip="Record all running cameras to MP4 (live color, may drop frames at high fps)" />
-                <ToggleButton Content="⬤ RAW All" Style="{StaticResource RecToggle}" Padding="10,4"
-                              Margin="0,0,4,0" Click="RawAll_Click" IsChecked="{Binding AnyRawRecording, Mode=OneWay}"
+                              ToolTip="Record all running cameras (live color H.264, may drop frames at high fps)" />
+                <ToggleButton Content="◆ RAW All" Style="{StaticResource RawToggle}" Padding="10,4"
+                              Margin="0,0,6,0" Click="RawAll_Click" IsChecked="{Binding AnyRawRecording, Mode=OneWay}"
                               IsEnabled="{Binding AnyCanRecord}"
                               ToolTip="Lossless RAW record all cameras: every frame at full fps → color MP4" />
-                <TextBox Width="34" VerticalContentAlignment="Center"
+                <TextBlock Text="auto-stop" VerticalAlignment="Center" Margin="0,0,3,0" Foreground="{StaticResource MutedTextBrush}" />
+                <TextBox Width="30" VerticalContentAlignment="Center"
                          Text="{Binding RawSeconds, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="RAW auto-stop seconds (0 = manual stop)" />
-                <TextBlock Text="s" VerticalAlignment="Center" Margin="3,0,16,0"
-                           Foreground="{StaticResource MutedTextBrush}" />
+                         ToolTip="RAW recording auto-stop, in seconds (0 = manual stop)" />
+                <TextBlock Text="s (0=∞)" VerticalAlignment="Center" Margin="3,0,0,0" Foreground="{StaticResource MutedTextBrush}" />
+
+                <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
+
+                <!-- Group 3: output + global camera settings -->
                 <TextBlock Text="Output:" VerticalAlignment="Center" Margin="0,0,4,0" />
-                <TextBox Width="300" VerticalContentAlignment="Center" IsReadOnly="True"
+                <TextBox Width="240" VerticalContentAlignment="Center" IsReadOnly="True"
                          Text="{Binding Output.OutputFolder, Mode=OneWay}"
                          ToolTip="{Binding Output.OutputFolder}" />
                 <Button Content="Browse…" Padding="8,4" Margin="4,0,4,0" Click="BrowseFolder_Click" />
-                <Button Content="Open" Padding="8,4" Margin="0,0,16,0" Click="OpenFolder_Click" />
+                <Button Content="Open" Padding="8,4" Margin="0,0,8,0" Click="OpenFolder_Click" />
                 <TextBlock Text="Resolution:" VerticalAlignment="Center" Margin="0,0,4,0" />
                 <ComboBox Width="100" VerticalContentAlignment="Center"
                           ItemsSource="{Binding ResolutionOptions}"
                           SelectedItem="{Binding Output.Resolution}" />
-                <TextBlock Text="Acq Rate:" VerticalAlignment="Center" Margin="16,0,4,0" />
-                <TextBox Width="48" VerticalContentAlignment="Center"
+                <TextBlock Text="Acq Rate:" VerticalAlignment="Center" Margin="12,0,4,0" />
+                <TextBox Width="44" VerticalContentAlignment="Center"
                          Text="{Binding GlobalAcqRate, UpdateSourceTrigger=PropertyChanged}" />
                 <TextBlock Text="fps" VerticalAlignment="Center" Margin="4,0,4,0"
                            Foreground="{StaticResource MutedTextBrush}" />
                 <Button Content="Set all" Padding="10,4"
                         Command="{Binding SetAllAcqRateCommand}" IsEnabled="{Binding AnyCanAcqRate}"
                         ToolTip="Apply this AcquisitionFrameRate (fps) to all cameras" />
-            </StackPanel>
+            </WrapPanel>
 
             <TextBlock DockPanel.Dock="Top" Text="{Binding SystemStatus}"
                        Margin="8,0,8,4" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />

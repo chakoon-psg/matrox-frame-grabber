@@ -123,6 +123,22 @@ namespace MatroxFrameGrabber.Views
 
         private System.Windows.Threading.DispatcherTimer _rawTimer;
 
+        private void Stop_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+
+            // Stopping ends any in-progress recording (irreversible) — confirm, but only while recording.
+            if ((channel.IsRecording || channel.IsRawRecording) &&
+                MessageBox.Show("이 카메라가 녹화 중입니다. 중지하면 녹화가 종료됩니다. 계속할까요?",
+                    channel.Name, MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            StopRawTimer();
+            if (channel.IsRawRecording) channel.StopRawRecording();
+            channel.StopGrab();   // also stops a color recording
+        }
+
         private void RawRecord_Click(object sender, RoutedEventArgs e)
         {
             var channel = Channel;
