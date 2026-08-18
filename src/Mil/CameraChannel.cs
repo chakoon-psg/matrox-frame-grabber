@@ -749,7 +749,9 @@ namespace MatroxFrameGrabber.Mil
             if (seg != null)
             {
                 byte[] buf = seg.Rent();             // rolls to a new segment if the current one is full
-                MIL.MbufGet(grabbedBuffer, buf);     // band-1 8-bit → frameBytes
+                // MbufGet2d copies the logical W×H region PACKED. MbufGet would copy the row-padded
+                // buffer (pitch 2112 > width 2064), shearing the raw when read back as tight 2064 rows.
+                MIL.MbufGet2d(grabbedBuffer, 0, 0, _rawW, _rawH, buf);
                 seg.Feed(buf);
                 if (++_rawDisplayCounter >= RAW_DISPLAY_EVERY)
                 {
