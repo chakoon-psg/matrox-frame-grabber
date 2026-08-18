@@ -43,6 +43,7 @@ namespace MatroxFrameGrabber.Views
                 {
                     ch.RecordingFailed += OnRecordingFailed;
                     ch.CameraLost += OnCameraLost;
+                    ch.GrabFailed += OnGrabFailed;
                     ch.RawRecordingFinished += OnRawRecordingFinished;
                 }
 
@@ -60,6 +61,12 @@ namespace MatroxFrameGrabber.Views
         private void OnRecordingFailed(CameraChannel channel, string error)
         {
             MessageBox.Show($"Recording stopped: {error}", channel.Name,
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void OnGrabFailed(CameraChannel channel, string error)
+        {
+            MessageBox.Show($"Could not start acquisition: {error}", channel.Name,
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 

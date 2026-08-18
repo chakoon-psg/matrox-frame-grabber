@@ -23,7 +23,7 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public sealed class RawSegmentSession : IDisposable
     {
-        private readonly string _ffmpeg, _scratchDir, _outputDir, _baseName;
+        private readonly string _ffmpeg, _scratchDir, _outputDir, _baseName, _pixFmt;
         private readonly int _width, _height, _frameBytes, _segmentSeconds;
 
         private readonly BlockingCollection<Seg> _convertQueue = new BlockingCollection<Seg>();
@@ -53,8 +53,12 @@ namespace MatroxFrameGrabber.Infrastructure
             { Writer = w; RawPath = path; Start = start; Seconds = seconds; }
         }
 
+        /// <param name="pixFmt">
+        /// ffmpeg raw pixel format matching the sensor's mosaic (e.g. "bayer_rggb8"). Must come from
+        /// the digitizer — guessing it swaps the colours of every converted segment.
+        /// </param>
         public RawSegmentSession(string ffmpegPath, string scratchDir, string outputDir, string baseName,
-            int width, int height, int frameBytes, int segmentSeconds)
+            int width, int height, int frameBytes, int segmentSeconds, string pixFmt)
         {
             _ffmpeg = ffmpegPath;
             _scratchDir = scratchDir;
@@ -64,6 +68,7 @@ namespace MatroxFrameGrabber.Infrastructure
             _height = height;
             _frameBytes = frameBytes;
             _segmentSeconds = Math.Max(5, segmentSeconds);
+            _pixFmt = string.IsNullOrWhiteSpace(pixFmt) ? "bayer_rggb8" : pixFmt;
 
             Directory.CreateDirectory(_scratchDir);
             Directory.CreateDirectory(_outputDir);
@@ -167,7 +172,7 @@ namespace MatroxFrameGrabber.Infrastructure
             foreach (string a in new[]
             {
                 "-hide_banner", "-loglevel", "error",
-                "-f", "rawvideo", "-pixel_format", "bayer_rggb8",
+                "-f", "rawvideo", "-pixel_format", _pixFmt,
                 "-video_size", $"{_width}x{_height}",
                 "-framerate", fps.ToString("F3", CultureInfo.InvariantCulture),
                 "-i", rawPath,
