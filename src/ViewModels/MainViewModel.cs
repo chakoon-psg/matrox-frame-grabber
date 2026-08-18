@@ -96,6 +96,17 @@ namespace MatroxFrameGrabber.ViewModels
         }
 
         /// <summary>
+        /// Copies every capture setting group (exposure, acq rate, trigger, white balance) from
+        /// <paramref name="source"/> onto all other present cameras that support each feature.
+        /// </summary>
+        public void ApplyAllSettings(CameraChannel source)
+        {
+            if (source == null) return;
+            foreach (CameraSettingKind kind in Enum.GetValues(typeof(CameraSettingKind)))
+                ApplyToAll(source, kind);
+        }
+
+        /// <summary>
         /// Copies one settings group from <paramref name="source"/> onto every other present
         /// camera that supports it (applying it to the hardware). Returns the number updated.
         /// </summary>

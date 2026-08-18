@@ -170,11 +170,11 @@ namespace MatroxFrameGrabber.Views
             EnterFullscreen(channel);
         }
 
-        // A pane's "All" button: copy that camera's setting group to every other camera.
-        private void Pane_ApplyToAllRequested(object sender, CameraSettingKind kind)
+        // A pane's "apply to all" button: copy that camera's capture settings to every other camera.
+        private void Pane_ApplyToAllRequested(object sender, EventArgs e)
         {
             if ((sender as CameraPaneView)?.DataContext is CameraChannel source)
-                _viewModel?.ApplyToAll(source, kind);
+                _viewModel?.ApplyAllSettings(source);
         }
 
         private void EnterFullscreen(CameraChannel channel)
