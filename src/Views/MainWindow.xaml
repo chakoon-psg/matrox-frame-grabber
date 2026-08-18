@@ -36,8 +36,12 @@
                 <TextBlock Text="auto-stop" VerticalAlignment="Center" Margin="0,0,3,0" Foreground="{StaticResource MutedTextBrush}" />
                 <TextBox Width="30" VerticalContentAlignment="Center"
                          Text="{Binding RawSeconds, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="RAW recording auto-stop, in seconds (0 = manual stop)" />
-                <TextBlock Text="s (0=∞)" VerticalAlignment="Center" Margin="3,0,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                         ToolTip="RAW recording auto-stop, in seconds (0 = manual / continuous)" />
+                <TextBlock Text="s (0=∞) · seg" VerticalAlignment="Center" Margin="3,0,3,0" Foreground="{StaticResource MutedTextBrush}" />
+                <TextBox Width="30" VerticalContentAlignment="Center"
+                         Text="{Binding RawSegSeconds, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Length of each RAW MP4 segment, in seconds (min 5). Continuous recording rolls a new file every N seconds." />
+                <TextBlock Text="s" VerticalAlignment="Center" Margin="3,0,0,0" Foreground="{StaticResource MutedTextBrush}" />
 
                 <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
 

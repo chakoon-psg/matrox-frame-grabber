@@ -108,20 +108,17 @@ namespace MatroxFrameGrabber.Mil
         private string _outputName;
         private RecordingSession _recording;
 
-        // Lossless RAW-Bayer recording (band=1 → disk, all frames; offline ffmpeg → color MP4).
+        // Continuous, segmented lossless RAW-Bayer recording (band=1 scratch segments → ffmpeg → MP4).
         private const int RAW_GRAB_BUFFERS = 24;     // deep ring; band=1 frames are ~3x smaller
         private const int RAW_DISPLAY_EVERY = 6;     // grayscale preview ~30fps at 184fps
-        private volatile RawFrameWriter _rawWriter;
+        private volatile RawSegmentSession _rawSegments;   // active recording (hook writes to it), or null
+        private RawSegmentSession _rawFinishing;           // stopped, still transcoding in background
         private bool _rawRecording;
         private bool _rawResumeGrab;
         private bool _rawConverting;
-        private string _rawPath;
         private int _rawW, _rawH, _rawDisplayCounter;
         private long _rawMissed;
         private DateTime _rawStartTime;
-        private volatile bool _rawFinishedPending;
-        private bool _rawFinishedOk;
-        private string _rawFinishedMessage;
 
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
@@ -166,11 +163,11 @@ namespace MatroxFrameGrabber.Mil
         {
             get
             {
-                if (_rawRecording)
+                if (_rawRecording && _rawSegments != null)
                 {
                     var t = DateTime.Now - _rawStartTime;
                     string drop = _rawMissed > 0 ? $"     ⚠ dropped {_rawMissed}" : "";
-                    return $"◆ RAW 무손실 녹화 중 — 프리뷰는 흑백입니다     {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
+                    return $"◆ RAW 무손실 녹화 중 — 프리뷰는 흑백입니다     seg {_rawSegments.SegmentIndex} · 총 {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
                 }
                 if (IsRecording)
                     return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_recording?.StatusSuffix()}";
@@ -548,9 +545,12 @@ namespace MatroxFrameGrabber.Mil
         private void FreeCamera()
         {
             // Stop any raw capture first so the board's Bayer conversion is restored to color
-            // (it's a persistent setting) and the .raw file is flushed before we free MIL resources.
+            // (it's a persistent setting) and the current segment is flushed before we free MIL.
             if (_rawRecording)
                 StopRawRecording();
+            // Give in-flight segment conversions a bounded chance to finish on shutdown (unconverted
+            // .raw segments are otherwise left in the scratch folder as a lossless fallback).
+            if (_rawFinishing != null) { try { _rawFinishing.WaitConversions(15000); } catch { } }
 
             StopGrab();   // also stops recording (kicks off async finalize)
 
@@ -694,17 +694,24 @@ namespace MatroxFrameGrabber.Mil
                 RecordingFailed?.Invoke(this, err ?? "Recording stopped unexpectedly.");
             }
 
-            // RAW writer died (disk/NAS write error) mid-recording — stop now; StopRawRecording's
-            // conversion step reads the writer's Failed flag and surfaces the error to the UI.
-            if (_rawRecording && _rawWriter != null && _rawWriter.Failed)
+            // A RAW segment writer/convert died (disk full, NAS error, ffmpeg fail) mid-recording —
+            // stop now; the finish-polling below then surfaces the error to the UI.
+            if (_rawRecording && _rawSegments != null && _rawSegments.Failed)
                 StopRawRecording();
 
-            // Surface a completed raw-MP4 conversion (set by the background convert task).
-            if (_rawFinishedPending)
+            // Poll a stopped session's background segment conversions; surface the result once done.
+            if (_rawFinishing != null && _rawFinishing.WaitConversions(0))
             {
-                _rawFinishedPending = false;
+                RawSegmentSession s = _rawFinishing;
+                _rawFinishing = null;
+                _rawConverting = false;
+                bool ok = !s.Failed;
+                string msg = ok
+                    ? $"{s.SegmentsCompleted}개 세그먼트 저장 완료 → {Output?.OutputFolder}"
+                    : ("일부 세그먼트 변환/저장 오류: " + (s.LastError ?? "unknown"));
+                s.Dispose();
                 RaisePropertyChanged(nameof(StatusText));
-                RawRecordingFinished?.Invoke(this, _rawFinishedOk, _rawFinishedMessage);
+                RawRecordingFinished?.Invoke(this, ok, msg);
             }
 
             RaisePropertyChanged(nameof(FrameRate));
@@ -737,13 +744,13 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         private void OnGrabbedFrame(MIL_ID grabbedBuffer, MIL_ID displayBuffer)
         {
-            // ---- Lossless RAW capture: write EVERY frame to disk; throttled grayscale preview ----
-            RawFrameWriter rw = _rawWriter;
-            if (rw != null)
+            // ---- Lossless RAW capture: write EVERY frame to the current segment; grayscale preview ----
+            RawSegmentSession seg = _rawSegments;
+            if (seg != null)
             {
-                byte[] buf = rw.Rent();
+                byte[] buf = seg.Rent();             // rolls to a new segment if the current one is full
                 MIL.MbufGet(grabbedBuffer, buf);     // band-1 8-bit → frameBytes
-                rw.Enqueue(buf);
+                seg.Feed(buf);
                 if (++_rawDisplayCounter >= RAW_DISPLAY_EVERY)
                 {
                     _rawDisplayCounter = 0;
@@ -882,9 +889,11 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>
-        /// Starts a lossless capture: disables hardware Bayer conversion (raw band=1), grabs every frame
-        /// to a .raw file with a deep DMA ring, and shows a throttled grayscale preview. Pair with
-        /// <see cref="StopRawRecording"/>; it restores color and transcodes the .raw to a color MP4.
+        /// Starts a continuous lossless capture: disables hardware Bayer conversion (raw band=1), grabs
+        /// every frame with a deep DMA ring, and writes rolling N-second RAW segments to the local
+        /// scratch folder — each of which a background thread transcodes to a color MP4 in the output
+        /// folder (then deletes the .raw). Shows a throttled grayscale preview. Runs until
+        /// <see cref="StopRawRecording"/>.
         /// </summary>
         public bool StartRawRecording(out string error)
         {
@@ -894,17 +903,19 @@ namespace MatroxFrameGrabber.Mil
             if (IsRecording) { error = "Stop the color recording first."; return false; }
             if (!CanRecord) { error = "ffmpeg was not found (needed to convert the recording)."; return false; }
 
-            string folder;
-            try { folder = Output?.EnsureFolder(); }
+            string outDir, scratch;
+            try { outDir = Output?.EnsureFolder(); scratch = Output?.EnsureScratchFolder(); }
             catch (Exception e) { error = "Output folder error: " + e.Message; return false; }
-            if (string.IsNullOrEmpty(folder)) { error = "No output folder set."; return false; }
+            if (string.IsNullOrEmpty(outDir) || string.IsNullOrEmpty(scratch)) { error = "No output folder set."; return false; }
+            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath);
+            if (ffmpeg == null) { error = "ffmpeg was not found."; return false; }
 
             _rawResumeGrab = _isGrabbing;
             if (_isGrabbing) StopGrab();
 
-            // Everything below mutates the board (Bayer OFF), buffers, and the writer. Any failure
+            // Everything below mutates the board (Bayer OFF), buffers, and the session. Any failure
             // here — especially a MILException from StartGrab — must NOT leave the board in raw mode
-            // or leak the writer, so the whole sequence is guarded and restores color on fault.
+            // or leak the session, so the whole sequence is guarded and restores color on fault.
             try
             {
                 SetBayerConversion(false);          // board sends raw Bayer band=1 (~3x smaller)
@@ -923,8 +934,9 @@ namespace MatroxFrameGrabber.Mil
                     return false;
                 }
 
-                _rawPath = Path.Combine(folder, $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}.raw");
-                _rawWriter = new RawFrameWriter(_rawPath, _rawW * _rawH * band);
+                int segSecs = Output?.RawSegmentSeconds ?? 60;
+                _rawSegments = new RawSegmentSession(ffmpeg, scratch, outDir, SafeName(),
+                    _rawW, _rawH, _rawW * _rawH * band, segSecs);
                 _rawDisplayCounter = 0;
                 _rawMissed = 0;
                 _rawStartTime = DateTime.Now;
@@ -934,10 +946,10 @@ namespace MatroxFrameGrabber.Mil
             catch (Exception e)
             {
                 error = "Failed to start RAW recording: " + e.Message;
-                var w = _rawWriter;
-                _rawWriter = null;
+                var s = _rawSegments;
+                _rawSegments = null;
                 _rawRecording = false;
-                if (w != null) { try { w.CompleteAndWait(2000); w.Dispose(); } catch { } }
+                if (s != null) { try { s.Finish(); s.WaitConversions(2000); s.Dispose(); } catch { } }
                 RestoreColorAfterRaw();   // guarantees Bayer conversion is turned back ON
                 return false;
             }
@@ -949,46 +961,37 @@ namespace MatroxFrameGrabber.Mil
             return true;
         }
 
-        /// <summary>Stops the raw capture, restores color grabbing, and kicks off async MP4 conversion.</summary>
+        /// <summary>
+        /// Stops the capture and restores color grabbing. The final segment plus any still-pending
+        /// segments keep transcoding on the session's background thread; RefreshStats surfaces the
+        /// result via <see cref="RawRecordingFinished"/> once they finish.
+        /// </summary>
         public void StopRawRecording()
         {
             if (!_rawRecording)
                 return;
 
-            if (_isGrabbing) StopGrab();
+            if (_isGrabbing) StopGrab();   // stops the hook; safe to finalize the session
 
-            // Capture the stop instant BEFORE draining the queue: CompleteAndWait can block for
-            // seconds on a lagging sink, and that drain time is not part of the capture window —
-            // including it would deflate fps and produce a slow-motion MP4.
-            double elapsed = Math.Max(0.001, (DateTime.Now - _rawStartTime).TotalSeconds);
+            RawSegmentSession s = _rawSegments;
+            _rawSegments = null;
+            _rawRecording = false;
 
-            RawFrameWriter w = _rawWriter;   // RestoreColorAfterRaw clears the field
-            long written = 0; bool writeFailed = false; string writeErr = null;
-            if (w != null)
+            if (s != null)
             {
-                w.CompleteAndWait(20000);
-                written = w.FramesWritten;
-                writeFailed = w.Failed;
-                writeErr = w.LastError;
-                w.Dispose();
+                s.Finish();            // finalize the current segment; conversions continue in background
+                _rawFinishing = s;     // RefreshStats polls this to surface completion/errors
+                _rawConverting = true;
             }
 
-            double fps = written > 0 ? written / elapsed : InquireNominalFps();
-
-            RestoreColorAfterRaw();   // clears _rawWriter/_rawRecording and restores color
-
-            // Transcode the raw Bayer file to a color MP4 in the background (playback-realtime-ish).
-            _rawConverting = true;
+            RestoreColorAfterRaw();
             RaisePropertyChanged(nameof(StatusText));
-            string rawPath = _rawPath;
-            int w2 = _rawW, h2 = _rawH;
-            _ = ConvertRawToMp4Async(rawPath, w2, h2, fps, writeFailed, writeErr);
         }
 
         /// <summary>Re-enables color Bayer conversion, restores normal buffers, and resumes grabbing.</summary>
         private void RestoreColorAfterRaw()
         {
-            _rawWriter = null;
+            _rawSegments = null;
             _rawRecording = false;
             SetBayerConversion(true);   // critical: do this FIRST so color is restored even if the rest faults
             FreeBuffers();
@@ -1000,87 +1003,16 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(RecordingBannerText));
         }
 
-        private async Task ConvertRawToMp4Async(string rawPath, int width, int height, double fps,
-            bool writeFailed, string writeErr)
-        {
-            bool ok = false;
-            string message;
-            try
-            {
-                string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath);
-                string mp4 = Path.ChangeExtension(rawPath, ".mp4");
-
-                if (writeFailed)
-                    message = "Disk write failed: " + (writeErr ?? "unknown");
-                else if (ffmpeg == null)
-                    message = "ffmpeg not found; raw file kept: " + rawPath;
-                else if (!File.Exists(rawPath))
-                    message = "Raw file missing: " + rawPath;
-                else
-                {
-                    var psi = new ProcessStartInfo(ffmpeg)
-                    {
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardError = true
-                    };
-                    foreach (string a in new[]
-                    {
-                        "-hide_banner", "-loglevel", "error",
-                        "-f", "rawvideo", "-pixel_format", "bayer_rggb8",
-                        "-video_size", $"{width}x{height}",
-                        "-framerate", fps.ToString("F3", CultureInfo.InvariantCulture),
-                        "-i", rawPath,
-                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart", "-y", mp4
-                    })
-                        psi.ArgumentList.Add(a);
-
-                    using var proc = Process.Start(psi);
-                    string stderr = await proc.StandardError.ReadToEndAsync();
-                    await proc.WaitForExitAsync();
-
-                    if (proc.ExitCode == 0)
-                    {
-                        ok = true;
-                        message = mp4;
-                        try { File.Delete(rawPath); } catch { /* keep raw if delete fails */ }
-                    }
-                    else
-                    {
-                        message = "ffmpeg failed (raw kept). " + TailLine(stderr);
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                message = "Conversion error: " + e.Message;
-            }
-
-            // Surface the result on the UI thread via RefreshStats (mirrors RecordingFailed).
-            _rawFinishedOk = ok;
-            _rawFinishedMessage = message;
-            _rawConverting = false;
-            _rawFinishedPending = true;
-        }
-
-        private static string TailLine(string s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return "";
-            string[] lines = s.Trim().Split('\n');
-            return lines[lines.Length - 1].Trim();
-        }
-
         private string RawStatusSuffix()
         {
-            if (_rawRecording)
+            if (_rawRecording && _rawSegments != null)
             {
                 var t = DateTime.Now - _rawStartTime;
                 string drop = _rawMissed > 0 ? $"  ⚠ dropped {_rawMissed}" : "";
-                return $"  ● REC RAW {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
+                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
             }
             if (_rawConverting)
-                return "  (converting → MP4…)";
+                return "  (converting segments → MP4…)";
             return "";
         }
 

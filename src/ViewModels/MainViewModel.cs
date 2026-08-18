@@ -150,6 +150,18 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
+        /// <summary>Length of each RAW MP4 segment (seconds). Persisted via Output.</summary>
+        public string RawSegSeconds
+        {
+            get => Output.RawSegmentSeconds.ToString();
+            set
+            {
+                if (int.TryParse(value, out int s))
+                    Output.RawSegmentSeconds = s;
+                RaiseChanged(nameof(RawSegSeconds));
+            }
+        }
+
         private DispatcherTimer _rawAllTimer;
 
         /// <summary>
