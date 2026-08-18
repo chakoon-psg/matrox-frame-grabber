@@ -134,10 +134,25 @@ namespace MatroxFrameGrabber.Mil
             _index = index;
             _outputName = $"Camera {_index}";
 
-            StartCommand = new RelayCommand(StartGrab, () => CameraPresent);
+            // StartGrab throws on MIL failure (StartRawRecording relies on that to restore the
+            // board), so the command binds to the non-throwing wrapper instead — an unhandled
+            // MILException on the UI thread would take the app down.
+            StartCommand = new RelayCommand(() => TryStartGrab(), () => CameraPresent);
             StopCommand = new RelayCommand(StopGrab, () => CameraPresent);
             FitCommand = new RelayCommand(FitToWindow, () => CameraPresent);
             OneToOneCommand = new RelayCommand(ZoomActual, () => CameraPresent);
+        }
+
+        /// <summary>
+        /// Re-queries every command's CanExecute so bound buttons follow <see cref="CameraPresent"/>.
+        /// Call wherever the camera appears or disappears (allocate / free / DCF reload).
+        /// </summary>
+        private void RaiseCommandStates()
+        {
+            StartCommand.RaiseCanExecuteChanged();
+            StopCommand.RaiseCanExecuteChanged();
+            FitCommand.RaiseCanExecuteChanged();
+            OneToOneCommand.RaiseCanExecuteChanged();
         }
 
         // View/acquisition commands for the pane toolbar (dialog-free actions).
@@ -436,6 +451,7 @@ namespace MatroxFrameGrabber.Mil
 
             RaisePropertyChanged(nameof(CameraPresent));
             RaisePropertyChanged(nameof(StatusText));
+            RaiseCommandStates();
         }
 
         /// <summary>
@@ -565,6 +581,9 @@ namespace MatroxFrameGrabber.Mil
                 _digId = MIL.M_NULL;
             }
             _features.Digitizer = MIL.M_NULL;
+
+            RaisePropertyChanged(nameof(CameraPresent));
+            RaiseCommandStates();
         }
 
         /// <summary>Frees every MIL resource owned by this channel (not the shared system).</summary>
@@ -622,6 +641,27 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(StatusText));
         }
 
+        /// <summary>
+        /// Starts acquisition without throwing: a MIL failure is reported through
+        /// <see cref="GrabFailed"/> and returned as false. Use this from UI/bulk callers —
+        /// <see cref="StartGrab"/> itself still throws, because <see cref="StartRawRecording"/>
+        /// depends on catching that to put the board back into colour mode.
+        /// </summary>
+        public bool TryStartGrab()
+        {
+            try
+            {
+                StartGrab();
+                return true;
+            }
+            catch (MILException e)
+            {
+                GrabFailed?.Invoke(this, e.Message);
+                RaisePropertyChanged(nameof(StatusText));
+                return false;
+            }
+        }
+
         public void StopGrab()
         {
             if (!_isGrabbing)
@@ -646,6 +686,9 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Raised when the camera is detected as disconnected while grabbing.</summary>
         public event Action<CameraChannel> CameraLost;
+
+        /// <summary>Raised when acquisition could not be started; carries the MIL error text.</summary>
+        public event Action<CameraChannel, string> GrabFailed;
 
         public void RefreshStats()
         {
@@ -938,7 +981,7 @@ namespace MatroxFrameGrabber.Mil
 
                 int segSecs = Output?.RawSegmentSeconds ?? 60;
                 _rawSegments = new RawSegmentSession(ffmpeg, scratch, outDir, SafeName(),
-                    _rawW, _rawH, _rawW * _rawH * band, segSecs);
+                    _rawW, _rawH, _rawW * _rawH * band, segSecs, InquireBayerPixelFormat());
                 _rawDisplayCounter = 0;
                 _rawMissed = 0;
                 _rawStartTime = DateTime.Now;
@@ -998,11 +1041,45 @@ namespace MatroxFrameGrabber.Mil
             SetBayerConversion(true);   // critical: do this FIRST so color is restored even if the rest faults
             FreeBuffers();
             AllocateBuffers(REQUESTED_GRAB_BUFFERS);
-            if (_rawResumeGrab) { try { StartGrab(); } catch (MILException) { } }
+            if (_rawResumeGrab) TryStartGrab();   // reports rather than silently swallowing
             RaisePropertyChanged(nameof(IsRawRecording));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));
+        }
+
+        /// <summary>
+        /// Maps the digitizer's Bayer mosaic to the matching ffmpeg raw pixel format. MIL names a
+        /// pattern by the first two pixels of the first line (M_BAYER_GR = G,R -> GRBG), which is
+        /// exactly what ffmpeg's bayer_*8 names encode. Falls back to bayer_rggb8 — the previous
+        /// hard-coded value — if the digitizer doesn't report a pattern.
+        /// </summary>
+        private string InquireBayerPixelFormat()
+        {
+            const string fallback = "bayer_rggb8";
+            if (_digId == MIL.M_NULL)
+                return fallback;
+
+            // Cameras without a mosaic have no such setting; probing must not raise a modal dialog.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
+            {
+                MIL_INT pattern = MIL.MdigInquire(_digId, MIL.M_BAYER_PATTERN, MIL.M_NULL);
+                long masked = (long)pattern & MIL.M_BAYER_MASK;   // strip unrelated flag bits
+                if (masked == MIL.M_BAYER_RG) return "bayer_rggb8";
+                if (masked == MIL.M_BAYER_GR) return "bayer_grbg8";
+                if (masked == MIL.M_BAYER_BG) return "bayer_bggr8";
+                if (masked == MIL.M_BAYER_GB) return "bayer_gbrg8";
+                return fallback;
+            }
+            catch (MILException)
+            {
+                return fallback;
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+            }
         }
 
         private string RawStatusSuffix()
@@ -1360,7 +1437,7 @@ namespace MatroxFrameGrabber.Mil
             DcfName = string.IsNullOrWhiteSpace(dcfName) ? "M_DEFAULT" : dcfName;
             AllocateCamera();
             if (wasGrabbing)
-                StartGrab();
+                TryStartGrab();   // a bad DCF must not crash the app from the click handler
             RaisePropertyChanged(nameof(DisplayId));
             return CameraPresent;
         }

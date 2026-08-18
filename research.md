@@ -502,16 +502,18 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 
 읽으면서 확인된 것들(현 시점 코드 기준, 영향도 순):
 
-1. **`StartGrab()`의 `MILException` 재던지기가 UI로 전파된다.**
-   `CameraChannel.StartGrab`은 핸들을 정리한 뒤 `throw`한다. 이것이 `StartCommand`(`RelayCommand`)나
-   `MilApplicationManager.StartAll()`을 통해 호출되면 **처리되지 않은 예외 → 앱 크래시**가 된다.
-   `App.xaml.cs`에 `DispatcherUnhandledException` 핸들러가 없어 완충 장치도 없다.
-   (`RestoreColorAfterRaw`는 유일하게 `try { StartGrab(); } catch (MILException) { }`로 감싼다.)
+1. ~~**`StartGrab()`의 `MILException` 재던지기가 UI로 전파된다.**~~ — **해결됨**
+   `CameraChannel.StartGrab`은 핸들을 정리한 뒤 `throw`했고, 이것이 `StartCommand`(`RelayCommand`)나
+   `MilApplicationManager.StartAll()`을 통해 호출되면 **처리되지 않은 예외 → 앱 크래시**가 됐다.
+   비throw 래퍼 `TryStartGrab()`을 추가해 UI·일괄 호출 경로가 이를 쓰도록 바꾸고, 실패는
+   `GrabFailed` 이벤트로 알린다. `StartGrab` 자체는 계속 던진다 —
+   `StartRawRecording`이 그 예외를 잡아 보드를 컬러로 되돌리기 때문. `App.xaml.cs`에
+   `DispatcherUnhandledException` 백스톱도 추가했다.
 
-2. **`RelayCommand.RaiseCanExecuteChanged()`를 호출하는 곳이 전혀 없다.**
+2. ~~**`RelayCommand.RaiseCanExecuteChanged()`를 호출하는 곳이 전혀 없다.**~~ — **해결됨**
    `StartCommand` 등의 `canExecute`는 `CameraPresent`인데, `ReloadWithDcf`로 카메라 유무가 바뀌어도
-   버튼 활성화 상태가 갱신되지 않는다. `CommandManager.RequerySuggested`를 쓰지 않는 구현이라
-   자동 재조회도 없다.
+   버튼 활성화 상태가 갱신되지 않았다(`CommandManager.RequerySuggested`를 쓰지 않는 구현이라
+   자동 재조회도 없음). `RaiseCommandStates()`를 추가해 `AllocateCamera` / `FreeCamera`에서 호출한다.
 
 3. **`MainViewModel.AnyCanRecord`의 주석이 낡았다** — "MIL compression licensed"라고 적혀 있지만
    실제 판정 기준은 ffmpeg 존재 여부다.
@@ -526,8 +528,12 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 6. **`RecordingSession.Feed()`가 `_lock`을 잡은 채 MIL 추출(3회 `MbufGet` + 복사)을 수행**한다.
    같은 락을 UI 스레드의 `Stop()`이 기다리므로, 대형 프레임에서 정지 클릭이 순간적으로 블록될 수 있다.
 
-7. **`bayer_rggb8` 하드코딩** — 카메라의 실제 Bayer 패턴(GRBG/BGGR/GBRG)을 조회하지 않는다.
-   패턴이 다른 카메라에서는 RAW 산출물의 색이 뒤바뀐다. (컬러 Rec 경로는 보드가 변환하므로 무관)
+7. ~~**`bayer_rggb8` 하드코딩**~~ — **해결됨**
+   카메라의 실제 Bayer 패턴(GRBG/BGGR/GBRG)을 조회하지 않아, 패턴이 다른 센서에서는 RAW 산출물의
+   색이 뒤바뀌었다(컬러 Rec 경로는 보드가 변환하므로 무관). `InquireBayerPixelFormat()`이
+   `M_BAYER_PATTERN`을 `M_BAYER_MASK`로 마스킹해 조회한 뒤 ffmpeg `bayer_*8` 이름으로 매핑하고,
+   `RawSegmentSession`에 주입한다. 조회 실패 시에는 기존 동작대로 `bayer_rggb8`로 폴백한다.
+   **미검증**: 매핑 자체는 하드웨어에서 확인하지 못했다(§6 하단 참조).
 
 8. **`RawSegmentSession.Roll()`의 `_convertQueue.Add`가 이론상 던질 수 있다.**
    `Finish()`가 `CompleteAdding()`을 부른 뒤 훅이 한 번 더 도는 경우인데, 현재 호출 순서
@@ -540,6 +546,12 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
     `SafeName()`, `FfmpegRecorder.ResolveFfmpegPath` 정도는 순수 로직이라 단위 테스트가 가능하다.
 
 11. `docs/`에는 스크린샷 1장만 있고 설계 문서가 없다. 실질적 문서는 `CLAUDE.md` + 코드 주석 + 커밋 메시지.
+
+> **해결된 1·2·7번에 대한 검증 범위**: 컴파일(Release x64, 오류 0)까지만 확인했고
+> **카메라가 붙은 보드에서 실행 검증은 하지 못했다.** 특히 7번의 MIL→ffmpeg 패턴 매핑
+> (`M_BAYER_GR` → `bayer_grbg8` 등)은 "MIL은 첫 줄 첫 두 픽셀로 패턴을 명명한다"는 전제에
+>기대고 있으므로, 실제 컬러 카메라로 RAW 녹화를 돌려 색이 맞는지 확인이 필요하다.
+> 현재 장비가 RGGB라면 폴백 값과 같아 회귀는 발생하지 않는다.
 
 ---
 

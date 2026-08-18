@@ -86,11 +86,15 @@ namespace MatroxFrameGrabber.Mil
                 "installed and selected as the default system in MILConfig.");
         }
 
-        /// <summary>Starts acquisition on every channel that has a camera.</summary>
+        /// <summary>
+        /// Starts acquisition on every channel that has a camera. One channel failing to start
+        /// must not abort the others (or take the app down), so this uses the non-throwing form;
+        /// each failure is surfaced through that channel's GrabFailed event.
+        /// </summary>
         public void StartAll()
         {
             foreach (var channel in _channels)
-                channel.StartGrab();
+                channel.TryStartGrab();
         }
 
         /// <summary>Stops acquisition on every channel.</summary>

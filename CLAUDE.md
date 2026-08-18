@@ -74,7 +74,7 @@ They are mutually exclusive per camera and have **deliberately opposite back-pre
 | Class | `RecordingSession` | `RawSegmentSession` + `RawFrameWriter` |
 | Source | display buffer (3-band colour) | grab buffer (1-band Bayer) |
 | Path | MIL → memory → ffmpeg **stdin pipe** | MIL → local `.raw` segments → ffmpeg **batch** |
-| Pixel format | `gbrp` / `gray` | `bayer_rggb8` |
+| Pixel format | `gbrp` / `gray` | sensor's `bayer_*8` (from `M_BAYER_PATTERN`) |
 | Under load | **drops frames** (live view wins) | **blocks the hook** (no frame is lost) |
 | Preview | normal colour | **grayscale**, every 6th frame |
 | Board state | untouched | `M_BAYER_CONVERSION` **disabled** |
