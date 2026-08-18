@@ -80,6 +80,7 @@ namespace MatroxFrameGrabber.Views
             {
                 MessageBox.Show(_initError, "MIL Allocation Error",
                     MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
             }
         }
 
@@ -141,6 +142,11 @@ namespace MatroxFrameGrabber.Views
             _viewModel?.ToggleRecordAll();
         }
 
+        private void RecSettings_Click(object sender, RoutedEventArgs e)
+        {
+            RecSettingsPopup.IsOpen = !RecSettingsPopup.IsOpen;
+        }
+
         private void RawAll_Click(object sender, RoutedEventArgs e)
         {
             string errors = _viewModel?.ToggleRawAll();
@@ -162,6 +168,13 @@ namespace MatroxFrameGrabber.Views
         private void Pane_FullscreenRequested(object sender, CameraChannel channel)
         {
             EnterFullscreen(channel);
+        }
+
+        // A pane's "apply to all" button: copy that camera's capture settings to every other camera.
+        private void Pane_ApplyToAllRequested(object sender, EventArgs e)
+        {
+            if ((sender as CameraPaneView)?.DataContext is CameraChannel source)
+                _viewModel?.ApplyAllSettings(source);
         }
 
         private void EnterFullscreen(CameraChannel channel)

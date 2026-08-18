@@ -18,6 +18,9 @@ namespace MatroxFrameGrabber.Views
         /// <summary>Raised when the user requests fullscreen for this pane's camera.</summary>
         public event EventHandler<CameraChannel> FullscreenRequested;
 
+        /// <summary>Raised when the "apply to all" button is clicked (copy this camera's settings to all).</summary>
+        public event EventHandler ApplyToAllRequested;
+
         private MILWPFDisplay _display;
 
         public CameraPaneView()
@@ -120,6 +123,10 @@ namespace MatroxFrameGrabber.Views
                 MessageBox.Show("Failed to set acquisition rate (value out of range or feature unavailable).",
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+
+        // Copy this camera's capture settings (exposure / acq rate / trigger / WB) to every other camera.
+        private void ApplyAll_Click(object sender, RoutedEventArgs e) =>
+            ApplyToAllRequested?.Invoke(this, EventArgs.Empty);
 
         private System.Windows.Threading.DispatcherTimer _rawTimer;
 

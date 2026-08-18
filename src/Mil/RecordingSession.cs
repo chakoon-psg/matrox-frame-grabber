@@ -19,8 +19,10 @@ namespace MatroxFrameGrabber.Mil
         private readonly object _lock = new object();
 
         private FfmpegRecorder _recorder;
-        private MIL_ID _captureBuf = MIL.M_NULL;   // packed BGR24 / mono at encode size (for MbufGet)
+        private MIL_ID _captureBuf = MIL.M_NULL;   // planar 3-band / mono at encode size
         private MIL_ID _resizeBuf = MIL.M_NULL;    // downscale intermediate (M_NULL if no resize)
+        private MIL_ID _b0 = MIL.M_NULL, _b1 = MIL.M_NULL, _b2 = MIL.M_NULL;  // per-band children (color)
+        private byte[] _plane;                     // reused single-band scratch (w*h) for color reads
         private ConcurrentQueue<byte[]> _pool;
         private int _w, _h, _bpp, _shift;
         private double _scaleX = 1.0, _scaleY = 1.0;
@@ -53,6 +55,7 @@ namespace MatroxFrameGrabber.Mil
             _failed = false;
 
             MIL_ID captureBuf = MIL.M_NULL, resizeBuf = MIL.M_NULL;
+            MIL_ID b0 = MIL.M_NULL, b1 = MIL.M_NULL, b2 = MIL.M_NULL;
             FfmpegRecorder recorder = null;
             try
             {
@@ -71,13 +74,21 @@ namespace MatroxFrameGrabber.Mil
                 if (w < 2 || h < 2) { error = "Resolution too small."; LastError = error; return false; }
 
                 bool color = (long)band >= 3;
-                string pixFmt = color ? "bgr24" : "gray";
+                string pixFmt = color ? "gbrp" : "gray";   // planar G,B,R (fed band-by-band, no packing)
                 int bpp = color ? 3 : 1;
                 int shift = (long)srcBit > 8 ? (int)((long)srcBit - 8) : 0;
 
-                long capAttr = color ? (MIL.M_IMAGE + MIL.M_PROC + MIL.M_PACKED + MIL.M_BGR24)
-                                     : (MIL.M_IMAGE + MIL.M_PROC);
-                MIL.MbufAllocColor(_sysId, color ? 3 : 1, w, h, 8 + MIL.M_UNSIGNED, capAttr, ref captureBuf);
+                // Planar capture buffer. Color frames are read out one band at a time (MbufGet on a
+                // single-band child) and fed to ffmpeg as planar gbrp — MbufGetColor's packing paths
+                // either hang or return zeros on this buffer, and plain MbufGet only yields band 0.
+                MIL.MbufAllocColor(_sysId, color ? 3 : 1, w, h, 8 + MIL.M_UNSIGNED,
+                    MIL.M_IMAGE + MIL.M_PROC, ref captureBuf);
+                if (color)
+                {
+                    MIL.MbufChildColor(captureBuf, 0, ref b0);   // band 0 (R)
+                    MIL.MbufChildColor(captureBuf, 1, ref b1);   // band 1 (G)
+                    MIL.MbufChildColor(captureBuf, 2, ref b2);   // band 2 (B)
+                }
                 if (scale < 0.999)
                     MIL.MbufAllocColor(_sysId, band, w, h, srcType, MIL.M_IMAGE + MIL.M_PROC, ref resizeBuf);
 
@@ -89,8 +100,7 @@ namespace MatroxFrameGrabber.Mil
                     error = string.IsNullOrEmpty(err) ? "ffmpeg failed to launch." : err;
                     LastError = error;
                     recorder.Stop();
-                    if (captureBuf != MIL.M_NULL) MIL.MbufFree(captureBuf);
-                    if (resizeBuf != MIL.M_NULL) MIL.MbufFree(resizeBuf);
+                    FreeBuffers(b0, b1, b2, captureBuf, resizeBuf);
                     return false;
                 }
 
@@ -99,6 +109,8 @@ namespace MatroxFrameGrabber.Mil
                     FilePath = path;
                     _captureBuf = captureBuf;
                     _resizeBuf = resizeBuf;
+                    _b0 = b0; _b1 = b1; _b2 = b2;
+                    _plane = color ? new byte[(int)(w * h)] : null;
                     _bpp = bpp; _w = (int)w; _h = (int)h; _shift = shift;
                     _scaleX = (double)w / srcW;
                     _scaleY = (double)h / srcH;
@@ -113,8 +125,7 @@ namespace MatroxFrameGrabber.Mil
             {
                 error = ex.Message; LastError = error;
                 try { recorder?.Stop(); } catch { }
-                if (captureBuf != MIL.M_NULL) try { MIL.MbufFree(captureBuf); } catch { }
-                if (resizeBuf != MIL.M_NULL) try { MIL.MbufFree(resizeBuf); } catch { }
+                FreeBuffers(b0, b1, b2, captureBuf, resizeBuf);
                 return false;
             }
         }
@@ -143,12 +154,20 @@ namespace MatroxFrameGrabber.Mil
                         MIL.MbufCopy(src, _captureBuf);
 
                     byte[] frame = _pool != null && _pool.TryDequeue(out byte[] b) ? b : new byte[_w * _h * _bpp];
-                    MIL.MbufGet(_captureBuf, frame);
+                    if (_bpp == 3)
+                    {
+                        int wh = _w * _h;                                   // planar gbrp: [G][B][R]
+                        MIL.MbufGet(_b1, _plane); Buffer.BlockCopy(_plane, 0, frame, 0, wh);        // G
+                        MIL.MbufGet(_b2, _plane); Buffer.BlockCopy(_plane, 0, frame, wh, wh);       // B
+                        MIL.MbufGet(_b0, _plane); Buffer.BlockCopy(_plane, 0, frame, 2 * wh, wh);   // R
+                    }
+                    else
+                        MIL.MbufGet(_captureBuf, frame);
                     _recorder.WriteFrame(frame);
                 }
-                catch (MILException)
+                catch
                 {
-                    // Drop this frame rather than tear down mid-callback.
+                    // Drop this frame rather than tear down the recording mid-callback.
                 }
             }
         }
@@ -157,7 +176,7 @@ namespace MatroxFrameGrabber.Mil
         public void Stop()
         {
             FfmpegRecorder recorder;
-            MIL_ID cap, rez;
+            MIL_ID cap, rez, cb0, cb1, cb2;
             lock (_lock)
             {
                 if (!_active) return;
@@ -165,13 +184,15 @@ namespace MatroxFrameGrabber.Mil
                 recorder = _recorder; _recorder = null;
                 cap = _captureBuf; _captureBuf = MIL.M_NULL;
                 rez = _resizeBuf; _resizeBuf = MIL.M_NULL;
+                cb0 = _b0; cb1 = _b1; cb2 = _b2;
+                _b0 = _b1 = _b2 = MIL.M_NULL;
+                _plane = null;
                 _pool = null;
             }
             _finalizeTask = Task.Run(() =>
             {
                 try { recorder?.Stop(); } catch { }
-                try { if (cap != MIL.M_NULL) MIL.MbufFree(cap); } catch { }
-                try { if (rez != MIL.M_NULL) MIL.MbufFree(rez); } catch { }
+                FreeBuffers(cb0, cb1, cb2, cap, rez);   // children before parent
             });
         }
 
@@ -198,6 +219,16 @@ namespace MatroxFrameGrabber.Mil
         {
             _failed = true;
             LastError = _recorder?.LastError ?? "ffmpeg stopped unexpectedly.";
+        }
+
+        /// <summary>Frees band children before their parent capture buffer, then the resize buffer.</summary>
+        private static void FreeBuffers(MIL_ID b0, MIL_ID b1, MIL_ID b2, MIL_ID cap, MIL_ID rez)
+        {
+            try { if (b0 != MIL.M_NULL) MIL.MbufFree(b0); } catch { }
+            try { if (b1 != MIL.M_NULL) MIL.MbufFree(b1); } catch { }
+            try { if (b2 != MIL.M_NULL) MIL.MbufFree(b2); } catch { }
+            try { if (cap != MIL.M_NULL) MIL.MbufFree(cap); } catch { }
+            try { if (rez != MIL.M_NULL) MIL.MbufFree(rez); } catch { }
         }
     }
 }
