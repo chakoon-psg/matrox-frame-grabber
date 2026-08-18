@@ -150,27 +150,34 @@ namespace MatroxFrameGrabber.ViewModels
 
         private DispatcherTimer _rawAllTimer;
 
-        /// <summary>Starts a lossless RAW recording on every present camera, or stops all if any are.</summary>
-        public void ToggleRawAll()
+        /// <summary>
+        /// Starts a lossless RAW recording on every present camera, or stops all if any are.
+        /// Returns a combined error message for channels that failed to start (null if all OK).
+        /// </summary>
+        public string ToggleRawAll()
         {
             if (AnyRawRecording)
             {
                 StopRawAll();
-                return;
+                return null;
             }
 
+            var errors = new List<string>();
             foreach (var channel in _manager.Channels)
-                if (channel.CameraPresent)
-                    channel.StartRawRecording(out _);
+                if (channel.CameraPresent && !channel.StartRawRecording(out string err))
+                    errors.Add($"{channel.Name}: {err}");
             RaiseChanged(nameof(AnyRawRecording));
 
+            // Only arm the auto-stop timer if at least one camera actually started.
             int seconds = Output.RawDurationSeconds;
-            if (seconds > 0)
+            if (seconds > 0 && AnyRawRecording)
             {
                 _rawAllTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(seconds) };
                 _rawAllTimer.Tick += (s, e) => StopRawAll();
                 _rawAllTimer.Start();
             }
+
+            return errors.Count > 0 ? string.Join("\n", errors) : null;
         }
 
         private void StopRawAll()

@@ -117,6 +117,7 @@ namespace MatroxFrameGrabber.Mil
         private bool _rawConverting;
         private string _rawPath;
         private int _rawW, _rawH, _rawDisplayCounter;
+        private long _rawMissed;
         private DateTime _rawStartTime;
         private volatile bool _rawFinishedPending;
         private bool _rawFinishedOk;
@@ -630,6 +631,16 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_RATE, ref rate);
                 _frameRate = rate;
 
+                // While RAW-recording, track frames the board dropped (queue back-pressure on a slow
+                // sink), so a "lossless" capture that actually lost frames is visible in the status.
+                if (_rawRecording)
+                {
+                    MIL_INT missed = 0;
+                    try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
+                    catch (MILException) { }
+                    _rawMissed = missed;
+                }
+
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
                 try { present = MIL.MdigInquire(_digId, MIL.M_CAMERA_PRESENT, MIL.M_NULL) != MIL.M_NO; }
@@ -658,6 +669,11 @@ namespace MatroxFrameGrabber.Mil
                 StopRecording();
                 RecordingFailed?.Invoke(this, err ?? "Recording stopped unexpectedly.");
             }
+
+            // RAW writer died (disk/NAS write error) mid-recording — stop now; StopRawRecording's
+            // conversion step reads the writer's Failed flag and surfaces the error to the UI.
+            if (_rawRecording && _rawWriter != null && _rawWriter.Failed)
+                StopRawRecording();
 
             // Surface a completed raw-MP4 conversion (set by the background convert task).
             if (_rawFinishedPending)
@@ -856,38 +872,45 @@ namespace MatroxFrameGrabber.Mil
             _rawResumeGrab = _isGrabbing;
             if (_isGrabbing) StopGrab();
 
-            SetBayerConversion(false);          // board sends raw Bayer band=1 (~3x smaller)
-            FreeBuffers();
-            AllocateBuffers(RAW_GRAB_BUFFERS);  // band=1 display + deep band=1 grab ring
-
-            _rawW = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
-            _rawH = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
-            int band = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
-
-            if (band != 1)
-            {
-                // Camera has no Bayer filter (mono) or the board ignored the request — abort safely.
-                error = "This camera does not support raw Bayer (band=1) capture.";
-                RestoreColorAfterRaw();
-                return false;
-            }
-
-            _rawPath = Path.Combine(folder, $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}.raw");
+            // Everything below mutates the board (Bayer OFF), buffers, and the writer. Any failure
+            // here — especially a MILException from StartGrab — must NOT leave the board in raw mode
+            // or leak the writer, so the whole sequence is guarded and restores color on fault.
             try
             {
+                SetBayerConversion(false);          // board sends raw Bayer band=1 (~3x smaller)
+                FreeBuffers();
+                AllocateBuffers(RAW_GRAB_BUFFERS);  // band=1 display + deep band=1 grab ring
+
+                _rawW = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+                _rawH = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+                int band = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
+
+                if (band != 1)
+                {
+                    // Camera has no Bayer filter (mono) or the board ignored the request — abort safely.
+                    error = "This camera does not support raw Bayer (band=1) capture.";
+                    RestoreColorAfterRaw();
+                    return false;
+                }
+
+                _rawPath = Path.Combine(folder, $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}.raw");
                 _rawWriter = new RawFrameWriter(_rawPath, _rawW * _rawH * band);
+                _rawDisplayCounter = 0;
+                _rawMissed = 0;
+                _rawStartTime = DateTime.Now;
+                _rawRecording = true;
+                StartGrab();
             }
             catch (Exception e)
             {
-                error = "Could not open output file: " + e.Message;
-                RestoreColorAfterRaw();
+                error = "Failed to start RAW recording: " + e.Message;
+                var w = _rawWriter;
+                _rawWriter = null;
+                _rawRecording = false;
+                if (w != null) { try { w.CompleteAndWait(2000); w.Dispose(); } catch { } }
+                RestoreColorAfterRaw();   // guarantees Bayer conversion is turned back ON
                 return false;
             }
-
-            _rawDisplayCounter = 0;
-            _rawStartTime = DateTime.Now;
-            _rawRecording = true;
-            StartGrab();
 
             RaisePropertyChanged(nameof(IsRawRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -902,10 +925,12 @@ namespace MatroxFrameGrabber.Mil
 
             if (_isGrabbing) StopGrab();
 
-            RawFrameWriter w = _rawWriter;
-            _rawWriter = null;
-            _rawRecording = false;
+            // Capture the stop instant BEFORE draining the queue: CompleteAndWait can block for
+            // seconds on a lagging sink, and that drain time is not part of the capture window —
+            // including it would deflate fps and produce a slow-motion MP4.
+            double elapsed = Math.Max(0.001, (DateTime.Now - _rawStartTime).TotalSeconds);
 
+            RawFrameWriter w = _rawWriter;   // RestoreColorAfterRaw clears the field
             long written = 0; bool writeFailed = false; string writeErr = null;
             if (w != null)
             {
@@ -916,10 +941,9 @@ namespace MatroxFrameGrabber.Mil
                 w.Dispose();
             }
 
-            double elapsed = Math.Max(0.001, (DateTime.Now - _rawStartTime).TotalSeconds);
             double fps = written > 0 ? written / elapsed : InquireNominalFps();
 
-            RestoreColorAfterRaw();
+            RestoreColorAfterRaw();   // clears _rawWriter/_rawRecording and restores color
 
             // Transcode the raw Bayer file to a color MP4 in the background (playback-realtime-ish).
             _rawConverting = true;
@@ -934,10 +958,10 @@ namespace MatroxFrameGrabber.Mil
         {
             _rawWriter = null;
             _rawRecording = false;
-            SetBayerConversion(true);
+            SetBayerConversion(true);   // critical: do this FIRST so color is restored even if the rest faults
             FreeBuffers();
             AllocateBuffers(REQUESTED_GRAB_BUFFERS);
-            if (_rawResumeGrab) StartGrab();
+            if (_rawResumeGrab) { try { StartGrab(); } catch (MILException) { } }
             RaisePropertyChanged(nameof(IsRawRecording));
             RaisePropertyChanged(nameof(StatusText));
         }
@@ -1018,7 +1042,8 @@ namespace MatroxFrameGrabber.Mil
             if (_rawRecording)
             {
                 var t = DateTime.Now - _rawStartTime;
-                return $"  ● REC RAW {(int)t.TotalMinutes:00}:{t.Seconds:00}";
+                string drop = _rawMissed > 0 ? $"  ⚠ dropped {_rawMissed}" : "";
+                return $"  ● REC RAW {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
             }
             if (_rawConverting)
                 return "  (converting → MP4…)";

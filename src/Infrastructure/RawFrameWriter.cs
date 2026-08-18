@@ -62,8 +62,11 @@ namespace MatroxFrameGrabber.Infrastructure
             }
             catch (Exception e)
             {
-                Failed = true;
                 LastError = e.Message;
+                Failed = true;   // volatile write publishes LastError to readers
+                // Unblock any producer blocked on Add() so the acquisition hook can't hang forever
+                // (subsequent Enqueue calls then throw InvalidOperationException, caught + ignored).
+                try { _queue.CompleteAdding(); } catch { /* already completed/disposed */ }
             }
         }
 

@@ -130,7 +130,10 @@ namespace MatroxFrameGrabber.Views
 
         private void RawAll_Click(object sender, RoutedEventArgs e)
         {
-            _viewModel?.ToggleRawAll();
+            string errors = _viewModel?.ToggleRawAll();
+            if (!string.IsNullOrEmpty(errors))
+                MessageBox.Show("Some cameras could not start RAW recording:\n\n" + errors,
+                    "RAW All", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
         // Only surface RAW conversion FAILURES (success just leaves the .mp4 in the output folder).
