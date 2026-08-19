@@ -1,53 +1,57 @@
 # CLAUDE.md
 
-Guidance for working in this repository.
+이 저장소에서 작업할 때의 지침.
 
-## What this is
+용어는 [CONTEXT.md](CONTEXT.md)의 정의를 따른다. 특히 **채널**(보드의 취득 슬롯, 항상 4개)과
+**카메라**(채널에 실제로 연결된 장치, 없을 수 있음)를 구분한다.
 
-A C# **WPF** desktop app that displays and processes up to **4 cameras** on one Matrox
-**Rapixo CXP** (CoaXPress) frame-grabber board via the **MIL** (Matrox Imaging Library) API.
-Live grab + per-frame processing, with per-camera exposure / acquisition-rate / trigger /
-white-balance / DCF control, fit-to-window + mouse zoom/pan, double-click fullscreen, snapshot,
-and **two recording modes** (see below).
+## 무엇인가
 
-For a line-by-line walkthrough of `src/` — per-file roles, every handled exception case, and the
-reasoning behind each MIL workaround — see [research.md](research.md).
+Matrox **Rapixo CXP**(CoaXPress) 프레임그래버 보드 한 장의 **채널 4개**를 **MIL**(Matrox
+Imaging Library) API로 다루며 화면에 표시하고 처리하는 C# **WPF** 데스크톱 앱.
+라이브 grab과 프레임 단위 처리를 하고, 채널별로 노출 / 취득 프레임레이트 / 트리거 /
+화이트밸런스 / DCF를 제어한다. 창 맞춤과 마우스 줌·팬, 더블클릭 전체화면, 스냅샷,
+그리고 **녹화 모드 두 가지**(아래 참고)를 지원한다.
 
-## Prerequisites
+`src/`의 줄 단위 해설 — 파일별 역할, 처리하는 모든 예외 경우, MIL 우회책마다의 근거 —
+은 [research.md](research.md)를 볼 것.
 
-- **MIL 10.70** installed (`C:\Program Files\Matrox Imaging\MIL`). The MIL .NET NuGet packages
-  are consumed from the local source registered in `src/nuget.config`
+## 전제조건
+
+- **MIL 10.70** 설치(`C:\Program Files\Matrox Imaging\MIL`). MIL .NET NuGet 패키지는
+  `src/nuget.config`에 등록된 로컬 소스에서 가져온다
   (`C:\Program Files\Matrox Imaging\MIL\MIL.NET\NuGet`).
-- A **Rapixo CXP** board with cameras for live grab (without hardware the app falls back to the
-  default MIL system and shows "No camera" panes).
-- **x64** only (MIL NuGet supports x64/arm64 only). Target framework **net6.0-windows**
-  (installed WindowsDesktop runtime; matches the shipped MIL WPF examples).
-- **ffmpeg.exe** for recording — not a NuGet dependency; resolved at runtime (configured path →
-  `PATH` → WinGet → `C:\ffmpeg\bin`). If it isn't found, `CanRecord` is false and **both** record
-  buttons are disabled. All encoding goes through ffmpeg; no MIL compression licence is used.
+- 라이브 grab에는 카메라가 연결된 **Rapixo CXP** 보드가 필요하다(하드웨어가 없으면 기본 MIL
+  시스템으로 폴백하고 "No camera" pane을 보여준다).
+- **x64** 전용(MIL NuGet이 x64/arm64만 지원). 대상 프레임워크는 **net6.0-windows**
+  (설치된 WindowsDesktop 런타임 기준이며, MIL이 배포한 WPF 예제와 맞춘 것).
+- 녹화에는 **ffmpeg.exe**가 필요하다. NuGet 의존성이 아니라 런타임에 탐색한다(설정된 경로 →
+  `PATH` → WinGet → `C:\ffmpeg\bin`). 찾지 못하면 `CanRecord`가 false가 되어 녹화 버튼
+  **두 개 모두** 비활성화된다. 모든 인코딩은 ffmpeg를 거치며 MIL 압축 라이선스는 쓰지 않는다
+  (`docs/adr/0001-ffmpeg-for-all-encoding.md` 참고).
 
-## Build & run
+## 빌드와 실행
 
 ```bash
 dotnet build MatroxFrameGrabber.slnx -c Release
 ```
 
-Output exe (note the `x64` segment — `Platforms=x64` nests output under `bin\x64\`):
+출력 exe (`x64` 경로 조각에 주의 — `Platforms=x64`라 출력이 `bin\x64\` 아래로 들어간다):
 
 ```
 src\bin\x64\Release\net6.0-windows\MatroxFrameGrabber.exe
 ```
 
-## Layout
+## 구조
 
 ```
-MatroxFrameGrabber.slnx        solution (root)
+MatroxFrameGrabber.slnx        솔루션 (루트)
 src/
-  MatroxFrameGrabber.csproj    SDK-style, UseWPF + UseWindowsForms (folder picker only), x64
-  nuget.config                 MIL.NET local package source
+  MatroxFrameGrabber.csproj    SDK 형식, UseWPF + UseWindowsForms (폴더 선택기 전용), x64
+  nuget.config                 MIL.NET 로컬 패키지 소스
   App.xaml(.cs)                MatroxFrameGrabber
   Views/                       MatroxFrameGrabber.Views
-                                 MainWindow, CameraPaneView, Styles.xaml (dark theme)
+                                 MainWindow, CameraPaneView, Styles.xaml (다크 테마)
   ViewModels/                  MatroxFrameGrabber.ViewModels (MainViewModel)
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
@@ -56,67 +60,82 @@ src/
                                  OutputSettings, FfmpegRecorder, RawFrameWriter,
                                  RawSegmentSession, RelayCommand, NativeMethods
 docs/
-research.md                    in-depth src/ analysis
+research.md                    src/ 심층 분석
 ```
 
-`CameraChannel` is the core: per camera it does `MdigAlloc(M_DEV0+i)` + `MdispAlloc(M_WPF)` +
-display buffer + grab ring + `MdigProcess` hook, plus GenICam feature control. It is **both model
-and view-model** (implements `INotifyPropertyChanged`, exposes `RelayCommand`s, and is bound
-directly as a pane's `DataContext`) — that's why it's ~1400 lines.
-`MilApplicationManager` owns the shared app/system and creates one `CameraChannel` per channel.
+핵심은 `CameraChannel`이다. 채널마다 `MdigAlloc(M_DEV0+i)` + `MdispAlloc(M_WPF)` +
+디스플레이 버퍼 + grab 링 + `MdigProcess` 훅을 잡고, GenICam 피처 제어까지 한다.
+이 클래스는 **모델이자 뷰모델**이다(`INotifyPropertyChanged`를 구현하고 `RelayCommand`를
+노출하며 pane의 `DataContext`로 직접 바인딩된다) — 그래서 약 1400줄이다.
+`MilApplicationManager`는 공유 앱·시스템을 소유하고 채널마다 `CameraChannel`을 하나씩 만든다.
 
-## The two recording modes
+## 녹화 모드 두 가지
 
-They are mutually exclusive per camera and have **deliberately opposite back-pressure policies**.
+채널별로 **상호 배타**이며, 부하가 걸렸을 때의 정책이 **의도적으로 정반대**다.
 
-| | `● Rec` (live colour) | `◆ RAW` (lossless) |
+| | `● Rec` (Live recording) | `◆ RAW` (RAW recording) |
 |---|---|---|
-| Class | `RecordingSession` | `RawSegmentSession` + `RawFrameWriter` |
-| Source | display buffer (3-band colour) | grab buffer (1-band Bayer) |
-| Path | MIL → memory → ffmpeg **stdin pipe** | MIL → local `.raw` segments → ffmpeg **batch** |
-| Pixel format | `gbrp` / `gray` | sensor's `bayer_*8` (from `M_BAYER_PATTERN`) |
-| Under load | **drops frames** (live view wins) | **blocks the hook** (no frame is lost) |
-| Preview | normal colour | **grayscale**, every 6th frame |
-| Board state | untouched | `M_BAYER_CONVERSION` **disabled** |
-| Resolution preset | honoured | always full native |
+| 클래스 | `RecordingSession` | `RawSegmentSession` + `RawFrameWriter` |
+| 소스 | 디스플레이 버퍼 (3밴드 컬러) | grab 버퍼 (1밴드 Bayer) |
+| 경로 | MIL → 메모리 → ffmpeg **stdin 파이프** | MIL → 로컬 `.raw` segment → ffmpeg **배치** |
+| 픽셀 포맷 | `gbrp` / `gray` | 센서의 `bayer_*8` (`M_BAYER_PATTERN`에서 조회) |
+| 부하 시 | **프레임을 버린다** (라이브 뷰 우선) | **훅을 막는다** (프레임을 잃지 않는다) |
+| 프리뷰 | 정상 컬러 | **흑백**, 6프레임마다 한 장 |
+| 보드 상태 | 건드리지 않음 | `M_BAYER_CONVERSION` **비활성** |
+| 해상도 프리셋 | 적용됨 | 항상 원본 해상도 |
 
-RAW writes segments to a local scratch folder (fast NVMe) and only the converted MP4s go to the
-output folder, which may be on a NAS — RAW is far too fast for network storage.
+RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만 출력 폴더로 보낸다.
+출력 폴더는 NAS일 수 있는데, RAW는 네트워크 저장소가 감당하기에 너무 빠르다.
 
-## Gotchas (learned the hard way)
+## 함정 (겪고 나서 알게 된 것들)
 
-- The board reports **4 digitizers even when fewer cameras are connected**; `MdigAlloc` on an
-  empty port raises a modal MIL error dialog even under `M_THROW_EXCEPTION`. The probe is wrapped
-  in `MappControl(M_ERROR, M_PRINT_DISABLE/ENABLE)` — keep that, and always restore in a `finally`
-  (otherwise every later MIL error disappears silently).
-- **`M_BAYER_CONVERSION` is a persistent board setting.** Turning it off for RAW capture survives
-  the grab, the app, and a restart — after which the colour pipeline misreads raw/mono data as a
-  tiled, garbled image. It is re-asserted on every `AllocateCamera` (before inquiring
-  `M_SIZE_BAND`), and `RestoreColorAfterRaw()` turns it back on **first**, before anything else
-  that could fault. Any new code that disables it must guarantee the same restore.
-- A `MILWPFDisplay` constructed with an unbound/zero `DisplayId` pops a native MIL error dialog,
-  so the display controls are created **lazily in code** once a channel with a valid DisplayId
-  exists (see `CameraPaneView` and the fullscreen overlay in `MainWindow`). `MainWindow`'s
-  constructor allocates MIL and sets `DataContext` *before* `InitializeComponent()` for the same
-  reason.
-- Grab buffers use scarce **non-paged/DMA memory**; the display buffer drops `M_GRAB` (paged) and
-  the grab ring is kept small (4; 24 for RAW, whose band-1 frames are ~3x smaller). Each
-  allocation is individually guarded — a shortfall degrades instead of aborting startup. Increase
-  MIL's non-paged pool in **MILConfig** if needed.
-- **`MbufGet` copies the row-padded buffer** (pitch 2112 > width 2064), which shears the image
-  when read back as tight rows. Use `MbufGet2d` when you need the logical W×H region packed.
-- **Do not use `MbufGetColor` to extract colour bytes.** Its packing path hangs on these buffers
-  and the planar path silently returns zeros. Allocate a planar 3-band buffer, make per-band
-  children with `MbufChildColor`, `MbufGet` each band, and feed ffmpeg planar `gbrp` — and free
-  the children **before** the parent.
-- A `MILWPFDisplay` with `M_KEYBOARD_USE` makes MIL subclass the top-level HWND and swallow key
-  messages before WPF turns them into routed events, so `PreviewKeyDown` never fires. Fullscreen
-  ESC is caught via `ComponentDispatcher.ThreadFilterMessage` instead.
-- Interactive zoom/pan is native MIL (`M_MOUSE_USE`/`M_KEYBOARD_USE`); fit-to-window uses
-  `M_SCALE_DISPLAY, M_ONCE` — `M_ENABLE` would lock manual zoom/pan.
-- Anything you add to the `MdigProcess` hook runs in the acquisition budget. Heavy work doesn't
-  just lag the preview, it stalls the grab (and on the RAW path shows up immediately as
-  `M_PROCESS_FRAME_MISSED`).
-- UI state is refreshed by **one 500 ms `DispatcherTimer`** calling `RefreshStats()` on every
-  channel. To surface a new value, raise it there; only three things are pushed as events
+- 보드는 **연결된 카메라가 더 적어도 디지타이저 4개를 보고한다.** 비어 있는 포트에
+  `MdigAlloc`을 하면 `M_THROW_EXCEPTION` 아래에서도 모달 MIL 오류 대화상자가 뜬다. 그래서 탐지
+  구간을 `MappControl(M_ERROR, M_PRINT_DISABLE/ENABLE)`로 감쌌다 — 이걸 유지하고, 반드시
+  `finally`에서 복원할 것(안 그러면 이후의 모든 MIL 오류가 조용히 사라진다).
+- **`M_BAYER_CONVERSION`은 보드에 남는 영속 설정이다.** RAW 캡처를 위해 꺼 두면 grab이 끝나도,
+  앱을 종료해도, 재부팅해도 그대로 남는다. 그 상태에서 컬러 파이프라인이 raw/모노 데이터를
+  잘못 읽어 타일처럼 깨진 이미지가 나온다. 매 `AllocateCamera`에서(`M_SIZE_BAND`를 조회하기
+  전에) 다시 켜도록 해 두었고, `RestoreColorAfterRaw()`는 실패할 수 있는 다른 어떤 작업보다
+  **먼저** 이것을 되돌린다. 이 설정을 끄는 코드를 새로 추가한다면 같은 복원을 반드시 보장할 것.
+- 바인딩되지 않은(0인) `DisplayId`로 `MILWPFDisplay`를 만들면 네이티브 MIL 오류 대화상자가
+  뜬다. 그래서 디스플레이 컨트롤은 유효한 DisplayId를 가진 채널이 생긴 뒤에 **코드에서 지연
+  생성**한다(`CameraPaneView`와 `MainWindow`의 전체화면 오버레이 참고). 같은 이유로
+  `MainWindow` 생성자는 `InitializeComponent()` *이전에* MIL을 할당하고 `DataContext`를 설정한다.
+- grab 버퍼는 희소한 **비페이지드/DMA 메모리**를 쓴다. 디스플레이 버퍼는 `M_GRAB`을 빼고
+  (페이지드), grab 링은 작게 유지한다(4개. RAW는 24개인데 band-1 프레임이 약 3배 작다).
+  할당마다 개별적으로 방어해 두어서, 부족하면 시작을 중단하는 대신 성능을 낮춘다. 필요하면
+  **MILConfig**에서 MIL의 비페이지드 풀을 늘릴 것.
+- **`MbufGet`은 행 패딩이 들어간 버퍼를 그대로 복사한다**(pitch 2112 > width 2064). 이를 빈틈
+  없는 행으로 읽으면 이미지가 어긋난다. 논리적 W×H 영역을 촘촘하게 받아야 할 때는
+  `MbufGet2d`를 쓸 것.
+- **컬러 바이트를 뽑을 때 `MbufGetColor`를 쓰지 말 것.** 이 버퍼들에서는 패킹 경로가 멈추고,
+  플래나 경로는 조용히 0만 돌려준다. 플래나 3밴드 버퍼를 할당하고 `MbufChildColor`로 밴드별
+  자식을 만든 뒤 각 밴드를 `MbufGet`해서 ffmpeg에 플래나 `gbrp`로 넘길 것. 그리고 자식을
+  부모보다 **먼저** 해제할 것.
+- `M_KEYBOARD_USE`가 걸린 `MILWPFDisplay`는 MIL이 최상위 HWND를 서브클래싱하게 만들어, WPF가
+  라우팅 이벤트로 바꾸기 전에 키 메시지를 삼킨다. 그래서 `PreviewKeyDown`이 아예 발생하지
+  않는다. 전체화면 ESC는 대신 `ComponentDispatcher.ThreadFilterMessage`로 잡는다.
+- 대화형 줌·팬은 네이티브 MIL이 처리한다(`M_MOUSE_USE`/`M_KEYBOARD_USE`). 창 맞춤은
+  `M_SCALE_DISPLAY, M_ONCE`를 쓴다 — `M_ENABLE`을 쓰면 수동 줌·팬이 잠긴다.
+- `MdigProcess` 훅에 무엇을 추가하든 그것은 취득 예산 안에서 실행된다. 무거운 작업은 프리뷰만
+  느려지게 하는 게 아니라 grab 자체를 정체시키고, RAW 경로에서는 즉시
+  `M_PROCESS_FRAME_MISSED`로 드러난다.
+- UI 상태는 **500ms짜리 `DispatcherTimer` 하나**가 모든 채널의 `RefreshStats()`를 호출해
+  갱신한다. 새 값을 노출하려면 거기서 올릴 것. 이벤트로 밀어내는 것은 세 가지뿐이다
   (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`).
+
+## 에이전트 스킬
+
+### 이슈 트래커
+
+이슈는 이 리포의 GitHub 이슈(`chakoon-psg/matrox-frame-grabber`)에 두고 `gh` CLI로 다룬다.
+`docs/agents/issue-tracker.md` 참고.
+
+### 트리아지 라벨
+
+다섯 가지 정규 역할을 쓰며, 라벨 문자열은 역할 이름과 같다. `docs/agents/triage-labels.md` 참고.
+
+### 도메인 문서
+
+단일 컨텍스트 — 루트의 `CONTEXT.md`와 `docs/adr/`. `docs/agents/domain.md` 참고.
