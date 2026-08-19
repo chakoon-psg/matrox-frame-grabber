@@ -2,10 +2,12 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- net6.0-windows matches the shipped MIL C# WPF examples and the installed
-         WindowsDesktop 6.0 runtime. The MIL NuGet packages only support x64/arm64,
-         so the whole app is pinned to x64. -->
-    <TargetFramework>net6.0-windows</TargetFramework>
+    <!-- net10.0-windows: net6.0 went out of support, so it is no longer a safe floor. The MIL
+         NuGet packages ship net6.0 / net6.0-windows7.0 assets, which a higher TFM consumes
+         unchanged — the upgrade costs nothing on the MIL side. The consequence is on deployment:
+         field PCs need the WindowsDesktop 10.0 runtime, not 6.0 (see README prerequisites).
+         The MIL NuGet packages only support x64/arm64, so the whole app is pinned to x64. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <!-- WinForms only for the folder-picker dialog (FolderBrowserDialog). -->
     <UseWindowsForms>true</UseWindowsForms>

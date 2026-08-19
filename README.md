@@ -43,7 +43,7 @@ RAW는 설정한 길이(기본 60초)마다 세그먼트를 끊어 백그라운�
 
 ## 요구 사항
 
-- Windows x64, **MIL 10.70** 설치, WindowsDesktop(net6.0) 런타임이 포함된 .NET SDK
+- Windows x64, **MIL 10.70** 설치, WindowsDesktop(net10.0) 런타임이 포함된 .NET SDK
 - 라이브 그랩에는 카메라가 연결된 Rapixo CXP 보드 필요 (하드웨어가 없으면 기본 MIL 시스템으로
   대체되어 "No camera" 패널 표시)
 - **녹화에는 `ffmpeg.exe` 필요** — 설정 경로 → 앱 폴더 → `PATH` → WinGet → `C:\ffmpeg\bin` 순으로 자동 탐색.
@@ -58,7 +58,7 @@ RAW는 설정한 길이(기본 60초)마다 세그먼트를 끊어 백그라운�
 현장 PC에 필요한 것:
 
 - Rapixo CXP 보드와 드라이버, **MIL 10.70**
-- **.NET SDK** (net6.0-windows 대상 빌드가 가능한 버전)
+- **.NET SDK** (net10.0-windows 대상 빌드가 가능한 버전, SDK 10.0 이상)
 - **ffmpeg** — `winget install Gyan.FFmpeg`. 없으면 빌드는 되지만 녹화 버튼이 비활성화된다.
 
 ```bash
@@ -79,11 +79,11 @@ ffmpeg를 다른 버전으로 바꾸려면 `tools/ffmpeg/ffmpeg.exe`를 지우�
 회사에서 위와 같이 빌드한 뒤 **출력 폴더 전체**를 현장 PC의 설치 위치에 덮어쓴다.
 
 ```
-src\bin\x64\Release\net6.0-windows\
+src\bin\x64\Release\net10.0-windows\
 ```
 
 이 폴더에 `ffmpeg.exe`와 `LICENSES/`가 함께 들어 있으므로 따로 챙길 것이 없다.
-현장 PC에 이미 있어야 하는 것은 **MIL 10.70**, **Rapixo 드라이버**, **WindowsDesktop(net6.0) 런타임**이다. SDK는 이 경로에서는 필요 없다.
+현장 PC에 이미 있어야 하는 것은 **MIL 10.70**, **Rapixo 드라이버**, **WindowsDesktop(net10.0) 런타임**이다. SDK는 이 경로에서는 필요 없다.
 
 앱은 자기 폴더의 `ffmpeg.exe`를 가장 먼저 찾으므로 실행 계정이나 그 PC의 winget 설치 상태와 무관하게 동작한다. 실제로 어떤 ffmpeg가 쓰이는지는 툴바의 Recording settings 팝업에서 확인할 수 있다.
 
@@ -93,7 +93,7 @@ src\bin\x64\Release\net6.0-windows\
 dotnet build MatroxFrameGrabber.slnx -c Release
 ```
 
-실행: `src/bin/x64/Release/net6.0-windows/MatroxFrameGrabber.exe`
+실행: `src/bin/x64/Release/net10.0-windows/MatroxFrameGrabber.exe`
 
 ## 프로젝트 구조
 

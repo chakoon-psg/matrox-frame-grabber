@@ -11,7 +11,7 @@
 Matrox **Rapixo CXP**(CoaXPress) 프레임그래버 1장에 물린 **최대 4대**의 카메라를 **MIL 10.70** .NET
 바인딩으로 라이브 그랩·표시하고, GenICam 피처로 제어하며, 스냅샷 / H.264 라이브 녹화 /
 **무손실 RAW-Bayer 세그먼트 녹화** 3가지 산출물을 만드는 단일 프로세스
-**WPF(net6.0-windows, x64)** 데스크톱 앱.
+**WPF(net10.0-windows, x64)** 데스크톱 앱.
 
 ---
 
@@ -429,10 +429,10 @@ try {
 ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 
 **프레임워크 / 빌드**
-- `net6.0-windows`, `UseWPF=true`, **`UseWindowsForms=true`**(오직 `FolderBrowserDialog` 때문 — csproj 주석에 명시)
+- `net10.0-windows`, `UseWPF=true`, **`UseWindowsForms=true`**(오직 `FolderBrowserDialog` 때문 — csproj 주석에 명시)
 - `Platforms=x64`, `PlatformTarget=x64`(MIL NuGet이 x64/arm64만 지원)
 - `Nullable=disable`, `ImplicitUsings=disable` → **모든 파일이 `using`을 명시**하고 `?` 어노테이션이 없다
-- 산출물: `src\bin\x64\Release\net6.0-windows\MatroxFrameGrabber.exe`
+- 산출물: `src\bin\x64\Release\net10.0-windows\MatroxFrameGrabber.exe`
   (`Platforms=x64` 때문에 `bin\x64\` 세그먼트가 낀다)
 - 빌드: `dotnet build MatroxFrameGrabber.slnx -c Release` (`.slnx` 신형 솔루션 포맷)
 - `.gitattributes`: `* text=auto`, `.sln/.slnx/.csproj`는 CRLF 고정

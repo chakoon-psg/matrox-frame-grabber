@@ -23,8 +23,10 @@ Imaging Library) API로 다루며 화면에 표시하고 처리하는 C# **WPF**
   (`C:\Program Files\Matrox Imaging\MIL\MIL.NET\NuGet`).
 - 라이브 grab에는 카메라가 연결된 **Rapixo CXP** 보드가 필요하다(하드웨어가 없으면 기본 MIL
   시스템으로 폴백하고 "No camera" pane을 보여준다).
-- **x64** 전용(MIL NuGet이 x64/arm64만 지원). 대상 프레임워크는 **net6.0-windows**
-  (설치된 WindowsDesktop 런타임 기준이며, MIL이 배포한 WPF 예제와 맞춘 것).
+- **x64** 전용(MIL NuGet이 x64/arm64만 지원). 대상 프레임워크는 **net10.0-windows**
+  (net6.0이 지원 종료되어 올렸다. MIL NuGet은 `net6.0` / `net6.0-windows7.0` 자산을 담고 있어
+  상위 TFM에서 그대로 참조된다 — MIL이 배포한 WPF 예제가 net6.0인 것과는 무관하다.
+  대신 현장 PC에는 **WindowsDesktop 10.0** 런타임이 있어야 한다).
 - 녹화에는 **ffmpeg.exe**가 필요하다. NuGet 의존성이 아니라 런타임에 탐색한다(설정된 경로 →
   앱 폴더 → `PATH` → WinGet → `C:\ffmpeg\bin`). 찾지 못하면 `CanRecord`가 false가 되어 녹화 버튼
   **두 개 모두** 비활성화된다. 모든 인코딩은 ffmpeg를 거치며 MIL 압축 라이선스는 쓰지 않는다
@@ -39,7 +41,7 @@ dotnet build MatroxFrameGrabber.slnx -c Release
 출력 exe (`x64` 경로 조각에 주의 — `Platforms=x64`라 출력이 `bin\x64\` 아래로 들어간다):
 
 ```
-src\bin\x64\Release\net6.0-windows\MatroxFrameGrabber.exe
+src\bin\x64\Release\net10.0-windows\MatroxFrameGrabber.exe
 ```
 
 ## 구조
