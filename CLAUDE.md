@@ -56,10 +56,11 @@ src/
   ViewModels/                  MatroxFrameGrabber.ViewModels (MainViewModel)
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
-                                 GenICamFeatures, RecordingSession
+                                 GenICamFeatures, RecordingSession, BrightnessMeter
   Infrastructure/              MatroxFrameGrabber.Infrastructure
                                  OutputSettings, FfmpegRecorder, RawFrameWriter,
-                                 RawSegmentSession, RelayCommand, NativeMethods
+                                 RawSegmentSession, RelayCommand, NativeMethods,
+                                 BrightnessHistory
 docs/
 LICENSES/                       동봉 서드파티 라이선스 고지
 tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
@@ -126,7 +127,8 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `M_PROCESS_FRAME_MISSED`로 드러난다.
 - UI 상태는 **500ms짜리 `DispatcherTimer` 하나**가 모든 채널의 `RefreshStats()`를 호출해
   갱신한다. 새 값을 노출하려면 거기서 올릴 것. 이벤트로 밀어내는 것은 세 가지뿐이다
-  (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`).
+  (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`). 밝기 측정도 이 틱 위에서 돈다 —
+  취득 훅이 아니라 여기다. `MdigProcess` 훅에 넣은 작업은 취득 예산 안에서 돌기 때문이다.
 
 ## 에이전트 스킬
 

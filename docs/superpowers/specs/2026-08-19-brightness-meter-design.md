@@ -90,14 +90,19 @@ RAW 녹화를 시작하면 버퍼가 Bayer 모자이크로 바뀐다. 709를 쓰
 - `MbufGet`이 아니라 `MbufGet2d`다 — pitch 패딩(2112 > 2064) 때문이다.
 - 자식은 부모보다 **먼저** 해제한다.
 
-### 4. 미해결 — `MimStat` 가용성
+### 4. `MimStat` 이유 — Image Processing(IM) 라이선스 부재
 
-`MimStat`이 이 장비에서 동작하면 전수 통계를 MIL이 처리하므로 표본 추출 자체가 불필요해진다.
-라이선스 조회는 `M_LICENSE_LITE`만 보고했지만 **실제로 `MimResize`와 `MimShift`가 프로덕션에서
-동작 중**이므로(`RecordingSession.cs:148,152`) 단정할 수 없다.
+`MimStat`은 이 장비에서 동작하지 않는다. 시도하면 `MILException: Licensing error. A module was
+used without a valid license. Error in MimStat`이 발생한다.
 
-구현 계획의 첫 작업에서 확인한다. 결과에 관계없이 설계는 성립한다 — 두 경로가 같은 인터페이스를
-채우고, 폴백인 스트립 샘플링이 이미 충분히 싸다.
+처음에는 모순처럼 보였다. 같은 `Mim*` 계열 함수인데 `MimResize`와 `MimShift`는 프로덕션에서
+동작하기 때문이다(`RecordingSession.cs:148,152`). MIL 10.70 문서를 확인한 결과 이유가 명확했다:
+
+- `MimResize`, `MimShift`: 기본 라이선스(MIL-Lite에 포함)
+- `MimStat`: Image Processing(IM) 모듈 필요 — **MIL-Lite에 없음**
+
+`Mim*` 함수들이 같은 라이선싱 그룹이 아니었던 것이다. 따라서 스트립 샘플링은 폴백이 아니라
+**유일한 선택지**였다. 설계 상 선택이 아닌 필연이다.
 
 ### 5. 구성요소 — 새 파일 두 개
 
