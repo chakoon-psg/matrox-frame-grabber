@@ -68,7 +68,7 @@ _피할 말_: 컬러 녹화, 일반 녹화, Rec 모드
 **RAW recording**
 완전성을 우선하는 녹화 모드. 센서의 Bayer mosaic를 원본 해상도 그대로 기록하며, 프레임을
 잃느니 화면이 끊기는 쪽을 택한다.
-_피할 말_: 무손실 녹화, Bayer 녹화, RAW 모드
+_피할 말_: Bayer 녹화, RAW 모드
 
 **Segment**
 RAW recording을 시간으로 잘라낸 한 조각. RAW recording은 연속된 segment의 나열이고, 각

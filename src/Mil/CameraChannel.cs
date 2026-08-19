@@ -173,7 +173,7 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>True while EITHER a color or a RAW recording is active (drives the pane banner).</summary>
         public bool RecordingActive => _rawRecording || IsRecording;
 
-        /// <summary>Prominent banner text shown over the live view while recording (mode + timer + drops).</summary>
+        /// <summary>Prominent banner text shown over the live view while recording (mode + timer + missed/drops).</summary>
         public string RecordingBannerText
         {
             get

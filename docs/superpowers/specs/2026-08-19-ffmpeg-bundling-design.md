@@ -101,13 +101,14 @@ GPL이 요구하는 것은 **인도받은 상대방에 대한 소스 제공**이
 
 ```
 현재:  설정 → PATH → WinGet Links → WinGet Packages(재귀) → C:\ffmpeg\bin
-변경:  설정 → 앱 폴더 → PATH → WinGet Links → WinGet Packages(재귀) → C:\ffmpeg\bin
+변경:  설정 → 앱 폴더 → PATH → WinGet Links → C:\ffmpeg\bin → C:\Program Files\ffmpeg\bin → WinGet Packages(재귀)
                 ^^^^^^ 추가
 ```
 
 `AppContext.BaseDirectory`를 `PATH`보다 **앞**에 둔다. 산출물에 동봉한 것이 항상 이기게 하는
 것이 이 설계의 핵심이다. 뒤쪽 fallback은 그대로 둔다 — 현장 빌드 중 `tools/`가 비어 있어도
-지금처럼 동작해야 한다.
+지금처럼 동작해야 한다. WinGet Packages 재귀 탐색은 버전이 박힌 폴더명 때문에 고정 디렉터리
+목록에 넣을 수 없어, 목록을 다 돈 뒤에만 도는 별도 폴백으로 맨 뒤에 남는다.
 
 같이 하는 작은 개선: `LocateFfmpeg()`를 `LocateFfmpeg(IEnumerable<string> dirs)`와
 `DefaultSearchDirs()`로 분리한다. 지금은 정적 메서드가 환경변수를 직접 읽어 테스트가

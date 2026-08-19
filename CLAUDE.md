@@ -96,7 +96,7 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `MdigAlloc`을 하면 `M_THROW_EXCEPTION` 아래에서도 모달 MIL 오류 대화상자가 뜬다. 그래서 탐지
   구간을 `MappControl(M_ERROR, M_PRINT_DISABLE/ENABLE)`로 감쌌다 — 이걸 유지하고, 반드시
   `finally`에서 복원할 것(안 그러면 이후의 모든 MIL 오류가 조용히 사라진다).
-- **`M_BAYER_CONVERSION`은 보드에 남는 영속 설정이다.** RAW 캡처를 위해 꺼 두면 grab이 끝나도,
+- **`M_BAYER_CONVERSION`은 보드에 남는 영속 설정이다.** RAW 녹화를 위해 꺼 두면 grab이 끝나도,
   앱을 종료해도, 재부팅해도 그대로 남는다. 그 상태에서 컬러 파이프라인이 raw/모노 데이터를
   잘못 읽어 타일처럼 깨진 이미지가 나온다. 매 `AllocateCamera`에서(`M_SIZE_BAND`를 조회하기
   전에) 다시 켜도록 해 두었고, `RestoreColorAfterRaw()`는 실패할 수 있는 다른 어떤 작업보다
