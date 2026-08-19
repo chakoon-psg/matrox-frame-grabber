@@ -42,7 +42,7 @@ RAW는 설정한 길이(기본 60초)마다 세그먼트를 끊어 백그라운�
 - Windows x64, **MIL 10.70** 설치, WindowsDesktop(net6.0) 런타임이 포함된 .NET SDK
 - 라이브 그랩에는 카메라가 연결된 Rapixo CXP 보드 필요 (하드웨어가 없으면 기본 MIL 시스템으로
   대체되어 "No camera" 패널 표시)
-- **녹화에는 `ffmpeg.exe` 필요** — 설정 경로 → `PATH` → WinGet → `C:\ffmpeg\bin` 순으로 자동 탐색.
+- **녹화에는 `ffmpeg.exe` 필요** — 설정 경로 → 앱 폴더 → `PATH` → WinGet → `C:\ffmpeg\bin` 순으로 자동 탐색.
   찾지 못하면 `● Rec` / `◆ RAW` 버튼이 모두 비활성화됩니다.
 
 ## 설치와 납품
@@ -64,6 +64,11 @@ dotnet build MatroxFrameGrabber.slnx -c Release
 
 첫 명령이 `tools/ffmpeg/ffmpeg.exe`를 채우고, 빌드가 그것을 산출물에 복사한다.
 `tools/ffmpeg/`는 git에 포함되지 않는다(약 212MB).
+
+ffmpeg를 다른 버전으로 바꾸려면 `tools/ffmpeg/ffmpeg.exe`를 지우고 위 명령을 다시 실행한다.
+스크립트는 파일이 이미 있으면 아무것도 하지 않으므로, 지우지 않으면 예전 바이너리가 계속
+납품된다. 버전을 바꿨다면 `LICENSES/ffmpeg/README.md`의 버전 표기도 함께 고쳐야 한다 — 고지문이
+동봉 바이너리와 다른 버전을 가리키면 고지로서 효력이 없다.
 
 ### 유지보수 교체 — 회사에서 빌드해 복사
 
@@ -90,8 +95,11 @@ dotnet build MatroxFrameGrabber.slnx -c Release
 
 ```
 MatroxFrameGrabber.slnx     솔루션
+CONTEXT.md                  용어 글로서리
 src/                        소스 (Views / ViewModels / Mil / Infrastructure)
 docs/                       문서 · 이미지
+LICENSES/                   동봉 서드파티 라이선스 고지
+tools/                      빌드 보조 스크립트 (ffmpeg 스테이징)
 research.md                 src/ 전체 심층 분석 리포트
 ```
 

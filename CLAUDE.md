@@ -26,7 +26,7 @@ Imaging Library) API로 다루며 화면에 표시하고 처리하는 C# **WPF**
 - **x64** 전용(MIL NuGet이 x64/arm64만 지원). 대상 프레임워크는 **net6.0-windows**
   (설치된 WindowsDesktop 런타임 기준이며, MIL이 배포한 WPF 예제와 맞춘 것).
 - 녹화에는 **ffmpeg.exe**가 필요하다. NuGet 의존성이 아니라 런타임에 탐색한다(설정된 경로 →
-  `PATH` → WinGet → `C:\ffmpeg\bin`). 찾지 못하면 `CanRecord`가 false가 되어 녹화 버튼
+  앱 폴더 → `PATH` → WinGet → `C:\ffmpeg\bin`). 찾지 못하면 `CanRecord`가 false가 되어 녹화 버튼
   **두 개 모두** 비활성화된다. 모든 인코딩은 ffmpeg를 거치며 MIL 압축 라이선스는 쓰지 않는다
   (`docs/adr/0001-ffmpeg-for-all-encoding.md` 참고).
 
@@ -46,6 +46,7 @@ src\bin\x64\Release\net6.0-windows\MatroxFrameGrabber.exe
 
 ```
 MatroxFrameGrabber.slnx        솔루션 (루트)
+CONTEXT.md                     용어 글로서리
 src/
   MatroxFrameGrabber.csproj    SDK 형식, UseWPF + UseWindowsForms (폴더 선택기 전용), x64
   nuget.config                 MIL.NET 로컬 패키지 소스
@@ -60,6 +61,8 @@ src/
                                  OutputSettings, FfmpegRecorder, RawFrameWriter,
                                  RawSegmentSession, RelayCommand, NativeMethods
 docs/
+LICENSES/                       동봉 서드파티 라이선스 고지
+tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
 research.md                    src/ 심층 분석
 ```
 
