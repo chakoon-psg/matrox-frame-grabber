@@ -363,7 +363,7 @@ namespace MatroxFrameGrabber.Views
                     Text = $"{channel.Name}  {latest.Luma:F0}   clip {latest.ClippedPct:F1}%  blk {latest.BlackPct:F1}%",
                     Margin = new Thickness(0, 0, 14, 0),
                     Foreground = latest.ClippedPct >= ClipWarnPercent
-                        ? (Brush)FindResource("RecBrush")
+                        ? (Brush)FindResource("WarnBrush")
                         : (Brush)FindResource(ChannelBrushKeys[i])
                 };
                 BrightnessLegend.Children.Add(label);

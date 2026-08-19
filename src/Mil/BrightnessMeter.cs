@@ -115,7 +115,11 @@ namespace MatroxFrameGrabber.Mil
 
                 double lumaSum = 0;
                 long clipped = 0, black = 0, counted = 0;
-                int step = height / Strips;
+                // height/Strips leaves the last strip short of the bottom edge (96 for a 1544-row
+                // frame covers only rows 1440-1443, leaving the bottom 100 rows/6.5% never sampled —
+                // exactly the corner a stray light source could hide in). Spacing strips so the last
+                // one still ends on the last row closes that gap; Strips is never 1, so no /0.
+                int step = (height - RowsPerStrip) / (Strips - 1);
 
                 for (int s = 0; s < Strips; s++)
                 {
@@ -155,7 +159,9 @@ namespace MatroxFrameGrabber.Mil
             // when a RAW recording starts.
             double lumaSum = 0;
             long clipped = 0, black = 0, counted = 0;
-            int step = height / Strips;
+            // See SampleColor: spacing strips so the last one still ends on the last row avoids
+            // leaving the bottom ~6.5% of the frame (100 of 1544 rows) unsampled.
+            int step = (height - RowsPerStrip) / (Strips - 1);
 
             for (int s = 0; s < Strips; s++)
             {

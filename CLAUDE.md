@@ -129,6 +129,10 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   갱신한다. 새 값을 노출하려면 거기서 올릴 것. 이벤트로 밀어내는 것은 세 가지뿐이다
   (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`). 밝기 측정도 이 틱 위에서 돈다 —
   취득 훅이 아니라 여기다. `MdigProcess` 훅에 넣은 작업은 취득 예산 안에서 돌기 때문이다.
+- **`Mim*` 함수는 하나의 라이선싱 그룹이 아니다.** `MimResize`와 `MimShift`는 MIL-Lite에
+  포함되지만 `MimStat`은 Image Processing(IM) 모듈이 필요하고 이 장비에는 없다 — 호출하면
+  `Licensing error. A module was used without a valid license`가 난다. 통계·히스토그램류를
+  MIL로 처리하려다 이 벽에 부딪히므로, 호스트에서 직접 계산할 것을 전제로 설계한다.
 
 ## 에이전트 스킬
 
