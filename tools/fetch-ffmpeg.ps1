@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # tools/ffmpeg/ffmpeg.exe 를 이 PC에 설치된 ffmpeg에서 채운다.
 # 바이너리는 약 212MB이므로 저장소에 커밋하지 않는다.
 # 설계: docs/superpowers/specs/2026-08-19-ffmpeg-bundling-design.md
