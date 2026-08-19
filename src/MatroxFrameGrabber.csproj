@@ -22,4 +22,24 @@
     <PackageReference Include="Matrox.MatroxImagingLibrary.WPF" Version="10.*" />
   </ItemGroup>
 
+  <!-- ffmpeg는 런타임 의존성이라 NuGet으로 오지 않는다. 빌드가 산출물에 직접 넣어,
+       실행 계정이나 winget 상태와 무관하게 같은 바이너리로 돌게 한다.
+       설계: docs/superpowers/specs/2026-08-19-ffmpeg-bundling-design.md -->
+  <PropertyGroup>
+    <FfmpegToolPath>$(MSBuildProjectDirectory)\..\tools\ffmpeg\ffmpeg.exe</FfmpegToolPath>
+  </PropertyGroup>
+
+  <Target Name="EnsureFfmpegTool" BeforeTargets="BeforeBuild"
+          Condition="!Exists('$(FfmpegToolPath)')">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\tools\fetch-ffmpeg.ps1&quot;"
+          ContinueOnError="true" />
+    <Warning Condition="!Exists('$(FfmpegToolPath)')"
+             Text="ffmpeg.exe를 찾지 못해 산출물에 동봉하지 않습니다. 'winget install Gyan.FFmpeg' 후 다시 빌드하거나 tools/ffmpeg/ 에 직접 넣으세요. 녹화는 런타임 탐색 결과에 따라 동작할 수도, 비활성화될 수도 있습니다." />
+  </Target>
+
+  <Target Name="CopyFfmpegToOutput" AfterTargets="Build"
+          Condition="Exists('$(FfmpegToolPath)')">
+    <Copy SourceFiles="$(FfmpegToolPath)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>
