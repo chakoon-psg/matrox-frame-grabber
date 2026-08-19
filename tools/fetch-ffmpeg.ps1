@@ -3,6 +3,8 @@
 # 바이너리는 약 212MB이므로 저장소에 커밋하지 않는다.
 # 설계: docs/superpowers/specs/2026-08-19-ffmpeg-bundling-design.md
 $ErrorActionPreference = 'Stop'
+# 한국어 메시지가 en-US 로캘 빌드 머신에서 물음표로 뭉개지지 않도록 출력 인코딩을 고정한다.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 $dest = Join-Path $PSScriptRoot 'ffmpeg\ffmpeg.exe'
 if (Test-Path -LiteralPath $dest) {
@@ -33,6 +35,25 @@ if (-not $source) {
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
-Copy-Item -LiteralPath $source -Destination $dest -Force
+
+# 최종 경로에 직접 쓰지 않는다. 212MB 복사가 중간에 끊기면 잘린 파일이 남고, 위의 존재 검사가
+# 그것을 성공으로 오인해 영영 복구되지 않는다. 게다가 앱은 자기 폴더를 먼저 뒤지므로, 깨진
+# 사본이 멀쩡한 시스템 ffmpeg를 계속 가리게 된다.
+$staging = "$dest.tmp"
+try {
+    Copy-Item -LiteralPath $source -Destination $staging -Force
+    $copied = (Get-Item -LiteralPath $staging).Length
+    $expected = (Get-Item -LiteralPath $source).Length
+    if ($copied -ne $expected) {
+        throw "복사본 크기가 다릅니다: $copied != $expected"
+    }
+    Move-Item -LiteralPath $staging -Destination $dest -Force
+}
+catch {
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Force }
+    Write-Warning "ffmpeg.exe 복사에 실패했습니다: $($_.Exception.Message)"
+    exit 1
+}
+
 Write-Host "복사함: $source"
 Write-Host "     -> $dest"

@@ -96,15 +96,20 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>First directory in <paramref name="dirs"/> that holds ffmpeg.exe, or null.</summary>
         internal static string LocateFfmpeg(IEnumerable<string> dirs)
         {
-            foreach (string dir in dirs)
+            try
             {
-                try
+                foreach (string dir in dirs)
                 {
-                    string candidate = Path.Combine(dir, "ffmpeg.exe");
-                    if (File.Exists(candidate)) return candidate;
+                    try
+                    {
+                        string candidate = Path.Combine(dir, "ffmpeg.exe");
+                        if (File.Exists(candidate)) return candidate;
+                    }
+                    catch { }   // one unusable directory entry must not abort the whole search
                 }
-                catch { }   // one unusable directory entry must not abort the whole search
             }
+            catch { }   // nor must a caller-supplied sequence that throws while enumerating
+
             return null;
         }
 
