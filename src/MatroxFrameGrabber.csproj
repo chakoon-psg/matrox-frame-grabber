@@ -22,6 +22,12 @@
     <PackageReference Include="Matrox.MatroxImagingLibrary.WPF" Version="10.*" />
   </ItemGroup>
 
+  <!-- Include ffmpeg license files in the output folder.
+       The output folder is handed to the customer as-is, so licenses must travel with it. -->
+  <ItemGroup>
+    <None Include="..\LICENSES\**\*" LinkBase="LICENSES" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- ffmpeg is a runtime dependency and does not arrive through NuGet. The build stages it
        into the output folder so the app runs against the same binary regardless of which
        account is logged in or what winget has installed.
