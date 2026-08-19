@@ -70,6 +70,7 @@ namespace MatroxFrameGrabber.Mil
         private MIL_ID _dispId = MIL.M_NULL;
         private MIL_ID _dispBufId = MIL.M_NULL;
         private MIL_ID _graId = MIL.M_NULL;
+        private readonly BrightnessMeter _brightness = new BrightnessMeter();
         private readonly List<MIL_ID> _grabBuffers = new List<MIL_ID>();
 
         private bool _cameraAvailable;
@@ -193,6 +194,12 @@ namespace MatroxFrameGrabber.Mil
         public bool IsGrabbing => _isGrabbing;
         public long FrameCount => _hookData?.FrameCount ?? 0;
         public double FrameRate => _frameRate;
+
+        /// <summary>This channel's brightness readings, appended on each stats tick.</summary>
+        public BrightnessHistory Brightness => _brightness.History;
+
+        /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
+        public double LastBrightnessSampleMs => _brightness.LastSampleMs;
 
         /// <summary>Editable base name used as the snapshot/recording filename prefix.</summary>
         public string OutputName
@@ -550,6 +557,8 @@ namespace MatroxFrameGrabber.Mil
             if (_dispId != MIL.M_NULL)
                 MIL.MdispSelect(_dispId, MIL.M_NULL);
 
+            _brightness.Reset();
+
             if (_dispBufId != MIL.M_NULL)
             {
                 MIL.MbufFree(_dispBufId);
@@ -697,6 +706,10 @@ namespace MatroxFrameGrabber.Mil
                 double rate = 0.0;
                 MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_RATE, ref rate);
                 _frameRate = rate;
+
+                // Brightness is measured here, on the stats tick, and never in the grab hook:
+                // anything added to MdigProcess runs inside the acquisition budget.
+                _brightness.Sample(_dispBufId);
 
                 // While RAW-recording, track frames the board missed (queue back-pressure on a slow
                 // sink), so a "lossless" capture that actually lost frames is visible in the status.
