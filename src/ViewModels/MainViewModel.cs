@@ -65,7 +65,7 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>True if at least one camera supports recording (MIL compression licensed).</summary>
+        /// <summary>True if at least one camera supports recording (i.e. ffmpeg was found — recording never uses a MIL compression licence; see docs/adr/).</summary>
         public bool AnyCanRecord
         {
             get
