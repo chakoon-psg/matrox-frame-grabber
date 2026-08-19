@@ -28,17 +28,19 @@ namespace MatroxFrameGrabber.ViewModels
             StartAllCommand = new RelayCommand(StartAll);
             StopAllCommand = new RelayCommand(StopAll);
 
+            // The brightness strip is always on screen, so measurement is enabled for the whole
+            // session — set once here rather than pushed every tick, since nothing turns it off.
+            // A channel that is not grabbing still costs nothing: CameraChannel.RefreshStats
+            // only samples while it has a live display buffer.
+            foreach (var channel in _manager.Channels)
+                channel.BrightnessEnabled = true;
+
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += (s, e) =>
             {
                 foreach (var channel in _manager.Channels)
-                {
-                    // Push the toggle state before refreshing so a channel that just got enabled
-                    // samples on this very tick instead of wasting one.
-                    channel.BrightnessEnabled = _showBrightness;
                     channel.RefreshStats();
-                }
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(AnyRawRecording));
                 StatsRefreshed?.Invoke();
@@ -101,15 +103,6 @@ namespace MatroxFrameGrabber.ViewModels
 
         /// <summary>Raised on the UI thread after every stats tick, so the view can redraw.</summary>
         public event Action StatsRefreshed;
-
-        private bool _showBrightness;
-
-        /// <summary>Whether the brightness strip along the bottom of the window is expanded.</summary>
-        public bool ShowBrightness
-        {
-            get => _showBrightness;
-            set { _showBrightness = value; RaiseChanged(nameof(ShowBrightness)); }
-        }
 
         public RelayCommand StartAllCommand { get; }
         public RelayCommand StopAllCommand { get; }

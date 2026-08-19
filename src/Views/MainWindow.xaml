@@ -10,10 +10,6 @@
         Width="1360" Height="820"
         Background="{StaticResource BgBrush}">
 
-    <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVis" />
-    </Window.Resources>
-
     <Grid>
         <!-- Main content: toolbar + 2x2 camera grid -->
         <DockPanel x:Name="MainContent" LastChildFill="True">
@@ -123,18 +119,15 @@
                     </Button>
                     <Button Content="Browse…" Padding="8,4" Click="BrowseFolder_Click"
                             ToolTip="Change the output folder for snapshots and recordings" />
-
-                    <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
-                    <ToggleButton x:Name="BrightnessToggle" Content="Brightness" Padding="8,4"
-                                  IsChecked="{Binding ShowBrightness}"
-                                  ToolTip="Show a brightness graph for every running channel" />
                 </WrapPanel>
             </DockPanel>
 
-            <Border DockPanel.Dock="Bottom" Height="110" Margin="2,0,2,2"
+            <!-- Always visible: the brightness strip is the only place a slow exposure drift shows
+                 up, and a graph nobody remembers to open cannot catch drift. Its ToolTip carries
+                 the per-channel sampling diagnostics, filled in by RedrawBrightness. -->
+            <Border x:Name="BrightnessStrip" DockPanel.Dock="Bottom" Height="110" Margin="2,0,2,2"
                     Background="{StaticResource PanelBrush}"
-                    BorderBrush="{StaticResource BorderBrushColor}" BorderThickness="1"
-                    Visibility="{Binding ShowBrightness, Converter={StaticResource BoolToVis}}">
+                    BorderBrush="{StaticResource BorderBrushColor}" BorderThickness="1">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

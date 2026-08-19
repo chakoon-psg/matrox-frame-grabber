@@ -149,8 +149,9 @@
         </Setter>
     </Style>
 
-    <!-- Default ToggleButton (e.g. the Brightness toggle): without this, a ToggleButton with no
-         explicit Style renders with default Windows chrome — a bright control on a dark toolbar,
+    <!-- Default ToggleButton. Nothing uses it today (every toggle in the app names RecToggle or
+         RawToggle explicitly), but it is kept as a safety net: without it, a ToggleButton added
+         with no explicit Style renders with default Windows chrome — a bright control on a dark toolbar,
          with black default text, unreadable and out of theme. Mirrors the Button style, and (since
          a toggle is useless if its state isn't visible at a glance) uses AccentBrush when checked,
          matching this app's existing accent convention. RecToggle/RawToggle above are unaffected:

@@ -302,10 +302,10 @@ namespace MatroxFrameGrabber.Views
         private void RedrawBrightness()
         {
             var vm = DataContext as MainViewModel;
-            // Cleared before the early-return guard: a collapsed strip, or one whose canvas hasn't
-            // been laid out yet, must never keep showing labels from a previous state.
+            // Cleared before the early-return guard: a strip whose canvas hasn't been laid out yet
+            // must never keep showing labels from a previous state.
             BrightnessLegend.Children.Clear();
-            if (vm == null || !vm.ShowBrightness || BrightnessCanvas.ActualWidth <= 0)
+            if (vm == null || BrightnessCanvas.ActualWidth <= 0)
                 return;
 
             double w = BrightnessCanvas.ActualWidth;
@@ -357,21 +357,13 @@ namespace MatroxFrameGrabber.Views
                 }
                 _brightnessLines[i].Points = points;
 
-                BrightnessSample latest = channel.Brightness.Latest;
-                var label = new TextBlock
-                {
-                    Text = $"{channel.Name}  {latest.Luma:F0}   clip {latest.ClippedPct:F1}%  blk {latest.BlackPct:F1}%",
-                    Margin = new Thickness(0, 0, 14, 0),
-                    Foreground = latest.ClippedPct >= ClipWarnPercent
-                        ? (Brush)FindResource("WarnBrush")
-                        : (Brush)FindResource(ChannelBrushKeys[i])
-                };
-                BrightnessLegend.Children.Add(label);
+                BrightnessLegend.Children.Add(BuildLegendEntry(channel, i));
             }
 
-            // Diagnostic tooltip on the toggle itself: makes the 500 ms budget check (spec
-            // verification 3) and a permanently-failing channel (F6) both readable at a glance,
-            // instead of requiring a debugger.
+            // Diagnostic tooltip on the strip itself (it used to hang off the Brightness toggle,
+            // which no longer exists): makes the 500 ms budget check (spec verification 3) and a
+            // permanently-failing channel (F6) both readable at a glance, instead of requiring a
+            // debugger.
             var diag = new StringBuilder();
             for (int i = 0; i < vm.Channels.Count; i++)
             {
@@ -382,7 +374,60 @@ namespace MatroxFrameGrabber.Views
                     ? $"FAIL x{channel.BrightnessFailures}"
                     : $"{channel.LastBrightnessSampleMs:F1} ms");
             }
-            BrightnessToggle.ToolTip = diag.ToString();
+            BrightnessStrip.ToolTip = diag.ToString();
+        }
+
+        /// <summary>
+        /// Builds one legend entry: a colour swatch followed by neutral-coloured readings.
+        ///
+        /// The swatch reuses the polyline's own <see cref="Brush"/> instance, so the legend colour
+        /// cannot drift from the line it labels. It exists because colouring the *text* was not
+        /// enough to tell four pastel 1.5 px lines apart, and because the clipping warning used to
+        /// repaint the whole entry red — losing the channel's identity at exactly the moment the
+        /// reader needs to know which channel is clipping. Only the clip figure carries the
+        /// warning colour now.
+        /// </summary>
+        private FrameworkElement BuildLegendEntry(CameraChannel channel, int index)
+        {
+            BrightnessSample latest = channel.Brightness.Latest;
+            var entry = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 16, 0) };
+
+            entry.Children.Add(new Rectangle
+            {
+                Width = 16,
+                Height = 3,
+                RadiusX = 1.5,
+                RadiusY = 1.5,
+                Fill = _brightnessLines[index].Stroke,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 5, 0)
+            });
+
+            var textBrush = (Brush)FindResource("TextBrush");
+            var mutedBrush = (Brush)FindResource("MutedTextBrush");
+
+            entry.Children.Add(new TextBlock
+            {
+                Text = $"{channel.Name}  {latest.Luma:F0}",
+                Foreground = textBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            entry.Children.Add(new TextBlock
+            {
+                Text = $"clip {latest.ClippedPct:F1}%",
+                Foreground = latest.ClippedPct >= ClipWarnPercent ? (Brush)FindResource("WarnBrush") : mutedBrush,
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            entry.Children.Add(new TextBlock
+            {
+                Text = $"blk {latest.BlackPct:F1}%",
+                Foreground = mutedBrush,
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            return entry;
         }
 
         /// <summary>Creates the gridlines/labels once (idempotent). Added before the data polylines

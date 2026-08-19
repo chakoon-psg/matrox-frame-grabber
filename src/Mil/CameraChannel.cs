@@ -205,9 +205,10 @@ namespace MatroxFrameGrabber.Mil
         public int BrightnessFailures => _brightness.ConsecutiveFailures;
 
         /// <summary>
-        /// Whether this channel measures brightness on the stats tick. Off by default: the
-        /// measurement is only worth its cost while somebody is looking at the graph, and the
-        /// acceptance test for this feature is a comparison of frames missed with it on and off.
+        /// Whether this channel measures brightness on the stats tick. Off by default; MainViewModel
+        /// turns it on for the session, because the strip it feeds is always on screen. Kept as an
+        /// explicit switch rather than folded away: the acceptance test for this feature is a
+        /// comparison of frames missed with measurement on and off.
         /// </summary>
         public bool BrightnessEnabled { get; set; }
 
@@ -729,8 +730,8 @@ namespace MatroxFrameGrabber.Mil
                 _frameRate = rate;
 
                 // Brightness is measured here, on the stats tick, and never in the grab hook:
-                // anything added to MdigProcess runs inside the acquisition budget. Gated by
-                // BrightnessEnabled so the sampling cost is only paid while the strip is shown.
+                // anything added to MdigProcess runs inside the acquisition budget. Still gated by
+                // BrightnessEnabled so the cost can be switched off when measuring frames missed.
                 if (BrightnessEnabled)
                     _brightness.Sample(_dispBufId);
 
