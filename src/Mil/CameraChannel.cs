@@ -173,7 +173,7 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>True while EITHER a color or a RAW recording is active (drives the pane banner).</summary>
         public bool RecordingActive => _rawRecording || IsRecording;
 
-        /// <summary>Prominent banner text shown over the live view while recording (mode + timer + drops).</summary>
+        /// <summary>Prominent banner text shown over the live view while recording (mode + timer + missed/drops).</summary>
         public string RecordingBannerText
         {
             get
@@ -181,8 +181,8 @@ namespace MatroxFrameGrabber.Mil
                 if (_rawRecording && _rawSegments != null)
                 {
                     var t = DateTime.Now - _rawStartTime;
-                    string drop = _rawMissed > 0 ? $"     ⚠ dropped {_rawMissed}" : "";
-                    return $"◆ RAW 무손실 녹화 중 — 프리뷰는 흑백입니다     seg {_rawSegments.SegmentIndex} · 총 {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
+                    string missed = _rawMissed > 0 ? $"     ⚠ missed {_rawMissed}" : "";
+                    return $"◆ RAW 무손실 녹화 중 — 프리뷰는 흑백입니다     seg {_rawSegments.SegmentIndex} · 총 {(int)t.TotalMinutes:00}:{t.Seconds:00}{missed}";
                 }
                 if (IsRecording)
                     return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_recording?.StatusSuffix()}";
@@ -698,7 +698,7 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_RATE, ref rate);
                 _frameRate = rate;
 
-                // While RAW-recording, track frames the board dropped (queue back-pressure on a slow
+                // While RAW-recording, track frames the board missed (queue back-pressure on a slow
                 // sink), so a "lossless" capture that actually lost frames is visible in the status.
                 if (_rawRecording)
                 {
@@ -1087,8 +1087,8 @@ namespace MatroxFrameGrabber.Mil
             if (_rawRecording && _rawSegments != null)
             {
                 var t = DateTime.Now - _rawStartTime;
-                string drop = _rawMissed > 0 ? $"  ⚠ dropped {_rawMissed}" : "";
-                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}{drop}";
+                string missed = _rawMissed > 0 ? $"  ⚠ missed {_rawMissed}" : "";
+                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}{missed}";
             }
             if (_rawConverting)
                 return "  (converting segments → MP4…)";

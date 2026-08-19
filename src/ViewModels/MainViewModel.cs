@@ -65,7 +65,7 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>True if at least one camera supports recording (MIL compression licensed).</summary>
+        /// <summary>True if at least one camera supports recording (i.e. ffmpeg was found — recording never uses a MIL compression licence; see docs/adr/).</summary>
         public bool AnyCanRecord
         {
             get
@@ -74,6 +74,22 @@ namespace MatroxFrameGrabber.ViewModels
                     if (channel.CanRecord)
                         return true;
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// The ffmpeg.exe actually resolved for this run, for the recording settings popup.
+        /// Bound once at load: the configured path has no editor, so this cannot change while
+        /// the window is open.
+        /// </summary>
+        public string FfmpegPathText
+        {
+            get
+            {
+                string path = FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath);
+                return string.IsNullOrEmpty(path)
+                    ? "not found — recording disabled"
+                    : path;
             }
         }
 

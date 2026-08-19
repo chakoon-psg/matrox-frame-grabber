@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -62,35 +63,73 @@ namespace MatroxFrameGrabber.Infrastructure
             return found;
         }
 
-        private static string LocateFfmpeg()
+        /// <summary>
+        /// Directories searched for ffmpeg.exe, in order. The application folder comes first so a
+        /// copy shipped next to the exe always wins over whatever happens to be installed on the
+        /// machine — the WinGet paths below live under the running account's profile, so they
+        /// vanish when somebody else logs in.
+        /// </summary>
+        private static IEnumerable<string> DefaultSearchDirs()
         {
+            var dirs = new List<string> { AppContext.BaseDirectory };
+
             try
             {
                 foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
-                {
-                    if (string.IsNullOrWhiteSpace(dir)) continue;
-                    string p = Path.Combine(dir.Trim(), "ffmpeg.exe");
-                    if (File.Exists(p)) return p;
-                }
+                    if (!string.IsNullOrWhiteSpace(dir))
+                        dirs.Add(dir.Trim());
             }
-            catch { }
+            catch { }   // an unreadable PATH must not cost us the other locations
 
             try
             {
-                string lad = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                string links = Path.Combine(lad, "Microsoft", "WinGet", "Links", "ffmpeg.exe");
-                if (File.Exists(links)) return links;
-                string pkgs = Path.Combine(lad, "Microsoft", "WinGet", "Packages");
-                if (Directory.Exists(pkgs))
-                {
-                    string hit = Directory.EnumerateFiles(pkgs, "ffmpeg.exe", SearchOption.AllDirectories).FirstOrDefault();
-                    if (hit != null) return hit;
-                }
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                dirs.Add(Path.Combine(localAppData, "Microsoft", "WinGet", "Links"));
             }
             catch { }
 
-            foreach (string p in new[] { @"C:\ffmpeg\bin\ffmpeg.exe", @"C:\Program Files\ffmpeg\bin\ffmpeg.exe" })
-                if (File.Exists(p)) return p;
+            dirs.Add(@"C:\ffmpeg\bin");
+            dirs.Add(@"C:\Program Files\ffmpeg\bin");
+            return dirs;
+        }
+
+        /// <summary>First directory in <paramref name="dirs"/> that holds ffmpeg.exe, or null.</summary>
+        internal static string LocateFfmpeg(IEnumerable<string> dirs)
+        {
+            try
+            {
+                foreach (string dir in dirs)
+                {
+                    try
+                    {
+                        string candidate = Path.Combine(dir, "ffmpeg.exe");
+                        if (File.Exists(candidate)) return candidate;
+                    }
+                    catch { }   // one unusable directory entry must not abort the whole search
+                }
+            }
+            catch { }   // nor must a caller-supplied sequence that throws while enumerating
+
+            return null;
+        }
+
+        private static string LocateFfmpeg()
+        {
+            string hit = LocateFfmpeg(DefaultSearchDirs());
+            if (hit != null) return hit;
+
+            // WinGet keeps the real binary under a Packages folder whose name carries the version
+            // and so changes on every update — it cannot be written as a fixed directory.
+            try
+            {
+                string packages = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Microsoft", "WinGet", "Packages");
+                if (Directory.Exists(packages))
+                    return Directory.EnumerateFiles(packages, "ffmpeg.exe", SearchOption.AllDirectories)
+                                    .FirstOrDefault();
+            }
+            catch { }
 
             return null;
         }
