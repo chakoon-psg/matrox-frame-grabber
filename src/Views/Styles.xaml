@@ -14,6 +14,10 @@
     <Color x:Key="AccentHoverColor">#FF1177BB</Color>
     <Color x:Key="RecColor">#FFC62828</Color>
     <Color x:Key="RecHoverColor">#FFD84343</Color>
+    <Color x:Key="Ch0Color">#FF4FC3F7</Color>
+    <Color x:Key="Ch1Color">#FF81C784</Color>
+    <Color x:Key="Ch2Color">#FFFFB74D</Color>
+    <Color x:Key="Ch3Color">#FFBA68C8</Color>
     <Color x:Key="RawColor">#FFE65100</Color>
     <Color x:Key="RawHoverColor">#FFF57C00</Color>
 
@@ -28,6 +32,10 @@
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
     <SolidColorBrush x:Key="RecBrush" Color="{StaticResource RecColor}" />
     <SolidColorBrush x:Key="RawBrush" Color="{StaticResource RawColor}" />
+    <SolidColorBrush x:Key="Ch0Brush" Color="{StaticResource Ch0Color}" />
+    <SolidColorBrush x:Key="Ch1Brush" Color="{StaticResource Ch1Color}" />
+    <SolidColorBrush x:Key="Ch2Brush" Color="{StaticResource Ch2Color}" />
+    <SolidColorBrush x:Key="Ch3Brush" Color="{StaticResource Ch3Color}" />
 
     <!-- ===== Button ===== -->
     <Style TargetType="Button">

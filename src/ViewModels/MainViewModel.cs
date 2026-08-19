@@ -36,6 +36,7 @@ namespace MatroxFrameGrabber.ViewModels
                     channel.RefreshStats();
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(AnyRawRecording));
+                StatsRefreshed?.Invoke();
             };
             _statsTimer.Start();
         }
@@ -91,6 +92,18 @@ namespace MatroxFrameGrabber.ViewModels
                     ? "not found — recording disabled"
                     : path;
             }
+        }
+
+        /// <summary>Raised on the UI thread after every stats tick, so the view can redraw.</summary>
+        public event Action StatsRefreshed;
+
+        private bool _showBrightness;
+
+        /// <summary>Whether the brightness strip along the bottom of the window is expanded.</summary>
+        public bool ShowBrightness
+        {
+            get => _showBrightness;
+            set { _showBrightness = value; RaiseChanged(nameof(ShowBrightness)); }
         }
 
         public RelayCommand StartAllCommand { get; }

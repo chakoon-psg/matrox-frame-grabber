@@ -2,8 +2,11 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Shapes;
 using Matrox.MatroxImagingLibrary.WPF;
 using MatroxFrameGrabber.Infrastructure;
 using MatroxFrameGrabber.Mil;
@@ -56,6 +59,9 @@ namespace MatroxFrameGrabber.Views
             }
 
             InitializeComponent();
+
+            if (_viewModel != null)
+                ((MainViewModel)DataContext).StatsRefreshed += RedrawBrightness;
         }
 
         private void OnRecordingFailed(CameraChannel channel, string error)
@@ -93,6 +99,8 @@ namespace MatroxFrameGrabber.Views
 
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            if (_viewModel != null)
+                _viewModel.StatsRefreshed -= RedrawBrightness;
             ExitFullscreen();
             RemoveEscHook();
             _viewModel?.Shutdown();
@@ -267,6 +275,73 @@ namespace MatroxFrameGrabber.Views
             {
                 ExitFullscreen();   // also removes this hook
                 handled = true;     // swallow ESC so MIL doesn't act on it
+            }
+        }
+
+        // ----- Brightness strip -----
+
+        /// <summary>Clipping above this share of sampled pixels is called out in the legend.</summary>
+        private const double ClipWarnPercent = 1.0;
+
+        private static readonly string[] ChannelBrushKeys = { "Ch0Brush", "Ch1Brush", "Ch2Brush", "Ch3Brush" };
+        private readonly Polyline[] _brightnessLines = new Polyline[4];
+        private readonly BrightnessSample[] _sampleScratch = new BrightnessSample[BrightnessHistory.Capacity];
+
+        /// <summary>
+        /// Redraws the brightness strip. The vertical axis is pinned to 0-255 rather than scaled to
+        /// the data: an auto-scaled axis hides the slow drift the graph exists to reveal.
+        /// </summary>
+        private void RedrawBrightness()
+        {
+            var vm = DataContext as MainViewModel;
+            if (vm == null || !vm.ShowBrightness || BrightnessCanvas.ActualWidth <= 0)
+                return;
+
+            double w = BrightnessCanvas.ActualWidth;
+            double h = BrightnessCanvas.ActualHeight;
+            BrightnessLegend.Children.Clear();
+
+            for (int i = 0; i < _brightnessLines.Length; i++)
+            {
+                if (_brightnessLines[i] == null)
+                {
+                    _brightnessLines[i] = new Polyline
+                    {
+                        Stroke = (Brush)FindResource(ChannelBrushKeys[i]),
+                        StrokeThickness = 1.5
+                    };
+                    BrightnessCanvas.Children.Add(_brightnessLines[i]);
+                }
+                _brightnessLines[i].Points.Clear();
+            }
+
+            for (int i = 0; i < vm.Channels.Count && i < _brightnessLines.Length; i++)
+            {
+                var channel = vm.Channels[i];
+                // A channel with no camera, or one that is stopped, has no valid display buffer —
+                // drawing a flat zero for it would read as "this camera is completely dark".
+                if (!channel.Brightness.HasData)
+                    continue;
+
+                int n = channel.Brightness.CopyTo(_sampleScratch);
+                var points = _brightnessLines[i].Points;
+                for (int p = 0; p < n; p++)
+                {
+                    double x = w * p / (BrightnessHistory.Capacity - 1);
+                    double y = h - (h * _sampleScratch[p].Luma / 255.0);
+                    points.Add(new Point(x, y));
+                }
+
+                BrightnessSample latest = channel.Brightness.Latest;
+                var label = new TextBlock
+                {
+                    Text = $"{channel.Name}  {latest.Luma:F0}   clip {latest.ClippedPct:F1}%",
+                    Margin = new Thickness(0, 0, 14, 0),
+                    Foreground = latest.ClippedPct >= ClipWarnPercent
+                        ? (Brush)FindResource("RecBrush")
+                        : (Brush)FindResource(ChannelBrushKeys[i])
+                };
+                BrightnessLegend.Children.Add(label);
             }
         }
     }
