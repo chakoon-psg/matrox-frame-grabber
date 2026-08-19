@@ -22,9 +22,10 @@
     <PackageReference Include="Matrox.MatroxImagingLibrary.WPF" Version="10.*" />
   </ItemGroup>
 
-  <!-- ffmpeg는 런타임 의존성이라 NuGet으로 오지 않는다. 빌드가 산출물에 직접 넣어,
-       실행 계정이나 winget 상태와 무관하게 같은 바이너리로 돌게 한다.
-       설계: docs/superpowers/specs/2026-08-19-ffmpeg-bundling-design.md -->
+  <!-- ffmpeg is a runtime dependency and does not arrive through NuGet. The build stages it
+       into the output folder so the app runs against the same binary regardless of which
+       account is logged in or what winget has installed.
+       Design: docs/superpowers/specs/2026-08-19-ffmpeg-bundling-design.md -->
   <PropertyGroup>
     <FfmpegToolPath>$(MSBuildProjectDirectory)\..\tools\ffmpeg\ffmpeg.exe</FfmpegToolPath>
   </PropertyGroup>
