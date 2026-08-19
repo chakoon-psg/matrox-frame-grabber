@@ -71,17 +71,26 @@ namespace MatroxFrameGrabber.Infrastructure
         /// </summary>
         private static IEnumerable<string> DefaultSearchDirs()
         {
-            yield return AppContext.BaseDirectory;
+            var dirs = new List<string> { AppContext.BaseDirectory };
 
-            foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
-                if (!string.IsNullOrWhiteSpace(dir))
-                    yield return dir.Trim();
+            try
+            {
+                foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+                    if (!string.IsNullOrWhiteSpace(dir))
+                        dirs.Add(dir.Trim());
+            }
+            catch { }   // an unreadable PATH must not cost us the other locations
 
-            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            yield return Path.Combine(localAppData, "Microsoft", "WinGet", "Links");
+            try
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                dirs.Add(Path.Combine(localAppData, "Microsoft", "WinGet", "Links"));
+            }
+            catch { }
 
-            yield return @"C:\ffmpeg\bin";
-            yield return @"C:\Program Files\ffmpeg\bin";
+            dirs.Add(@"C:\ffmpeg\bin");
+            dirs.Add(@"C:\Program Files\ffmpeg\bin");
+            return dirs;
         }
 
         /// <summary>First directory in <paramref name="dirs"/> that holds ffmpeg.exe, or null.</summary>
@@ -94,7 +103,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     string candidate = Path.Combine(dir, "ffmpeg.exe");
                     if (File.Exists(candidate)) return candidate;
                 }
-                catch { }   // one unusable PATH entry must not abort the whole search
+                catch { }   // one unusable directory entry must not abort the whole search
             }
             return null;
         }
