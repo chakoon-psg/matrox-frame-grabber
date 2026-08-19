@@ -77,6 +77,22 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
+        /// <summary>
+        /// The ffmpeg.exe actually resolved for this run, for the recording settings popup.
+        /// Bound once at load: the configured path has no editor, so this cannot change while
+        /// the window is open.
+        /// </summary>
+        public string FfmpegPathText
+        {
+            get
+            {
+                string path = FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath);
+                return string.IsNullOrEmpty(path)
+                    ? "not found — recording disabled"
+                    : path;
+            }
+        }
+
         public RelayCommand StartAllCommand { get; }
         public RelayCommand StopAllCommand { get; }
 
