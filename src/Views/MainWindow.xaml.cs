@@ -287,6 +287,13 @@ namespace MatroxFrameGrabber.Views
         private readonly Polyline[] _brightnessLines = new Polyline[4];
         private readonly BrightnessSample[] _sampleScratch = new BrightnessSample[BrightnessHistory.Capacity];
 
+        // Static axis chrome (gridlines + labels), built once and repositioned on every redraw as
+        // the canvas resizes. Recreating these every tick would grow the visual tree without bound.
+        private static readonly double[] GridLumaLevels = { 64, 128, 192 };
+        private readonly Line[] _brightnessGridLines = new Line[GridLumaLevels.Length];
+        private readonly TextBlock[] _yAxisLabels = new TextBlock[3];   // "255" / "128" / "0"
+        private TextBlock _xAxisStartLabel, _xAxisEndLabel;             // "-120s" / "now"
+
         /// <summary>
         /// Redraws the brightness strip. The vertical axis is pinned to 0-255 rather than scaled to
         /// the data: an auto-scaled axis hides the slow drift the graph exists to reveal.
@@ -294,12 +301,17 @@ namespace MatroxFrameGrabber.Views
         private void RedrawBrightness()
         {
             var vm = DataContext as MainViewModel;
+            // Cleared before the early-return guard: a collapsed strip, or one whose canvas hasn't
+            // been laid out yet, must never keep showing labels from a previous state.
+            BrightnessLegend.Children.Clear();
             if (vm == null || !vm.ShowBrightness || BrightnessCanvas.ActualWidth <= 0)
                 return;
 
             double w = BrightnessCanvas.ActualWidth;
             double h = BrightnessCanvas.ActualHeight;
-            BrightnessLegend.Children.Clear();
+
+            EnsureAxisElements();
+            RepositionAxisElements(w, h);
 
             for (int i = 0; i < _brightnessLines.Length; i++)
             {
@@ -312,7 +324,6 @@ namespace MatroxFrameGrabber.Views
                     };
                     BrightnessCanvas.Children.Add(_brightnessLines[i]);
                 }
-                _brightnessLines[i].Points.Clear();
             }
 
             for (int i = 0; i < vm.Channels.Count && i < _brightnessLines.Length; i++)
@@ -320,23 +331,35 @@ namespace MatroxFrameGrabber.Views
                 var channel = vm.Channels[i];
                 // A channel with no camera, or one that is stopped, has no valid display buffer —
                 // drawing a flat zero for it would read as "this camera is completely dark". A
-                // stopped channel also must not keep asserting its last (now stale) reading.
+                // stopped channel also must not keep asserting its last (now stale) reading, so
+                // its line is explicitly emptied rather than merely left unassigned this tick.
                 if (!channel.IsGrabbing || !channel.Brightness.HasData)
+                {
+                    _brightnessLines[i].Points = new PointCollection();
                     continue;
+                }
 
+                // Points are built into a fresh collection and assigned once, instead of appending
+                // to the live PointCollection already bound to the Polyline — the latter fires a
+                // change notification per point (~960/tick across 4 channels), which is exactly the
+                // kind of avoidable cost this branch exists to eliminate.
                 int n = channel.Brightness.CopyTo(_sampleScratch);
-                var points = _brightnessLines[i].Points;
+                var points = new PointCollection(n);
                 for (int p = 0; p < n; p++)
                 {
-                    double x = w * p / (BrightnessHistory.Capacity - 1);
+                    // Right-aligned: "now" is always the right edge, so every running channel's
+                    // samples line up on the same shared time axis regardless of when it started
+                    // (a channel with fewer samples simply has a shorter line, growing from the right).
+                    double x = w - (n - 1 - p) * w / (BrightnessHistory.Capacity - 1);
                     double y = h - (h * _sampleScratch[p].Luma / 255.0);
                     points.Add(new Point(x, y));
                 }
+                _brightnessLines[i].Points = points;
 
                 BrightnessSample latest = channel.Brightness.Latest;
                 var label = new TextBlock
                 {
-                    Text = $"{channel.Name}  {latest.Luma:F0}   clip {latest.ClippedPct:F1}%",
+                    Text = $"{channel.Name}  {latest.Luma:F0}   clip {latest.ClippedPct:F1}%  blk {latest.BlackPct:F1}%",
                     Margin = new Thickness(0, 0, 14, 0),
                     Foreground = latest.ClippedPct >= ClipWarnPercent
                         ? (Brush)FindResource("RecBrush")
@@ -344,6 +367,54 @@ namespace MatroxFrameGrabber.Views
                 };
                 BrightnessLegend.Children.Add(label);
             }
+        }
+
+        /// <summary>Creates the gridlines/labels once (idempotent). Added before the data polylines
+        /// created in <see cref="RedrawBrightness"/> so the gridlines render behind the data.</summary>
+        private void EnsureAxisElements()
+        {
+            if (_brightnessGridLines[0] != null)
+                return;
+
+            var gridBrush = (Brush)FindResource("BorderBrushColor");
+            for (int i = 0; i < GridLumaLevels.Length; i++)
+            {
+                _brightnessGridLines[i] = new Line { Stroke = gridBrush, StrokeThickness = 0.5, Opacity = 0.5 };
+                BrightnessCanvas.Children.Add(_brightnessGridLines[i]);
+            }
+
+            var labelBrush = (Brush)FindResource("MutedTextBrush");
+            string[] yText = { "255", "128", "0" };
+            for (int i = 0; i < _yAxisLabels.Length; i++)
+            {
+                _yAxisLabels[i] = new TextBlock { Text = yText[i], Foreground = labelBrush, FontSize = 9 };
+                BrightnessCanvas.Children.Add(_yAxisLabels[i]);
+            }
+
+            _xAxisStartLabel = new TextBlock { Text = "-120s", Foreground = labelBrush, FontSize = 9 };
+            _xAxisEndLabel = new TextBlock { Text = "now", Foreground = labelBrush, FontSize = 9 };
+            BrightnessCanvas.Children.Add(_xAxisStartLabel);
+            BrightnessCanvas.Children.Add(_xAxisEndLabel);
+        }
+
+        /// <summary>Repositions the static axis chrome for the canvas's current size (called every redraw).</summary>
+        private void RepositionAxisElements(double w, double h)
+        {
+            for (int i = 0; i < GridLumaLevels.Length; i++)
+            {
+                double y = h - h * GridLumaLevels[i] / 255.0;
+                _brightnessGridLines[i].X1 = 0;
+                _brightnessGridLines[i].X2 = w;
+                _brightnessGridLines[i].Y1 = y;
+                _brightnessGridLines[i].Y2 = y;
+            }
+
+            Canvas.SetLeft(_yAxisLabels[0], 2); Canvas.SetTop(_yAxisLabels[0], 0);           // 255, top
+            Canvas.SetLeft(_yAxisLabels[1], 2); Canvas.SetTop(_yAxisLabels[1], h / 2 - 6);   // 128, middle
+            Canvas.SetLeft(_yAxisLabels[2], 2); Canvas.SetTop(_yAxisLabels[2], h - 24);      // 0, above the x-axis row
+
+            Canvas.SetLeft(_xAxisStartLabel, 2); Canvas.SetTop(_xAxisStartLabel, h - 12);
+            Canvas.SetLeft(_xAxisEndLabel, w - 26); Canvas.SetTop(_xAxisEndLabel, h - 12);
         }
     }
 }
