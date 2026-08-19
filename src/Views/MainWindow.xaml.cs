@@ -319,8 +319,9 @@ namespace MatroxFrameGrabber.Views
             {
                 var channel = vm.Channels[i];
                 // A channel with no camera, or one that is stopped, has no valid display buffer —
-                // drawing a flat zero for it would read as "this camera is completely dark".
-                if (!channel.Brightness.HasData)
+                // drawing a flat zero for it would read as "this camera is completely dark". A
+                // stopped channel also must not keep asserting its last (now stale) reading.
+                if (!channel.IsGrabbing || !channel.Brightness.HasData)
                     continue;
 
                 int n = channel.Brightness.CopyTo(_sampleScratch);

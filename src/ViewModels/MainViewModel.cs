@@ -33,7 +33,12 @@ namespace MatroxFrameGrabber.ViewModels
             _statsTimer.Tick += (s, e) =>
             {
                 foreach (var channel in _manager.Channels)
+                {
+                    // Push the toggle state before refreshing so a channel that just got enabled
+                    // samples on this very tick instead of wasting one.
+                    channel.BrightnessEnabled = _showBrightness;
                     channel.RefreshStats();
+                }
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(AnyRawRecording));
                 StatsRefreshed?.Invoke();

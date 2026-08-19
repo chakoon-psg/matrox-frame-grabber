@@ -201,6 +201,13 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
         public double LastBrightnessSampleMs => _brightness.LastSampleMs;
 
+        /// <summary>
+        /// Whether this channel measures brightness on the stats tick. Off by default: the
+        /// measurement is only worth its cost while somebody is looking at the graph, and the
+        /// acceptance test for this feature is a comparison of frames missed with it on and off.
+        /// </summary>
+        public bool BrightnessEnabled { get; set; }
+
         /// <summary>Editable base name used as the snapshot/recording filename prefix.</summary>
         public string OutputName
         {
@@ -544,8 +551,14 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
-        /// <summary>Frees the grab ring + display buffer, keeping the digitizer and display alive.</summary>
-        private void FreeBuffers()
+        /// <summary>
+        /// Frees the grab ring + display buffer, keeping the digitizer and display alive.
+        /// <paramref name="resetBrightness"/> is false only for the RAW-recording transition
+        /// (start and restore), where the whole point of choosing Rec.601 was a graph that stays
+        /// continuous across the color/Bayer switch. Every other caller (camera free, DCF reload)
+        /// keeps the default, since the display genuinely goes blank there.
+        /// </summary>
+        private void FreeBuffers(bool resetBrightness = true)
         {
             foreach (MIL_ID buf in _grabBuffers)
             {
@@ -557,7 +570,8 @@ namespace MatroxFrameGrabber.Mil
             if (_dispId != MIL.M_NULL)
                 MIL.MdispSelect(_dispId, MIL.M_NULL);
 
-            _brightness.Reset();
+            if (resetBrightness)
+                _brightness.Reset();
 
             if (_dispBufId != MIL.M_NULL)
             {
@@ -681,6 +695,10 @@ namespace MatroxFrameGrabber.Mil
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
 
+            // A stopped channel is no longer measuring anything; keeping the old readings would
+            // have the strip assert a value nobody is watching anymore.
+            _brightness.Reset();
+
             if (_hookHandle.IsAllocated)
                 _hookHandle.Free();
             _hookDelegate = null;
@@ -708,8 +726,10 @@ namespace MatroxFrameGrabber.Mil
                 _frameRate = rate;
 
                 // Brightness is measured here, on the stats tick, and never in the grab hook:
-                // anything added to MdigProcess runs inside the acquisition budget.
-                _brightness.Sample(_dispBufId);
+                // anything added to MdigProcess runs inside the acquisition budget. Gated by
+                // BrightnessEnabled so the sampling cost is only paid while the strip is shown.
+                if (BrightnessEnabled)
+                    _brightness.Sample(_dispBufId);
 
                 // While RAW-recording, track frames the board missed (queue back-pressure on a slow
                 // sink), so a "lossless" capture that actually lost frames is visible in the status.
@@ -977,7 +997,7 @@ namespace MatroxFrameGrabber.Mil
             try
             {
                 SetBayerConversion(false);          // board sends raw Bayer band=1 (~3x smaller)
-                FreeBuffers();
+                FreeBuffers(resetBrightness: false); // keep the graph continuous across the color/Bayer switch
                 AllocateBuffers(RAW_GRAB_BUFFERS);  // band=1 display + deep band=1 grab ring
 
                 _rawW = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
@@ -1052,7 +1072,7 @@ namespace MatroxFrameGrabber.Mil
             _rawSegments = null;
             _rawRecording = false;
             SetBayerConversion(true);   // critical: do this FIRST so color is restored even if the rest faults
-            FreeBuffers();
+            FreeBuffers(resetBrightness: false); // keep the graph continuous across the color/Bayer switch
             AllocateBuffers(REQUESTED_GRAB_BUFFERS);
             if (_rawResumeGrab) TryStartGrab();   // reports rather than silently swallowing
             RaisePropertyChanged(nameof(IsRawRecording));

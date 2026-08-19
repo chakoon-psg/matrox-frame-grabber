@@ -50,6 +50,14 @@ namespace MatroxFrameGrabber.Mil
                 if (width <= 0 || height < RowsPerStrip)
                     return;
 
+                // The display buffer's bit depth follows the camera (CameraChannel applies
+                // M_BIT_SHIFT for anything over 8 bits). Sampling raw bytes from a >8-bit buffer
+                // would read the high byte only, pinning luma near 255 and clipping near 100% —
+                // a permanent false-saturation warning. A blank graph is more honest than that.
+                MIL_INT sizeBit = MIL.MbufInquire(displayBuffer, MIL.M_SIZE_BIT, MIL.M_NULL);
+                if (sizeBit > 8)
+                    return;   // deeper buffers would need a ushort path; a blank graph beats a fabricated one
+
                 EnsureBuffers((int)width);
 
                 if (bands >= 3)
