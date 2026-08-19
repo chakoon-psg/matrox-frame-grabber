@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -367,6 +368,21 @@ namespace MatroxFrameGrabber.Views
                 };
                 BrightnessLegend.Children.Add(label);
             }
+
+            // Diagnostic tooltip on the toggle itself: makes the 500 ms budget check (spec
+            // verification 3) and a permanently-failing channel (F6) both readable at a glance,
+            // instead of requiring a debugger.
+            var diag = new StringBuilder();
+            for (int i = 0; i < vm.Channels.Count; i++)
+            {
+                if (diag.Length > 0) diag.Append("  ");
+                var channel = vm.Channels[i];
+                diag.Append($"ch{i} ");
+                diag.Append(channel.BrightnessFailures > 0
+                    ? $"FAIL x{channel.BrightnessFailures}"
+                    : $"{channel.LastBrightnessSampleMs:F1} ms");
+            }
+            BrightnessToggle.ToolTip = diag.ToString();
         }
 
         /// <summary>Creates the gridlines/labels once (idempotent). Added before the data polylines

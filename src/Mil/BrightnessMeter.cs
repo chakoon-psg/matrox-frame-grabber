@@ -31,6 +31,9 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Wall time the last <see cref="Sample"/> took, for the 500 ms budget check.</summary>
         public double LastSampleMs { get; private set; }
 
+        /// <summary>Consecutive Sample calls that ended in a MIL failure. Zero after any success.</summary>
+        public int ConsecutiveFailures { get; private set; }
+
         /// <summary>
         /// Reads one brightness reading from <paramref name="displayBuffer"/> and appends it.
         /// Does nothing when the buffer is unbound. Never throws: a MIL failure here must not cost
@@ -67,8 +70,12 @@ namespace MatroxFrameGrabber.Mil
             }
             catch (MILException)
             {
-                // A buffer can be freed and reallocated underneath us when a camera is reloaded.
-                // Losing one reading is not worth disturbing the caller's tick.
+                // A buffer can be freed and reallocated underneath us when a camera is reloaded —
+                // losing one reading is not worth disturbing the caller's tick. But if this keeps
+                // happening, something is permanently wrong (e.g. MbufChildColor rejecting a
+                // buffer layout), and a silently-blank strip would be the worst failure mode for a
+                // feature whose entire output is numbers — so count it instead of just swallowing it.
+                ConsecutiveFailures++;
             }
             finally
             {
@@ -97,9 +104,14 @@ namespace MatroxFrameGrabber.Mil
             MIL_ID red = MIL.M_NULL, green = MIL.M_NULL, blue = MIL.M_NULL;
             try
             {
-                MIL.MbufChildColor(buffer, MIL.M_RED, ref red);
-                MIL.MbufChildColor(buffer, MIL.M_GREEN, ref green);
-                MIL.MbufChildColor(buffer, MIL.M_BLUE, ref blue);
+                // Numeric band indices, matching the convention RecordingSession.cs uses for the
+                // same MbufChildColor call: per MIL's own MbufChildColor reference, for an RGB
+                // parent buffer index 0/1/2 is defined to be red/green/blue, exactly what
+                // M_RED/M_GREEN/M_BLUE resolve to — the two spellings are documented as equivalent,
+                // not two different conventions. Matched here for consistency with RecordingSession.
+                MIL.MbufChildColor(buffer, 0, ref red);     // band 0 (R)
+                MIL.MbufChildColor(buffer, 1, ref green);   // band 1 (G)
+                MIL.MbufChildColor(buffer, 2, ref blue);    // band 2 (B)
 
                 double lumaSum = 0;
                 long clipped = 0, black = 0, counted = 0;
@@ -174,6 +186,7 @@ namespace MatroxFrameGrabber.Mil
                 (float)(lumaSum / counted),
                 (float)(100.0 * clipped / counted),
                 (float)(100.0 * black / counted)));
+            ConsecutiveFailures = 0;
         }
     }
 }

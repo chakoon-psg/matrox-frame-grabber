@@ -201,6 +201,9 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
         public double LastBrightnessSampleMs => _brightness.LastSampleMs;
 
+        /// <summary>Consecutive brightness-measurement failures; non-zero means the strip is blank for a reason.</summary>
+        public int BrightnessFailures => _brightness.ConsecutiveFailures;
+
         /// <summary>
         /// Whether this channel measures brightness on the stats tick. Off by default: the
         /// measurement is only worth its cost while somebody is looking at the graph, and the

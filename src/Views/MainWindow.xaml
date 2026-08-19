@@ -125,7 +125,7 @@
                             ToolTip="Change the output folder for snapshots and recordings" />
 
                     <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
-                    <ToggleButton Content="Brightness" Padding="8,4"
+                    <ToggleButton x:Name="BrightnessToggle" Content="Brightness" Padding="8,4"
                                   IsChecked="{Binding ShowBrightness}"
                                   ToolTip="Show a brightness graph for every running channel" />
                 </WrapPanel>
