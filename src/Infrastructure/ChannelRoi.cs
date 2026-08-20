@@ -3,12 +3,15 @@ using System;
 namespace MatroxFrameGrabber.Infrastructure
 {
     /// <summary>
-    /// One channel's on-board acquisition ROI, in sensor pixels. Cropping on the camera is the
-    /// only lever that reduces host DMA traffic — see research.md section 8: the acquisition
-    /// ceiling is a shared ~1.7 GB/s and throttling the display does not move it.
+    /// One channel's ANALYSIS region — which pixels the anomaly metrics are computed over, in
+    /// coordinates of the (possibly decimated) acquired frame. All four values zero means the
+    /// whole frame.
     ///
-    /// All four values zero means "no crop" (full sensor). This type holds no MIL dependency so
-    /// the snapping arithmetic can be tested without hardware.
+    /// This used to be the camera's acquisition ROI. It is not: this camera accepts writes to
+    /// Width/Height/OffsetX/OffsetY and ignores them (see CLAUDE.md), so payload reduction is done
+    /// with DecimationHorizontal/Vertical instead. As a software rectangle there is no hardware
+    /// increment to satisfy and nothing can refuse it — only even alignment still earns its keep,
+    /// so every tile of the metric grid sees the same Bayer CFA phase.
     /// </summary>
     public readonly struct ChannelRoi
     {
@@ -43,22 +46,18 @@ namespace MatroxFrameGrabber.Infrastructure
         public bool IsFullFrame => Width <= 0 || Height <= 0;
 
         /// <summary>
-        /// Rounds this ROI onto the hardware's increment grid and clamps it inside the sensor.
+        /// Rounds this region onto an even-pixel grid and clamps it inside the frame.
         ///
-        /// Offsets and sizes both round DOWN: rounding a size up could push the ROI past the
-        /// sensor edge, and rounding an offset up would move the crop off the region the operator
-        /// picked. The increments come from M_FEATURE_INCREMENT and are widened by EvenIncrement so
-        /// the result is always even — see that method for why flooring at 2 was not enough.
+        /// Offsets and sizes both round DOWN: rounding a size up could push the region past the
+        /// frame edge, and rounding an offset up would move it off the area the operator picked.
+        /// Even alignment keeps the Bayer CFA phase identical in every metric tile.
         /// </summary>
-        public ChannelRoi Snap(int xInc, int yInc, int wInc, int hInc, int maxWidth, int maxHeight)
+        public ChannelRoi Snap(int maxWidth, int maxHeight)
         {
             if (IsFullFrame)
                 return FullFrame;
 
-            int ex = EvenIncrement(xInc);
-            int ey = EvenIncrement(yInc);
-            int ew = EvenIncrement(wInc);
-            int eh = EvenIncrement(hInc);
+            const int ex = CfaIncrement, ey = CfaIncrement, ew = CfaIncrement, eh = CfaIncrement;
 
             // Offset first: it bounds how much width is left. Leave at least one width increment.
             int x = RoundDown(Clamp(OffsetX, 0, Math.Max(0, maxWidth - ew)), ex);
@@ -86,28 +85,32 @@ namespace MatroxFrameGrabber.Infrastructure
             return w * h * Math.Max(1, bands);
         }
 
-        public override string ToString() =>
-            IsFullFrame ? "full frame" : $"{Width}x{Height} @ {OffsetX},{OffsetY}";
+        /// <summary>Decimation factors this app offers. Powers of two keep the CFA phase intact.</summary>
+        public static readonly int[] AllowedDecimation = { 1, 2, 4 };
 
         /// <summary>
-        /// The smallest step that satisfies both the hardware's increment and the even-pixel rule.
-        ///
-        /// Flooring at 2 is not enough: a camera reporting an increment of 3 would let offset 9
-        /// and width 9 straight through, shifting the CFA phase and swapping the colours. Nor can
-        /// an odd increment simply be rounded up to 4 — 4 is not a multiple of 3, so the hardware
-        /// would reject or re-snap it. Doubling an odd increment gives the least common multiple
-        /// of it and 2, which satisfies both.
+        /// Snaps a requested decimation factor to one this app offers. Anything unrecognised
+        /// becomes 1 (full resolution) rather than an error: a bad settings value must degrade to
+        /// the safe default, not refuse to start.
         /// </summary>
-        private static int EvenIncrement(int increment)
+        public static int ClampDecimation(int requested)
         {
-            int i = Math.Max(CfaIncrement, increment);
-            if (i % 2 == 0)
-                return i;
-            // Doubling an absurd increment would overflow to a negative step, and a negative step
-            // sends RoundDown off-grid instead of rejecting the value. Nothing near this is a real
-            // camera increment, so fall back to the CFA minimum.
-            return i > int.MaxValue / 2 ? CfaIncrement : i * 2;
+            foreach (int allowed in AllowedDecimation)
+                if (allowed == requested)
+                    return requested;
+            return 1;
         }
+
+        /// <summary>Frame width the camera delivers at this decimation factor.</summary>
+        public static int DecimatedWidth(int sensorWidth, int decimation) =>
+            sensorWidth / ClampDecimation(decimation);
+
+        /// <summary>Frame height the camera delivers at this decimation factor.</summary>
+        public static int DecimatedHeight(int sensorHeight, int decimation) =>
+            sensorHeight / ClampDecimation(decimation);
+
+        public override string ToString() =>
+            IsFullFrame ? "full frame" : $"{Width}x{Height} @ {OffsetX},{OffsetY}";
 
         private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
 

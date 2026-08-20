@@ -101,20 +101,40 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>
-        /// Per-channel on-board acquisition ROI. Index is the channel's board slot (0-3).
-        /// Defaults to <see cref="ChannelRoi.FullFrame"/>.
+        /// Per-channel analysis ROI — which pixels the anomaly metrics are computed over. Index is
+        /// the channel's board slot (0-3). Defaults to <see cref="ChannelRoi.FullFrame"/>.
         /// </summary>
         public ChannelRoi GetRoi(int channelIndex) =>
             channelIndex < 0 || channelIndex >= ChannelCount
                 ? ChannelRoi.FullFrame
                 : _channelRois[channelIndex];
 
-        // No RaiseChanged here: nothing binds the ROI through OutputSettings. The pane binds
-        // CameraChannel.RoiInputX/Y/W/H, which CameraChannel raises after it applies the crop.
+        // No RaiseChanged here: nothing binds the ROI through OutputSettings.
         public void SetRoi(int channelIndex, ChannelRoi roi)
         {
             if (channelIndex < 0 || channelIndex >= ChannelCount) return;
             _channelRois[channelIndex] = roi;
+            Save();
+        }
+
+        private readonly int[] _channelDecimation = new int[ChannelCount];
+
+        /// <summary>
+        /// Per-channel on-board decimation factor (1, 2 or 4). The only lever that reduces host DMA
+        /// traffic on this camera — see research.md section 8 and CLAUDE.md. Zero-initialised, so
+        /// ClampDecimation turns an untouched slot into 1.
+        /// </summary>
+        public int GetDecimation(int channelIndex) =>
+            channelIndex < 0 || channelIndex >= ChannelCount
+                ? 1
+                : ChannelRoi.ClampDecimation(_channelDecimation[channelIndex]);
+
+        public void SetDecimation(int channelIndex, int factor)
+        {
+            if (channelIndex < 0 || channelIndex >= ChannelCount) return;
+            int v = ChannelRoi.ClampDecimation(factor);
+            if (_channelDecimation[channelIndex] == v) return;
+            _channelDecimation[channelIndex] = v;
             Save();
         }
 
@@ -177,6 +197,7 @@ namespace MatroxFrameGrabber.Infrastructure
             public string RawScratchFolder { get; set; }
             public RoiDto[] ChannelRois { get; set; }
             public int DisplayUpdateFps { get; set; } = 30;
+            public int[] ChannelDecimation { get; set; }
         }
 
         // ChannelRoi is a readonly struct with no parameterless constructor, so it cannot be
@@ -224,6 +245,12 @@ namespace MatroxFrameGrabber.Infrastructure
                                 s._channelRois[i] = new ChannelRoi(r.OffsetX, r.OffsetY, r.Width, r.Height);
                             }
                         }
+
+                        if (dto.ChannelDecimation != null)
+                        {
+                            for (int i = 0; i < ChannelCount && i < dto.ChannelDecimation.Length; i++)
+                                s._channelDecimation[i] = ChannelRoi.ClampDecimation(dto.ChannelDecimation[i]);
+                        }
                     }
                 }
             }
@@ -261,7 +288,8 @@ namespace MatroxFrameGrabber.Infrastructure
                     RawSegmentSeconds = _rawSegmentSeconds,
                     RawScratchFolder = _rawScratchFolder,
                     ChannelRois = rois,
-                    DisplayUpdateFps = _displayUpdateFps
+                    DisplayUpdateFps = _displayUpdateFps,
+                    ChannelDecimation = (int[])_channelDecimation.Clone()
                 };
                 File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }

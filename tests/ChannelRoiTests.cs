@@ -27,7 +27,7 @@ namespace MatroxFrameGrabber.Tests
         {
             // Increment 1 from the camera must still be forced to 2: an odd offset shifts the
             // Bayer CFA phase and the colours come out swapped.
-            var snapped = new ChannelRoi(101, 203, 507, 609).Snap(1, 1, 1, 1, MaxW, MaxH);
+            var snapped = new ChannelRoi(101, 203, 507, 609).Snap(MaxW, MaxH);
             Assert.Equal(100, snapped.OffsetX);
             Assert.Equal(202, snapped.OffsetY);
             Assert.Equal(506, snapped.Width);
@@ -35,46 +35,9 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
-        public void Snap_DoublesAnOddHardwareIncrementToStayEven()
-        {
-            // A camera reporting increment 3 must not be allowed to place an odd offset: the
-            // result has to be a multiple of 6, satisfying both the hardware step and the CFA.
-            var snapped = new ChannelRoi(9, 9, 9, 9).Snap(3, 3, 3, 3, MaxW, MaxH);
-            Assert.Equal(6, snapped.OffsetX);
-            Assert.Equal(6, snapped.OffsetY);
-            Assert.Equal(6, snapped.Width);
-            Assert.Equal(6, snapped.Height);
-            Assert.Equal(0, snapped.OffsetX % 2);
-            Assert.Equal(0, snapped.Width % 2);
-        }
-
-        [Fact]
-        public void Snap_DoesNotOverflowOnAnAbsurdOddIncrement()
-        {
-            // A corrupted feature read must not produce a negative step, which would send the
-            // rounding off-grid instead of rejecting the value.
-            var snapped = new ChannelRoi(100, 100, 800, 600).Snap(int.MaxValue, 2, int.MaxValue, 2, MaxW, MaxH);
-            Assert.True(snapped.OffsetX >= 0);
-            Assert.True(snapped.Width >= 2);
-            Assert.Equal(0, snapped.OffsetX % 2);
-            Assert.Equal(0, snapped.Width % 2);
-            Assert.True(snapped.OffsetX + snapped.Width <= MaxW);
-        }
-
-        [Fact]
-        public void Snap_HonoursLargerHardwareIncrement()
-        {
-            var snapped = new ChannelRoi(100, 100, 1000, 1000).Snap(16, 8, 16, 8, MaxW, MaxH);
-            Assert.Equal(96, snapped.OffsetX);    // 100 -> down to multiple of 16
-            Assert.Equal(96, snapped.OffsetY);    // 100 -> down to multiple of 8
-            Assert.Equal(992, snapped.Width);     // 1000 -> down to multiple of 16
-            Assert.Equal(1000, snapped.Height);   // already a multiple of 8
-        }
-
-        [Fact]
         public void Snap_ClampsSizeSoRoiStaysInsideSensor()
         {
-            var snapped = new ChannelRoi(2000, 1500, 500, 500).Snap(2, 2, 2, 2, MaxW, MaxH);
+            var snapped = new ChannelRoi(2000, 1500, 500, 500).Snap(MaxW, MaxH);
             Assert.True(snapped.OffsetX + snapped.Width <= MaxW);
             Assert.True(snapped.OffsetY + snapped.Height <= MaxH);
             Assert.Equal(64, snapped.Width);    // 2064 - 2000
@@ -84,7 +47,7 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void Snap_ClampsNegativeOffsetToZero()
         {
-            var snapped = new ChannelRoi(-50, -1, 800, 600).Snap(2, 2, 2, 2, MaxW, MaxH);
+            var snapped = new ChannelRoi(-50, -1, 800, 600).Snap(MaxW, MaxH);
             Assert.Equal(0, snapped.OffsetX);
             Assert.Equal(0, snapped.OffsetY);
         }
@@ -92,7 +55,7 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void Snap_LeavesFullFrameAlone()
         {
-            var snapped = ChannelRoi.FullFrame.Snap(2, 2, 2, 2, MaxW, MaxH);
+            var snapped = ChannelRoi.FullFrame.Snap(MaxW, MaxH);
             Assert.True(snapped.IsFullFrame);
         }
 
@@ -100,7 +63,7 @@ namespace MatroxFrameGrabber.Tests
         public void Snap_OffsetPastSensorYieldsAtLeastOneIncrement()
         {
             // Degenerate input must not produce a zero or negative size, which MIL would reject.
-            var snapped = new ChannelRoi(9999, 9999, 800, 600).Snap(2, 2, 2, 2, MaxW, MaxH);
+            var snapped = new ChannelRoi(9999, 9999, 800, 600).Snap(MaxW, MaxH);
             Assert.True(snapped.Width >= 2);
             Assert.True(snapped.Height >= 2);
             Assert.True(snapped.OffsetX + snapped.Width <= MaxW);
@@ -133,6 +96,44 @@ namespace MatroxFrameGrabber.Tests
             var roi = new ChannelRoi(0, 0, 1030, 770);
             double load = 3 * 184.0 * roi.BytesPerFrame(3, MaxW, MaxH);
             Assert.True(load < ChannelRoi.WarnBytesPerSecond);
+        }
+
+        [Fact]
+        public void ClampDecimation_AcceptsOnlyTheOfferedFactors()
+        {
+            Assert.Equal(1, ChannelRoi.ClampDecimation(1));
+            Assert.Equal(2, ChannelRoi.ClampDecimation(2));
+            Assert.Equal(4, ChannelRoi.ClampDecimation(4));
+        }
+
+        [Fact]
+        public void ClampDecimation_FallsBackToFullResolution()
+        {
+            // A bad settings value must degrade to full resolution, not refuse to start.
+            Assert.Equal(1, ChannelRoi.ClampDecimation(0));
+            Assert.Equal(1, ChannelRoi.ClampDecimation(3));
+            Assert.Equal(1, ChannelRoi.ClampDecimation(-2));
+            Assert.Equal(1, ChannelRoi.ClampDecimation(int.MaxValue));
+        }
+
+        [Fact]
+        public void DecimatedSize_HalvesAtFactorTwo()
+        {
+            Assert.Equal(1032, ChannelRoi.DecimatedWidth(MaxW, 2));
+            Assert.Equal(772, ChannelRoi.DecimatedHeight(MaxH, 2));
+            Assert.Equal(2064, ChannelRoi.DecimatedWidth(MaxW, 1));
+            Assert.Equal(516, ChannelRoi.DecimatedWidth(MaxW, 4));
+        }
+
+        [Fact]
+        public void MeasuredCeiling_AcceptsDecimationTwoColourAt184Fps()
+        {
+            // The configuration this whole plan exists to reach: 3 channels, colour, 184 fps.
+            long bytes = (long)ChannelRoi.DecimatedWidth(MaxW, 2)
+                       * ChannelRoi.DecimatedHeight(MaxH, 2) * 3;
+            double load = 3 * 184.0 * bytes;
+            Assert.True(load < ChannelRoi.WarnBytesPerSecond,
+                $"expected under the warn threshold, got {load / 1e9:F2} GB/s");
         }
     }
 }

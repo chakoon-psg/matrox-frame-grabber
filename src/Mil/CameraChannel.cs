@@ -47,12 +47,8 @@ namespace MatroxFrameGrabber.Mil
         private const string F_BALANCE_WHITE_AUTO = "BalanceWhiteAuto";
         private const string F_BALANCE_RATIO_SELECTOR = "BalanceRatioSelector";
         private const string F_BALANCE_RATIO = "BalanceRatio";
-        private const string F_WIDTH = "Width";
-        private const string F_HEIGHT = "Height";
-        private const string F_WIDTH_MAX = "WidthMax";
-        private const string F_HEIGHT_MAX = "HeightMax";
-        private const string F_OFFSET_X = "OffsetX";
-        private const string F_OFFSET_Y = "OffsetY";
+        private const string F_DECIM_H = "DecimationHorizontal";
+        private const string F_DECIM_V = "DecimationVertical";
 
         #endregion
 
@@ -130,11 +126,9 @@ namespace MatroxFrameGrabber.Mil
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
 
-        // Acquisition ROI (crop on the camera to reduce host DMA traffic — research.md section 8).
-        private ChannelRoi _roi = ChannelRoi.FullFrame;
-        private long _sensorMaxW, _sensorMaxH;
-        private int _roiIncX = 2, _roiIncY = 2, _roiIncW = 2, _roiIncH = 2;
-        private string _roiInputX = "0", _roiInputY = "0", _roiInputW = "0", _roiInputH = "0";
+        // On-board decimation (reduces host DMA traffic — research.md section 8). Cropping is
+        // refused by this camera; decimation is the lever instead (see CLAUDE.md).
+        private int _decimation = 1;
 
         // Display-copy decimation. Time-based rather than every-Nth-frame: channels can grab at
         // very different rates (a long exposure caps one camera at 10 fps while its neighbours
@@ -344,23 +338,29 @@ namespace MatroxFrameGrabber.Mil
 
         public string AcqRateHint => _supportsAcqRate ? $"fps  · max {_acqRateMax:0}" : "fps";
 
-        // ----- Acquisition ROI (crop) -----
+        // ----- Decimation (payload reduction) -----
 
-        /// <summary>The ROI currently applied on the camera (already snapped to the hardware grid).</summary>
-        public ChannelRoi Roi => _roi;
+        /// <summary>The decimation factor confirmed applied by reading it back from the camera.</summary>
+        public int Decimation => _decimation;
 
-        /// <summary>True when the camera exposes a settable acquisition ROI.</summary>
-        public bool SupportsRoi => FeatureAvailable(F_WIDTH) && FeatureAvailable(F_OFFSET_X);
+        /// <summary>True if the camera exposes decimation. This one does; cropping it does not.</summary>
+        public bool SupportsDecimation => FeatureAvailable(F_DECIM_H);
 
-        /// <summary>Sensor bounds and step, for the ROI input hint.</summary>
-        public string RoiHint => _sensorMaxW > 0
-            ? $"max {_sensorMaxW}x{_sensorMaxH} · step {_roiIncW}"
-            : "no camera";
-
-        public string RoiInputX { get => _roiInputX; set { _roiInputX = value; RaisePropertyChanged(nameof(RoiInputX)); } }
-        public string RoiInputY { get => _roiInputY; set { _roiInputY = value; RaisePropertyChanged(nameof(RoiInputY)); } }
-        public string RoiInputW { get => _roiInputW; set { _roiInputW = value; RaisePropertyChanged(nameof(RoiInputW)); } }
-        public string RoiInputH { get => _roiInputH; set { _roiInputH = value; RaisePropertyChanged(nameof(RoiInputH)); } }
+        /// <summary>Effective frame size the digitizer reports, for the pane hint.</summary>
+        public string DecimationHint
+        {
+            get
+            {
+                if (_digId == MIL.M_NULL) return "no camera";
+                try
+                {
+                    MIL_INT sx = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+                    MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+                    return $"{sx}×{sy}";
+                }
+                catch (MILException) { return "?"; }
+            }
+        }
 
         public bool TriggerOn
         {
@@ -501,11 +501,10 @@ namespace MatroxFrameGrabber.Mil
                     CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
                     RaisePropertyChanged(nameof(CanRecord));
 
-                    // ROI before AllocateBuffers: the buffer sizes come from M_SIZE_X/M_SIZE_Y,
-                    // which only reflect the crop once it is written. Cropping here is what makes
-                    // 3 colour channels at 184 fps fit the host DMA ceiling at all.
-                    _roi = Output?.GetRoi(_index) ?? ChannelRoi.FullFrame;
-                    WriteRoiToCamera();
+                    // Decimation before AllocateBuffers: the buffer sizes come from
+                    // M_SIZE_X/M_SIZE_Y, which only reflect it once it is written. This is the one
+                    // lever that reduces host DMA traffic on this camera — cropping is refused.
+                    WriteDecimationToCamera();
                 }
             }
 
@@ -1356,10 +1355,9 @@ namespace MatroxFrameGrabber.Mil
 
             UpdateCameraInfo();
 
-            SyncRoiInputs();
-            RaisePropertyChanged(nameof(SupportsRoi));
-            RaisePropertyChanged(nameof(RoiHint));
-            RaisePropertyChanged(nameof(Roi));
+            RaisePropertyChanged(nameof(SupportsDecimation));
+            RaisePropertyChanged(nameof(Decimation));
+            RaisePropertyChanged(nameof(DecimationHint));
         }
 
         private void UpdateCameraInfo()
@@ -1583,37 +1581,6 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>
-        /// Reads the sensor bounds and increments so a requested ROI can be snapped to them.
-        ///
-        /// Prefers the WidthMax/HeightMax features over Width's own M_FEATURE_MAX. Width's maximum
-        /// is offset-dependent — with OffsetX already at 1500 it reports what is left of the row,
-        /// not the sensor — so reading it while a previous crop is still applied would shrink the
-        /// bounds a little more every time a ROI is set. WidthMax/HeightMax are sensor constants.
-        /// This camera exposes both (verified 2026-08-20: 2064 x 1544).
-        /// </summary>
-        private void RefreshRoiBounds()
-        {
-            if (!_features.TryGetInt(MIL.M_FEATURE_VALUE, F_WIDTH_MAX, out long maxW) || maxW <= 0)
-                if (!_features.TryGetInt(MIL.M_FEATURE_MAX, F_WIDTH, out maxW) || maxW <= 0)
-                    _features.TryGetInt(MIL.M_FEATURE_VALUE, F_WIDTH, out maxW);
-            if (!_features.TryGetInt(MIL.M_FEATURE_VALUE, F_HEIGHT_MAX, out long maxH) || maxH <= 0)
-                if (!_features.TryGetInt(MIL.M_FEATURE_MAX, F_HEIGHT, out maxH) || maxH <= 0)
-                    _features.TryGetInt(MIL.M_FEATURE_VALUE, F_HEIGHT, out maxH);
-            _sensorMaxW = maxW;
-            _sensorMaxH = maxH;
-
-            _roiIncX = ReadIncrement(F_OFFSET_X);
-            _roiIncY = ReadIncrement(F_OFFSET_Y);
-            _roiIncW = ReadIncrement(F_WIDTH);
-            _roiIncH = ReadIncrement(F_HEIGHT);
-        }
-
-        private int ReadIncrement(string feature) =>
-            _features.TryGetInt(MIL.M_FEATURE_INCREMENT, feature, out long inc) && inc > 0
-                ? (int)inc
-                : 2;   // ChannelRoi.Snap floors this at 2 anyway; 2 is just the honest default
-
-        /// <summary>
         /// Writes an integer feature only when it is not already at the target value.
         ///
         /// Some nodes are read-only in states where their current value is the only legal one —
@@ -1629,66 +1596,41 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>
-        /// Writes <see cref="_roi"/> to the camera. Called from AllocateCamera BEFORE
-        /// AllocateBuffers, so M_SIZE_X/M_SIZE_Y are inquired after the ROI has taken effect.
+        /// Writes the decimation factor and CONFIRMS IT BY READING IT BACK.
         ///
-        /// The write order matters and is not negotiable: offsets go to zero first, then the
-        /// sizes, then the real offsets. Setting a size while an old offset is still in place is
-        /// rejected whenever offset+size would exceed the sensor, which is exactly what happens
-        /// when moving from a small far-right crop to a large one.
+        /// The read-back is not belt-and-braces. This camera accepts writes to the geometry
+        /// features and silently ignores them: MdigControlFeature does not throw, nothing prints
+        /// under M_PRINT_DISABLE, and the wrapper therefore returns true while the value never
+        /// changes. That cost several rounds of debugging on the crop path before anyone read the
+        /// value back. Decimation does take effect here — but the only way to know is to look.
+        /// Called from AllocateCamera BEFORE AllocateBuffers, so M_SIZE_X/M_SIZE_Y reflect it.
         /// </summary>
-        private void WriteRoiToCamera()
+        private void WriteDecimationToCamera()
         {
-            if (_digId == MIL.M_NULL || !SupportsRoi)
+            if (_digId == MIL.M_NULL || !SupportsDecimation)
+            {
+                _decimation = 1;
                 return;
+            }
 
-            // A rejected feature write prints before it throws, and with printing enabled that
-            // print is a MODAL dialog on this thread — it hangs the app rather than failing soft,
-            // which is the whole reason SetInt returns a bool. Same trap CLAUDE.md documents for
-            // MdigAlloc on an empty port. The restore MUST be in the finally: leaving printing
-            // disabled would silently swallow every later MIL error in the process.
+            int wanted = ChannelRoi.ClampDecimation(Output?.GetDecimation(_index) ?? 1);
+
+            // A rejected feature write prints before it throws, and a print here is a MODAL dialog
+            // on this thread. The restore MUST be in the finally, or every later MIL error in the
+            // process disappears silently.
             MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
             try
             {
-                // Offsets to zero before reading the bounds: Width's maximum is offset-dependent on
-                // cameras that do not expose WidthMax, so reading bounds while a previous crop still
-                // stands makes them shrink a little on every apply.
-                SetIntIfDifferent(F_OFFSET_X, 0);
-                SetIntIfDifferent(F_OFFSET_Y, 0);
+                SetIntIfDifferent(F_DECIM_H, wanted);
+                SetIntIfDifferent(F_DECIM_V, wanted);
 
-                RefreshRoiBounds();
-                if (_sensorMaxW <= 0 || _sensorMaxH <= 0)
-                    return;
-
-                if (_roi.IsFullFrame)
-                {
-                    SetIntIfDifferent(F_WIDTH, _sensorMaxW);
-                    SetIntIfDifferent(F_HEIGHT, _sensorMaxH);
-                    return;
-                }
-
-                ChannelRoi snapped = _roi.Snap(_roiIncX, _roiIncY, _roiIncW, _roiIncH,
-                                               (int)_sensorMaxW, (int)_sensorMaxH);
-
-                bool ok = SetIntIfDifferent(F_WIDTH, snapped.Width);
-                ok &= SetIntIfDifferent(F_HEIGHT, snapped.Height);
-                ok &= SetIntIfDifferent(F_OFFSET_X, snapped.OffsetX);
-                ok &= SetIntIfDifferent(F_OFFSET_Y, snapped.OffsetY);
-
-                if (ok)
-                {
-                    _roi = snapped;
-                    return;
-                }
-
-                // A partly-applied ROI is the worst outcome: the picture would look plausibly cropped
-                // while the offsets sat at zero, and _roi would assert a crop the camera refused. Put
-                // the sensor back to full frame and say so, rather than reporting a crop we do not have.
-                SetIntIfDifferent(F_OFFSET_X, 0);
-                SetIntIfDifferent(F_OFFSET_Y, 0);
-                SetIntIfDifferent(F_WIDTH, _sensorMaxW);
-                SetIntIfDifferent(F_HEIGHT, _sensorMaxH);
-                _roi = ChannelRoi.FullFrame;
+                // Read back, and believe only this.
+                long actualH = 1, actualV = 1;
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_H, out actualH);
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_V, out actualV);
+                _decimation = (actualH == wanted && actualV == wanted)
+                    ? wanted
+                    : ChannelRoi.ClampDecimation((int)actualH);
             }
             finally
             {
@@ -1697,68 +1639,33 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>
-        /// Applies a new acquisition ROI: snaps it to the hardware grid, persists it, and
-        /// reallocates the digitizer and buffers. Resumes grabbing if it was active.
-        ///
-        /// Reallocation is unavoidable — the buffers are sized from the payload, so a crop that
-        /// did not resize them would leave MIL writing a smaller frame into a larger buffer.
-        /// Mirrors <see cref="ReloadWithDcf"/>, which solves the same problem for the DCF.
+        /// Applies a decimation factor: persists it and reallocates the digitizer and buffers.
+        /// Resumes grabbing if it was active. Mirrors <see cref="ReloadWithDcf"/>, which solves the
+        /// same reallocation problem for the DCF. Returns false if the camera did not take it.
         /// </summary>
-        public bool ApplyRoi(ChannelRoi requested)
+        public bool ApplyDecimation(int factor)
         {
-            if (!CameraPresent || !SupportsRoi)
+            if (!CameraPresent || !SupportsDecimation)
                 return false;
 
-            // A bounds read can print too, on a locked node — same trap as WriteRoiToCamera.
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
-            try { RefreshRoiBounds(); }
-            finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
-
-            ChannelRoi snapped = requested.IsFullFrame
-                ? ChannelRoi.FullFrame
-                : requested.Snap(_roiIncX, _roiIncY, _roiIncW, _roiIncH,
-                                 (int)_sensorMaxW, (int)_sensorMaxH);
-
+            int wanted = ChannelRoi.ClampDecimation(factor);
             bool wasGrabbing = _isGrabbing;
             if (wasGrabbing)
                 StopGrab();
 
-            Output?.SetRoi(_index, snapped);
+            Output?.SetDecimation(_index, wanted);
 
             FreeCamera();
             _cameraAvailable = true;
-            AllocateCamera();          // re-reads the ROI from Output and writes it to the camera
+            AllocateCamera();
 
             if (wasGrabbing)
                 TryStartGrab();
 
             RaisePropertyChanged(nameof(DisplayId));
-            RaisePropertyChanged(nameof(Roi));
-            RaisePropertyChanged(nameof(RoiHint));
-            SyncRoiInputs();
-            return CameraPresent;
-        }
-
-        /// <summary>Returns to the full sensor.</summary>
-        public bool ClearRoi() => ApplyRoi(ChannelRoi.FullFrame);
-
-        /// <summary>Parses the four input boxes and applies them. False if any is not a number.</summary>
-        public bool ApplyRoiFromInputs()
-        {
-            if (!int.TryParse(_roiInputX, out int x) || !int.TryParse(_roiInputY, out int y) ||
-                !int.TryParse(_roiInputW, out int w) || !int.TryParse(_roiInputH, out int h))
-                return false;
-            return ApplyRoi(new ChannelRoi(x, y, w, h));
-        }
-
-        /// <summary>Writes the applied (snapped) ROI back into the input boxes, so the operator
-        /// sees what the hardware actually took rather than what they typed.</summary>
-        private void SyncRoiInputs()
-        {
-            RoiInputX = _roi.OffsetX.ToString(CultureInfo.InvariantCulture);
-            RoiInputY = _roi.OffsetY.ToString(CultureInfo.InvariantCulture);
-            RoiInputW = (_roi.IsFullFrame ? 0 : _roi.Width).ToString(CultureInfo.InvariantCulture);
-            RoiInputH = (_roi.IsFullFrame ? 0 : _roi.Height).ToString(CultureInfo.InvariantCulture);
+            RaisePropertyChanged(nameof(Decimation));
+            RaisePropertyChanged(nameof(DecimationHint));
+            return CameraPresent && _decimation == wanted;
         }
 
         #endregion
