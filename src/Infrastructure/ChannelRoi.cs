@@ -47,8 +47,8 @@ namespace MatroxFrameGrabber.Infrastructure
         ///
         /// Offsets and sizes both round DOWN: rounding a size up could push the ROI past the
         /// sensor edge, and rounding an offset up would move the crop off the region the operator
-        /// picked. The increments come from M_FEATURE_INCREMENT but are floored at 2 regardless of
-        /// what the camera reports, because 1 would let an odd offset through.
+        /// picked. The increments come from M_FEATURE_INCREMENT and are widened by EvenIncrement so
+        /// the result is always even — see that method for why flooring at 2 was not enough.
         /// </summary>
         public ChannelRoi Snap(int xInc, int yInc, int wInc, int hInc, int maxWidth, int maxHeight)
         {
@@ -101,7 +101,12 @@ namespace MatroxFrameGrabber.Infrastructure
         private static int EvenIncrement(int increment)
         {
             int i = Math.Max(CfaIncrement, increment);
-            return i % 2 == 0 ? i : i * 2;
+            if (i % 2 == 0)
+                return i;
+            // Doubling an absurd increment would overflow to a negative step, and a negative step
+            // sends RoundDown off-grid instead of rejecting the value. Nothing near this is a real
+            // camera increment, so fall back to the CFA minimum.
+            return i > int.MaxValue / 2 ? CfaIncrement : i * 2;
         }
 
         private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);

@@ -49,6 +49,19 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
+        public void Snap_DoesNotOverflowOnAnAbsurdOddIncrement()
+        {
+            // A corrupted feature read must not produce a negative step, which would send the
+            // rounding off-grid instead of rejecting the value.
+            var snapped = new ChannelRoi(100, 100, 800, 600).Snap(int.MaxValue, 2, int.MaxValue, 2, MaxW, MaxH);
+            Assert.True(snapped.OffsetX >= 0);
+            Assert.True(snapped.Width >= 2);
+            Assert.Equal(0, snapped.OffsetX % 2);
+            Assert.Equal(0, snapped.Width % 2);
+            Assert.True(snapped.OffsetX + snapped.Width <= MaxW);
+        }
+
+        [Fact]
         public void Snap_HonoursLargerHardwareIncrement()
         {
             var snapped = new ChannelRoi(100, 100, 1000, 1000).Snap(16, 8, 16, 8, MaxW, MaxH);
