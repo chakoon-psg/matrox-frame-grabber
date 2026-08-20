@@ -929,6 +929,11 @@ namespace MatroxFrameGrabber.Mil
             if (_dispId == MIL.M_NULL)
                 return;
             int fps = Output?.DisplayUpdateFps ?? 0;
+            // Catching MILException is not enough: MIL prints before it throws, and in this app a
+            // MIL error print is a MODAL dialog. AllocateBuffers runs during MainWindow
+            // construction, so an unsupported control here would open one dialog per channel
+            // before the window exists. Same guard the M_BAYER_PATTERN probe uses.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
             try
             {
                 MIL.MdispControl(_dispId, MIL.M_UPDATE_RATE_MAX,
@@ -936,8 +941,12 @@ namespace MatroxFrameGrabber.Mil
             }
             catch (MILException)
             {
-                // An older board/driver may not support the control. An uncapped display is a
-                // performance regression, not a failure — never take the app down for it.
+                // An uncapped display is a performance regression, not a failure — never take the
+                // app down for it.
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
             }
         }
 
