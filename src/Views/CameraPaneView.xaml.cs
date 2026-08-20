@@ -24,6 +24,9 @@ namespace MatroxFrameGrabber.Views
 
         private MILWPFDisplay _display;
 
+        private bool _dragging;
+        private Point _dragStart;
+
         public CameraPaneView()
         {
             InitializeComponent();
@@ -47,6 +50,22 @@ namespace MatroxFrameGrabber.Views
         }
 
         /// <summary>
+        /// Builds the image-to-control mapping for the current view, or false if it cannot be read.
+        /// Shared by the ROI rectangle and by drag-select so the two can never disagree about where
+        /// the image is.
+        /// </summary>
+        private bool TryBuildMapping(out DisplayMapping map)
+        {
+            map = default(DisplayMapping);
+            var channel = Channel;
+            if (channel == null) return false;
+            if (!channel.TryGetViewGeometry(out int fw, out int fh, out double zoom, out double ox, out double oy))
+                return false;
+            map = DisplayMapping.Create(ViewBorder.ActualWidth, ViewBorder.ActualHeight, fw, fh, zoom, ox, oy);
+            return map.IsValid;
+        }
+
+        /// <summary>
         /// Positions the analysis-ROI rectangle over the live image. Called from the window's
         /// 500 ms stats tick because MIL handles zoom and pan natively and raises no event we
         /// could hook — polling is the only way to follow the operator's zoom.
@@ -57,16 +76,7 @@ namespace MatroxFrameGrabber.Views
             if (channel == null || RoiRect == null) return;
 
             ChannelRoi roi = channel.AnalysisRoi;
-            if (roi.IsFullFrame ||
-                !channel.TryGetViewGeometry(out int fw, out int fh, out double zoom, out double ox, out double oy))
-            {
-                RoiRect.Visibility = Visibility.Collapsed;
-                return;
-            }
-
-            var map = DisplayMapping.Create(ViewBorder.ActualWidth, ViewBorder.ActualHeight,
-                                            fw, fh, zoom, ox, oy);
-            if (!map.IsValid)
+            if (roi.IsFullFrame || !TryBuildMapping(out DisplayMapping map))
             {
                 RoiRect.Visibility = Visibility.Collapsed;
                 return;
@@ -88,11 +98,69 @@ namespace MatroxFrameGrabber.Views
 
         private void ViewBorder_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
+            if (RoiSelectToggle.IsChecked == true)
+            {
+                if (!TryBuildMapping(out DisplayMapping map))
+                    return;
+                _dragging = true;
+                _dragStart = e.GetPosition(ViewBorder);
+                DragRect.Margin = new Thickness(_dragStart.X, _dragStart.Y, 0, 0);
+                DragRect.Width = 0;
+                DragRect.Height = 0;
+                DragRect.Visibility = Visibility.Visible;
+                ViewBorder.CaptureMouse();
+                // Swallow it so the MIL control below never starts a pan.
+                e.Handled = true;
+                return;
+            }
+
             if (e.ClickCount == 2)
             {
                 RequestFullscreen();
                 e.Handled = true;
             }
+        }
+
+        private void ViewBorder_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (!_dragging) return;
+            Point now = e.GetPosition(ViewBorder);
+            double x = Math.Min(_dragStart.X, now.X);
+            double y = Math.Min(_dragStart.Y, now.Y);
+            DragRect.Margin = new Thickness(x, y, 0, 0);
+            DragRect.Width = Math.Abs(now.X - _dragStart.X);
+            DragRect.Height = Math.Abs(now.Y - _dragStart.Y);
+            e.Handled = true;
+        }
+
+        private void ViewBorder_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!_dragging) return;
+            _dragging = false;
+            ViewBorder.ReleaseMouseCapture();
+            DragRect.Visibility = Visibility.Collapsed;
+            e.Handled = true;
+
+            Point end = e.GetPosition(ViewBorder);
+            // A stray click is not a selection. Below this the operator almost certainly missed,
+            // and applying a 2-pixel ROI would be worse than doing nothing.
+            const double MinDragPixels = 5;
+            if (Math.Abs(end.X - _dragStart.X) < MinDragPixels || Math.Abs(end.Y - _dragStart.Y) < MinDragPixels)
+                return;
+
+            var channel = Channel;
+            if (channel == null || !TryBuildMapping(out DisplayMapping map))
+                return;
+
+            // Control coordinates back to image pixels. The drag may run in any direction, so
+            // normalise before handing it over; CameraChannel snaps and clamps from there.
+            int x0 = (int)Math.Round(map.ToImageX(Math.Min(_dragStart.X, end.X)));
+            int y0 = (int)Math.Round(map.ToImageY(Math.Min(_dragStart.Y, end.Y)));
+            int x1 = (int)Math.Round(map.ToImageX(Math.Max(_dragStart.X, end.X)));
+            int y1 = (int)Math.Round(map.ToImageY(Math.Max(_dragStart.Y, end.Y)));
+
+            channel.SetAnalysisRoiFromDrag(x0, y0, x1 - x0, y1 - y0);
+            RefreshRoiOverlay();
         }
 
         private void RequestFullscreen()

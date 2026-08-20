@@ -1777,6 +1777,18 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Back to measuring the whole frame.</summary>
         public void ClearAnalysisRoi() => SetAnalysisRoi(ChannelRoi.FullFrame);
 
+        /// <summary>
+        /// Sets the analysis region from a mouse drag, in image pixels. Values are snapped to the
+        /// even grid and clamped inside the frame, exactly as typed input is — a drag that ran off
+        /// the edge of the image is normal, not an error.
+        /// </summary>
+        public void SetAnalysisRoiFromDrag(int offsetX, int offsetY, int width, int height)
+        {
+            if (width <= 0 || height <= 0)
+                return;
+            SetAnalysisRoi(new ChannelRoi(Math.Max(0, offsetX), Math.Max(0, offsetY), width, height));
+        }
+
         private void SetAnalysisRoi(ChannelRoi requested)
         {
             ChannelRoi snapped = requested;
