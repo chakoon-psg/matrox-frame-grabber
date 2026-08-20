@@ -161,7 +161,7 @@ namespace MatroxFrameGrabber.Mil
                 for (long i = 0; i < n; i++)
                 {
                     var sb = new StringBuilder(256);
-    MIL.MdigInquireFeature(Digitizer, MIL.M_FEATURE_ENUM_ENTRY_NAME + i, feature, MIL.M_TYPE_STRING, sb);
+                    MIL.MdigInquireFeature(Digitizer, MIL.M_FEATURE_ENUM_ENTRY_NAME + i, feature, MIL.M_TYPE_STRING, sb);
                     string name = sb.ToString();
                     if (!string.IsNullOrEmpty(name))
                         list.Add(name);

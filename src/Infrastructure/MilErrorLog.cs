@@ -40,11 +40,13 @@ namespace MatroxFrameGrabber.Infrastructure
                     Directory.CreateDirectory(Path.GetDirectoryName(LogPath));
                     if (File.Exists(LogPath) && new FileInfo(LogPath).Length > MaxBytes)
                     {
-                        // Keep the tail, not nothing: the oldest lines say when a fault storm
-                        // started, which is usually the part worth reading.
+                        // Keep the newest half rather than wiping the file: the old behaviour threw
+                        // away all history at the trim boundary.
                         string[] all = File.ReadAllLines(LogPath);
                         int keep = all.Length / 2;
                         File.WriteAllLines(LogPath, all.AsSpan(all.Length - keep).ToArray());
+                        File.AppendAllText(LogPath,
+                            $"--- trimmed {DateTime.Now:yyyy-MM-dd HH:mm:ss}, older entries dropped ---{Environment.NewLine}");
                     }
 
                     string message = e == null ? "(no exception)" : e.Message.Replace('\r', ' ').Replace('\n', ' ');
