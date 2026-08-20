@@ -160,8 +160,7 @@
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
                         <Label Content="Decim" Width="42" />
                         <ComboBox Width="52" FontSize="11"
-                                  ItemsSource="{Binding DataContext.DecimationOptions,
-                                               RelativeSource={RelativeSource AncestorType=Window}}"
+                                  ItemsSource="{Binding DecimationOptions}"
                                   SelectedItem="{Binding Decimation, Mode=OneWay}"
                                   SelectionChanged="Decimation_Changed"
                                   IsEnabled="{Binding SupportsDecimation}" />

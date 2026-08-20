@@ -378,6 +378,18 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>True if the camera exposes decimation. This one does; cropping it does not.</summary>
         public bool SupportsDecimation => FeatureAvailable(F_DECIM_H);
 
+        /// <summary>
+        /// Decimation factors the pane combo offers. This sits on the channel, not on
+        /// MainViewModel, because the pane bound ItemsSource through
+        /// {RelativeSource AncestorType=Window} and that resolved later than SelectedItem,
+        /// which is a plain DataContext binding. SelectedItem was therefore applied against
+        /// an empty list and dropped to null, and the combo read blank for good: the only
+        /// notification for Decimation fires inside AllocateCamera, which MainWindow runs
+        /// *before* InitializeComponent, so no pane exists to hear it. Binding to the
+        /// channel own DataContext removes the ancestor walk and the ordering with it.
+        /// </summary>
+        public IReadOnlyList<int> DecimationOptions => ChannelRoi.AllowedDecimation;
+
         /// <summary>Effective frame size the digitizer reports, for the pane hint.</summary>
         public string DecimationHint
         {

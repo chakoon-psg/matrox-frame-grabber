@@ -89,9 +89,6 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>Decimation factors offered in each pane's combo.</summary>
-        public Array DecimationOptions => ChannelRoi.AllowedDecimation;
-
         /// <summary>True if any camera is currently recording (drives the Rec-All toggle).</summary>
         public bool AnyRecording
         {
