@@ -48,6 +48,13 @@ namespace MatroxFrameGrabber.Mil
             MIL.MappAlloc(MIL.M_NULL, MIL.M_DEFAULT, ref _appId);
             MIL.MappControl(_appId, MIL.M_ERROR, MIL.M_THROW_EXCEPTION);
 
+            // MIL prints its errors as a MODAL dialog, on whatever thread raised the error. On an
+            // acquisition thread that stops the channel until somebody dismisses it, and a dialog
+            // hidden behind the main window reads to the operator as "the camera froze". Since
+            // M_THROW_EXCEPTION above already delivers every error as a MILException we can catch,
+            // the print adds nothing but a blocking dialog. Errors go to MilErrorLog instead.
+            MIL.MappControl(_appId, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+
             AllocateSystem();
 
             DigitizerCount = MIL.MsysInquire(_sysId, MIL.M_DIGITIZER_NUM, MIL.M_NULL);
