@@ -9,7 +9,12 @@ namespace MatroxFrameGrabber.Infrastructure
     /// and behind the main window it reads as a frozen camera. Printing is therefore disabled
     /// process-wide (MilApplicationManager.Allocate) and errors land here instead.
     ///
-    /// Deliberately best-effort: a logging failure must never propagate into an acquisition hook.
+    /// Deliberately best-effort: a logging failure must never propagate to the caller.
+    ///
+    /// DO NOT call this per frame. It is a synchronous disk write under a process-global lock, and
+    /// at 184 fps across three channels an error storm would serialise every acquisition thread
+    /// behind file I/O — which is the same stall this logging exists to replace. Acquisition-path
+    /// code should count failures and let the 500 ms stats tick report them.
     /// </summary>
     public static class MilErrorLog
     {
@@ -34,7 +39,13 @@ namespace MatroxFrameGrabber.Infrastructure
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(LogPath));
                     if (File.Exists(LogPath) && new FileInfo(LogPath).Length > MaxBytes)
-                        File.WriteAllText(LogPath, $"--- trimmed {DateTime.Now:yyyy-MM-dd HH:mm:ss} ---{Environment.NewLine}");
+                    {
+                        // Keep the tail, not nothing: the oldest lines say when a fault storm
+                        // started, which is usually the part worth reading.
+                        string[] all = File.ReadAllLines(LogPath);
+                        int keep = all.Length / 2;
+                        File.WriteAllLines(LogPath, all.AsSpan(all.Length - keep).ToArray());
+                    }
 
                     string message = e == null ? "(no exception)" : e.Message.Replace('\r', ' ').Replace('\n', ' ');
                     File.AppendAllText(LogPath,
@@ -43,8 +54,8 @@ namespace MatroxFrameGrabber.Infrastructure
             }
             catch (Exception)
             {
-                // A failure to log must never reach the caller — this is called from acquisition
-                // hooks and from catch blocks that exist to keep the app running.
+                // A failure to log must never reach the caller — this is called from catch blocks
+                // that exist to keep the app running.
             }
         }
     }
