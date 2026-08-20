@@ -47,8 +47,8 @@ namespace MatroxFrameGrabber.Views
 
         private void ViewBorder_SizeChanged(object sender, SizeChangedEventArgs e)
         {
-            // Re-fit the whole image whenever the tile changes size.
-            Channel?.FitToWindow();
+            // Re-fit on resize, but not over a zoom or pan the operator chose.
+            Channel?.FitToWindowIfUntouched();
         }
 
         private void ViewBorder_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)

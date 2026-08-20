@@ -956,12 +956,66 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
+        // The view state right after the last fit. Used to tell "still fitted" from "the operator
+        // has zoomed or panned", since interactive zoom is handled natively by MIL and raises no
+        // event we could hook.
+        private double _fittedZoom, _fittedOffsetX, _fittedOffsetY;
+        private bool _haveFitBaseline;
+
         /// <summary>Scales the whole image to fit the display control once (aspect preserved).</summary>
         public void FitToWindow()
         {
             if (_dispId == MIL.M_NULL)
                 return;
             MIL.MdispControl(_dispId, MIL.M_SCALE_DISPLAY, MIL.M_ONCE);
+            CaptureFitBaseline();
+        }
+
+        /// <summary>
+        /// Re-fits only if the operator has not zoomed or panned since the last fit. The pane calls
+        /// this on resize: expanding the Settings expander resizes the view, and an unconditional
+        /// fit there discards a zoom the operator set deliberately.
+        /// </summary>
+        public void FitToWindowIfUntouched()
+        {
+            if (_dispId == MIL.M_NULL)
+                return;
+            if (_haveFitBaseline && ViewMovedByOperator())
+                return;
+            FitToWindow();
+        }
+
+        private void CaptureFitBaseline()
+        {
+            _haveFitBaseline = TryReadViewState(out _fittedZoom, out _fittedOffsetX, out _fittedOffsetY);
+        }
+
+        private bool ViewMovedByOperator()
+        {
+            if (!TryReadViewState(out double zoom, out double offsetX, out double offsetY))
+                return false;   // cannot tell — prefer fitting, which is the old behaviour
+            const double ZoomEpsilon = 0.001;
+            const double OffsetEpsilon = 0.5;
+            return Math.Abs(zoom - _fittedZoom) > ZoomEpsilon
+                || Math.Abs(offsetX - _fittedOffsetX) > OffsetEpsilon
+                || Math.Abs(offsetY - _fittedOffsetY) > OffsetEpsilon;
+        }
+
+        private bool TryReadViewState(out double zoom, out double offsetX, out double offsetY)
+        {
+            zoom = 0; offsetX = 0; offsetY = 0;
+            try
+            {
+                MIL.MdispInquire(_dispId, MIL.M_REAL_ZOOM_FACTOR_X, ref zoom);
+                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_X, ref offsetX);
+                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_Y, ref offsetY);
+                return true;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read display zoom/pan state", e);
+                return false;
+            }
         }
 
         /// <summary>Resets zoom to 100% (1:1) and clears any pan offset.</summary>
