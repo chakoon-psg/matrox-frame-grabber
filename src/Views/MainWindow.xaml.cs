@@ -290,10 +290,10 @@ namespace MatroxFrameGrabber.Views
 
         // Static axis chrome (gridlines + labels), built once and repositioned on every redraw as
         // the canvas resizes. Recreating these every tick would grow the visual tree without bound.
+        // The gridlines belong to the plot canvas; the labels belong to the gutter beside it.
         private static readonly double[] GridLumaLevels = { 64, 128, 192 };
         private readonly Line[] _brightnessGridLines = new Line[GridLumaLevels.Length];
         private readonly TextBlock[] _yAxisLabels = new TextBlock[3];   // "255" / "128" / "0"
-        private TextBlock _xAxisStartLabel, _xAxisEndLabel;             // "-120s" / "now"
 
         /// <summary>
         /// Redraws the brightness strip. The vertical axis is pinned to 0-255 rather than scaled to
@@ -444,18 +444,15 @@ namespace MatroxFrameGrabber.Views
                 BrightnessCanvas.Children.Add(_brightnessGridLines[i]);
             }
 
+            // Labels go in the gutter canvas, not the plot canvas. Both live in the same Grid row,
+            // so they share a height and the y coordinates computed below line up with the gridlines.
             var labelBrush = (Brush)FindResource("MutedTextBrush");
             string[] yText = { "255", "128", "0" };
             for (int i = 0; i < _yAxisLabels.Length; i++)
             {
                 _yAxisLabels[i] = new TextBlock { Text = yText[i], Foreground = labelBrush, FontSize = 9 };
-                BrightnessCanvas.Children.Add(_yAxisLabels[i]);
+                BrightnessAxisGutter.Children.Add(_yAxisLabels[i]);
             }
-
-            _xAxisStartLabel = new TextBlock { Text = "-120s", Foreground = labelBrush, FontSize = 9 };
-            _xAxisEndLabel = new TextBlock { Text = "now", Foreground = labelBrush, FontSize = 9 };
-            BrightnessCanvas.Children.Add(_xAxisStartLabel);
-            BrightnessCanvas.Children.Add(_xAxisEndLabel);
         }
 
         /// <summary>Repositions the static axis chrome for the canvas's current size (called every redraw).</summary>
@@ -470,12 +467,12 @@ namespace MatroxFrameGrabber.Views
                 _brightnessGridLines[i].Y2 = y;
             }
 
-            Canvas.SetLeft(_yAxisLabels[0], 2); Canvas.SetTop(_yAxisLabels[0], 0);           // 255, top
-            Canvas.SetLeft(_yAxisLabels[1], 2); Canvas.SetTop(_yAxisLabels[1], h / 2 - 6);   // 128, middle
-            Canvas.SetLeft(_yAxisLabels[2], 2); Canvas.SetTop(_yAxisLabels[2], h - 24);      // 0, above the x-axis row
-
-            Canvas.SetLeft(_xAxisStartLabel, 2); Canvas.SetTop(_xAxisStartLabel, h - 12);
-            Canvas.SetLeft(_xAxisEndLabel, w - 26); Canvas.SetTop(_xAxisEndLabel, h - 12);
+            // Right-aligned in the gutter so the numbers sit against the plot edge they annotate.
+            // "0" sits a full line-height up from the bottom so its baseline reads as the 0 line
+            // rather than hanging below it.
+            Canvas.SetRight(_yAxisLabels[0], 4); Canvas.SetTop(_yAxisLabels[0], 0);           // 255, top
+            Canvas.SetRight(_yAxisLabels[1], 4); Canvas.SetTop(_yAxisLabels[1], h / 2 - 6);   // 128, middle
+            Canvas.SetRight(_yAxisLabels[2], 4); Canvas.SetTop(_yAxisLabels[2], h - 12);      // 0, bottom
         }
     }
 }

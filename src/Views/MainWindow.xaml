@@ -133,8 +133,20 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <StackPanel x:Name="BrightnessLegend" Grid.Row="0" Orientation="Horizontal" Margin="6,4,6,2" />
-                    <Canvas x:Name="BrightnessCanvas" Grid.Row="1" Margin="6,0,6,4" ClipToBounds="True" />
+                    <Grid.ColumnDefinitions>
+                        <!-- Gutter for the y-axis labels. They used to be drawn inside the plot
+                             canvas, where the data lines ran straight across them; a separate
+                             column makes the separation structural, so no width can bring the
+                             overlap back. -->
+                        <ColumnDefinition Width="30" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel x:Name="BrightnessLegend" Grid.Row="0" Grid.ColumnSpan="2"
+                                Orientation="Horizontal" Margin="6,4,6,2" />
+                    <Canvas x:Name="BrightnessAxisGutter" Grid.Row="1" Grid.Column="0"
+                            Margin="4,0,0,4" ClipToBounds="True" />
+                    <Canvas x:Name="BrightnessCanvas" Grid.Row="1" Grid.Column="1"
+                            Margin="0,0,6,4" ClipToBounds="True" />
                 </Grid>
             </Border>
 
