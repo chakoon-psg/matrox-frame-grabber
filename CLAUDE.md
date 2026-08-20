@@ -135,6 +135,21 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   포함되지만 `MimStat`은 Image Processing(IM) 모듈이 필요하고 이 장비에는 없다 — 호출하면
   `Licensing error. A module was used without a valid license`가 난다. 통계·히스토그램류를
   MIL로 처리하려다 이 벽에 부딪히므로, 호스트에서 직접 계산할 것을 전제로 설계한다.
+- **`MbufBayer`는 이 장비에서 예외도 오류도 없이 블록한다.** 취득 훅에서 호출하면 훅이 첫
+  프레임에서 멈추고(`M_PROCESS_FRAME_COUNT`가 1에 고정), UI 스레드에서 호출하면 앱 전체가
+  정지한다. 대상 버퍼를 바꿔도(중간 `M_PROC` 버퍼 경유) 마찬가지다. `MbufGetColor` 함정과 같은
+  계열이다. **호스트 디베이어를 MIL로 할 수 없다** — 컬러가 필요하면 보드의
+  `M_BAYER_CONVERSION`을 쓰면서 ROI/decimation으로 페이로드를 줄이는 것이 유일한 길이다.
+- **취득 대역폭에는 공유 천장이 있다(호스트 DMA 약 1.7 GB/s).** 채널 수와 무관하게 합계가 여기서
+  고정되고, 초과분은 `M_PROCESS_FRAME_MISSED`로 조용히 사라진다. 성능 작업을 하기 전에
+  [research.md](research.md) 8절의 실측표를 볼 것 — **표시 경로를 최적화해도 취득 fps는 늘지
+  않는다**(측정으로 확인). 프레임당 페이로드만이 레버다.
+- **카메라 GenICam 설정 일부는 보드가 아니라 카메라에 영속된다.** `AcquisitionFrameRate` /
+  `AcquisitionFrameRateEnable`, `DecimationHorizontal` / `Vertical`이 그렇다. 앱을 닫아도 남으니
+  `M_BAYER_CONVERSION`과 같은 복구 규율을 적용할 것. 그리고 이들은 **정수형 피처라
+  `M_TYPE_MIL_INT`로 써야 한다** — `M_TYPE_DOUBLE`로 쓰면 조용히 무시된다.
+- **한 채널만 느리면 케이블·링크보다 노출을 먼저 보라.** `AcquisitionFrameRate`의 최대값은
+  `ExposureTime`에 종속된다. 노출 100 ms면 그 채널의 상한은 10 fps다.
 
 ## 에이전트 스킬
 

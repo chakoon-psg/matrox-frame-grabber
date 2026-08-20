@@ -438,7 +438,7 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 - `.gitattributes`: `* text=auto`, `.sln/.slnx/.csproj`는 CRLF 고정
 
 **런타임 전제**
-- Windows x64 + MIL 10.70 설치 + WindowsDesktop 6.0 런타임
+- Windows x64 + MIL 10.70 설치 + WindowsDesktop 10.0 런타임
 - Rapixo CXP 보드(없으면 `M_SYSTEM_DEFAULT` 폴백 → "No camera" 패널 4개)
 - 비페이지드 메모리 풀이 부족하면 MILConfig에서 증설 필요
 
@@ -570,6 +570,112 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
   (500ms 폴링 하나가 유일한 갱신 축).
 - 취득 훅(`OnGrabbedFrame`)에서 하는 일은 **전부 실시간 예산 안에 들어와야 한다.** 무거운 처리를 넣으면
   라이브 뷰가 아니라 **그랩 자체가 밀린다**(RAW 경로는 특히 블로킹 백프레셔라 즉시 드롭으로 나타난다).
+
+---
+
+## 8. 측정된 하드웨어 한계 (2026-08-20, 실기)
+
+Rapixo CXP + 카메라 3대에서 계측해 얻은 값이다. 코드만 읽어서는 알 수 없고, 성능 설계의 모든
+판단이 여기 걸린다. 설계 문서:
+[docs/superpowers/specs/2026-08-20-avn-anomaly-detection-design.md](docs/superpowers/specs/2026-08-20-avn-anomaly-detection-design.md).
+
+**장비 구성**
+
+| 항목 | 값 |
+|---|---|
+| 센서 / 픽셀 포맷 | 2064×1544, `BayerRG8` |
+| CXP 링크 | `CxpLinkConfiguration = CXP6_X1` ≈ **625 MB/s / 카메라** |
+| 원본 184 fps의 링크 사용량 | 559 MB/s = 링크의 **89%** |
+| 카메라 최대 프레임레이트 | 184.06 fps (= `AcquisitionFrameRate` 최대) |
+| 사용 가능한 감축 수단 | `Width`/`Height`/`OffsetX`/`OffsetY`, `DecimationHorizontal`/`Vertical`. `Binning*`은 없음 |
+
+**184 fps는 이미 카메라 링크의 한계다.** 그 이상은 CXP 레인 증설이 필요하다.
+
+**호스트 DMA 천장 ≈ 1.7 GB/s (채널 공유)**
+
+채널 수와 무관하게 합계가 여기서 고정된다. 1채널 단독이면 184 fps · 유실 0인데, 채널을 추가하면
+합계는 그대로이고 배분만 불공정해진다(보드 arbitration이 ch0에 몰아준다).
+
+| 구성 | ch0 | ch1 | ch2 | 합계 | GB/s | 유실 |
+|---|---|---|---|---|---|---|
+| 원본 컬러, ch0 단독 | 184.1 | – | – | 184 | 1.68 | **0** |
+| 원본 컬러 3채널 | 146 | 22 | 19 | 187 | 1.70 | 약 62% |
+| 원본 1밴드 3채널 | 184.1 | 99.7 | 184.1 | 468 | 1.39 | **0** |
+| decimation 2 (1024×772) 컬러 | **184.1** | 10.0 | **184.1** | – | – | **0** |
+| 컬러 3채널, 카메라 60 fps 제한 | 60.0 | 60.0 | 60.0 | 180 | 1.64 | **0** (20초) |
+| 컬러 3채널, 카메라 30 fps 제한 | 30.0 | 30.0 | 30.0 | 90 | 0.82 | **0** |
+
+- `M_BAYER_CONVERSION`이 프레임당 페이로드를 **3배**(3.04 → 9.12 MB)로 만든다. 원본 컬러로
+  3채널 184 fps는 5.0 GB/s가 필요해 **성립하지 않는다.**
+- 컬러를 유지하려면 프레임당 페이로드를 **원본의 1/4 이하**로 줄여야 한다(≈2.3 MB → 1.25 GB/s,
+  마진 27%).
+- 카메라 60 fps 제한은 천장의 96%라 마진이 없다 — 60초 런에서 한 채널이 387프레임을 놓쳤다.
+  45~50 fps가 안전선이다.
+
+**표시 경로 — UI 스레드 1개 공유**
+
+`MILWPFDisplay`는 `HwndHost`도 `D3DImage`도 아니다. 어셈블리에 `_writeableBitmap`,
+`_displaySurface`, `CopySurfaceToImageSource`, `DispatcherOperation`, `BeginInvoke`가 있다. 즉
+**4개 pane 전부의 픽셀 업로드와 합성이 단일 WPF UI 스레드에서** 일어난다. 취득 훅은 채널별 MIL
+스레드에서 돈다(측정된 관리 스레드 ID가 채널마다 다르고 전 구간 고정).
+
+기본 상태에서 **스로틀이 없다**: `M_UPDATE_RATE`가 `M_PROCESS_FRAME_RATE`와 정확히 같다 —
+grab 1프레임 = 표시 1갱신.
+
+| 표시 설정 (원본 컬러 3채널) | 합계 fps | CPU(코어) |
+|---|---|---|
+| 기본 (스로틀 없음) | 187 | 1.29 |
+| `M_UPDATE_RATE_MAX = 30` | 188 | 0.78 |
+| 훅의 `MbufCopy`를 30 fps로 감축 | 190 | 0.71 |
+| 둘 다 | 180 | 0.58 |
+| 표시 완전 차단 (`M_UPDATE, M_DISABLE`) | 186 | 0.45 |
+
+- **표시 스로틀은 취득 fps를 늘려주지 않는다.** 완전히 껐을 때조차 합계가 변하지 않는다. 즉
+  천장은 호스트 메모리 대역폭이 아니라 **PCIe/보드 DMA**다. 스로틀의 목적은 CPU 확보다.
+- **`M_UPDATE_RATE_MAX`는 디스플레이당 스레드를 추가로 띄운다**(45 → 65). 과포화 상태에서는 한
+  채널이 2.3 fps로 붕괴하는 것을 관측했다. **대역폭 여유를 먼저 만든 뒤** 캡을 얹어야 한다.
+- 모든 실행에서 `DispatcherTimer`의 실제 간격은 500 ms를 지켰다. UI 스레드 공유 자체는 30 fps ×
+  3채널에서 병목이 아니다.
+
+**`MbufBayer`는 이 장비에서 블록한다 — 예외도, 오류도 없이 반환하지 않는다**
+
+세 경우 모두 재현했다.
+
+| 호출 위치 / 대상 | 결과 |
+|---|---|
+| 훅 → `MdispSelect`된 표시 버퍼 | 훅이 첫 프레임에서 멈춤. `M_PROCESS_FRAME_COUNT`가 1에 고정 |
+| 훅 → 중간 `M_PROC` 버퍼 경유 | 동일하게 멈춤 (대상 버퍼 문제가 아니다) |
+| 훅 밖 (스탯 틱, UI 스레드) | **앱 전체 정지.** 스탯 타이머 사망, `0.0 fps (0 frames)` |
+
+`MbufGetColor` 함정과 같은 계열이다(§7 참고). **호스트 디베이어를 MIL로 할 수 없다** — "1밴드로
+받고 표시할 것만 디베이어" 경로는 막혀 있다. 컬러가 필요하면 보드의 `M_BAYER_CONVERSION`을
+쓰면서 ROI/decimation으로 페이로드를 줄이는 것이 유일한 길이다.
+
+**측정된 프레임 예산과 비용**
+
+| 항목 | 값 |
+|---|---|
+| 184 fps의 프레임 예산 | **5.4 ms** |
+| `MbufCopy` (원본 컬러 9.12 MB) | 0.9~1.5 ms |
+| `MbufCopy` (1밴드 3.04 MB) | 0.27~0.5 ms |
+| 밝기 측정 1회 (4% 커버리지, 전역 1값) | **0.20~0.53 ms** |
+
+밝기 측정 비용은 184 Hz로 돌려도 채널당 코어의 7.4%다. **프레임별 측정은 예산 안에 들어온다** —
+현재 500 ms 틱에 있는 것은 성능 때문이 아니라 당시 요구사항이 그랬기 때문이다.
+
+**카메라별 설정이 성능을 좌우한다 (하드웨어 고장으로 오진하기 쉬움)**
+
+`AcquisitionFrameRate`의 **최대값은 `ExposureTime`에 종속**된다. 측정 당시 Camera 1의
+`ExposureTime`이 100000 µs(100 ms)여서 최대 10 fps였다 — Camera 0·2는 5388 µs. 한 채널만 느릴
+때 케이블·링크·arbitration을 의심하기 전에 **노출을 먼저 확인할 것.**
+
+주의할 영속성:
+
+- `AcquisitionFrameRate` / `AcquisitionFrameRateEnable`은 **카메라에 남는다.** 앱을 닫아도
+  유지된다. 복구는 `AcquisitionFrameRate`를 `M_FEATURE_MAX`로 되돌리고 `Enable`을 끄는 것.
+- `DecimationHorizontal`/`Vertical`도 **카메라에 남는다.** `M_BAYER_CONVERSION`과 같은 성격이다.
+- 이 피처들은 **정수형이다.** `M_TYPE_DOUBLE`로 쓰면 조용히 무시된다 —
+  `M_TYPE_MIL_INT`를 쓸 것.
 
 ---
 
