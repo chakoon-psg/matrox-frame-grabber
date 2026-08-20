@@ -584,6 +584,12 @@ namespace MatroxFrameGrabber.Mil
             // Fit the whole image to the control initially (aspect ratio preserved). M_ONCE
             // fits one time and then leaves manual zoom/pan usable (M_ENABLE would lock them).
             MIL.MdispControl(_dispId, MIL.M_SCALE_DISPLAY, MIL.M_ONCE);
+            // The display paints whatever the image does not cover, and its default is white — a
+            // bright slab in a dark themed app. M_COLOR_BLACK is not exactly the panel colour, but
+            // it is the one value MIL takes reliably here and it reads as part of the frame rather
+            // than a hole in it.
+            try { MIL.MdispControl(_dispId, MIL.M_BACKGROUND_COLOR, MIL.M_COLOR_BLACK); }
+            catch (MILException e) { MilErrorLog.Write($"{Name}: set display background colour", e); }
             ApplyDisplayUpdateCap();
 
             if (CameraPresent)
