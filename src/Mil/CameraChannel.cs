@@ -956,10 +956,16 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
-        // The view state right after the last fit. Used to tell "still fitted" from "the operator
-        // has zoomed or panned", since interactive zoom is handled natively by MIL and raises no
-        // event we could hook.
-        private double _fittedZoom, _fittedOffsetX, _fittedOffsetY;
+        // The zoom right after the last fit, to tell "still fitted" from "the operator zoomed in".
+        // Interactive zoom is native to MIL and raises no event we could hook, so this is inferred.
+        //
+        // Only zoom is compared. MIL re-centres the view whenever the display control is resized,
+        // so M_REAL_OFFSET_X/Y move with no operator input at all — measured jumping from 0 to -792
+        // on a plain resize — and an offset comparison therefore reads every resize as a pan and
+        // stops refitting for the rest of the session. Zoom alone is also sufficient: at fit scale
+        // the whole image is visible, so there is nothing to pan to, and panning only becomes
+        // meaningful once zoomed in, where the zoom already differs.
+        private double _fittedZoom;
         private bool _haveFitBaseline;
 
         /// <summary>Scales the whole image to fit the display control once (aspect preserved).</summary>
@@ -987,33 +993,27 @@ namespace MatroxFrameGrabber.Mil
 
         private void CaptureFitBaseline()
         {
-            _haveFitBaseline = TryReadViewState(out _fittedZoom, out _fittedOffsetX, out _fittedOffsetY);
+            _haveFitBaseline = TryReadZoom(out _fittedZoom);
         }
 
         private bool ViewMovedByOperator()
         {
-            if (!TryReadViewState(out double zoom, out double offsetX, out double offsetY))
+            if (!TryReadZoom(out double zoom))
                 return false;   // cannot tell — prefer fitting, which is the old behaviour
-            const double ZoomEpsilon = 0.001;
-            const double OffsetEpsilon = 0.5;
-            return Math.Abs(zoom - _fittedZoom) > ZoomEpsilon
-                || Math.Abs(offsetX - _fittedOffsetX) > OffsetEpsilon
-                || Math.Abs(offsetY - _fittedOffsetY) > OffsetEpsilon;
+            return Math.Abs(zoom - _fittedZoom) > 0.001;
         }
 
-        private bool TryReadViewState(out double zoom, out double offsetX, out double offsetY)
+        private bool TryReadZoom(out double zoom)
         {
-            zoom = 0; offsetX = 0; offsetY = 0;
+            zoom = 0;
             try
             {
                 MIL.MdispInquire(_dispId, MIL.M_REAL_ZOOM_FACTOR_X, ref zoom);
-                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_X, ref offsetX);
-                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_Y, ref offsetY);
                 return true;
             }
             catch (MILException e)
             {
-                MilErrorLog.Write($"{Name}: read display zoom/pan state", e);
+                MilErrorLog.Write($"{Name}: read display zoom factor", e);
                 return false;
             }
         }
