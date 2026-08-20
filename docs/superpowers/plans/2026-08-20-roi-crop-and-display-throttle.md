@@ -1798,3 +1798,245 @@ over, no hardware can refuse it, and it needs no reallocation. Its hardware
 increment logic is gone with the crop that needed it; even alignment stays,
 so every metric tile sees the same CFA phase.
 ```
+
+---
+
+### Task 7: pane UI (SUPERSEDED — Task 7R과 7S를 볼 것)
+
+> **2026-08-20 폐기.** 카메라 ROI 크롭 입력을 전제로 쓰여 있었다. 크롭은 이 하드웨어에서
+> 불가능하다. Step 0a·0b(유실 프레임 노출, 합계 대역폭 표시)는 여전히 유효하며 **Task 7R**로
+> 옮겼다. 좌표 입력은 **분석 ROI**로 성격이 바뀌어 **Task 7S**가 된다.
+
+---
+
+### Task 7R: 디시메이션 선택 + 유실 프레임·대역폭 노출 + 표시 fps
+
+**Files:**
+- Modify: `src/Mil/CameraChannel.cs` — 유실 프레임 노출, 프레임 바이트 수 노출
+- Modify: `src/ViewModels/MainViewModel.cs` — 합계 대역폭 문자열
+- Modify: `src/Views/CameraPaneView.xaml(.cs)` — 디시메이션 콤보 + 핸들러
+- Modify: `src/Views/MainWindow.xaml` — 대역폭 표시, ⚙ 팝업의 표시 fps
+
+**Interfaces:**
+- Consumes: `CameraChannel.Decimation`/`SupportsDecimation`/`DecimationHint`/`ApplyDecimation` (Task 4R), `ChannelRoi.AllowedDecimation`/`WarnBytesPerSecond`/`HostDmaCeilingBytesPerSecond` (Task 4R), `OutputSettings.DisplayUpdateFps` (Task 3)
+- Produces:
+  - `long CameraChannel.FramesMissed { get; }`
+  - `long CameraChannel.BytesPerFrame { get; }`
+  - `string MainViewModel.BandwidthText { get; }`
+  - `Array MainViewModel.DecimationOptions { get; }`
+
+**왜 유실 프레임과 대역폭이 여기 있는가.** 이 계획 전체의 합격 기준은 "`M_PROCESS_FRAME_MISSED`가
+증가하지 않는다"인데, 그 값은 지금 **RAW 녹화 중에만** 읽히고 UI에 전혀 나오지 않는다. 그리고
+`ChannelRoi.WarnBytesPerSecond`는 정의만 되어 있고 **어떤 코드도 쓰지 않는다.** 둘을 합치면
+실패 양상은 이렇다: 현장에서 디시메이션을 1로 두면 프레임의 60%가 사라지는데 **앱이 아무 말도
+하지 않는다.** 이 계획이 존재하는 이유가 그 손실이므로, 이를 조용히 넘기는 것은 이 작업의 목적에 어긋난다.
+
+- [ ] **Step 1: 유실 프레임을 항상 읽고 노출한다**
+
+`RefreshStats`에서 `if (_rawRecording)`로 감싸인 `M_PROCESS_FRAME_MISSED` 블록을 조건 밖으로
+꺼낸다. 취득 중이면 항상 읽는다.
+
+```csharp
+                // Frames the board dropped because the host could not take them fast enough.
+                // Read on every tick, not only while RAW-recording: this is the acceptance
+                // criterion for the whole payload change, and an over-budget configuration loses
+                // frames silently otherwise.
+                MIL_INT missed = 0;
+                try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
+                catch (MILException) { }
+                _framesMissed = missed;
+                if (_rawRecording)
+                    _rawMissed = missed;
+```
+
+필드와 프로퍼티를 추가한다.
+
+```csharp
+        private long _framesMissed;
+
+        /// <summary>Frames the board dropped for want of host bandwidth. Non-zero means the
+        /// payload does not fit — see research.md section 8.</summary>
+        public long FramesMissed => _framesMissed;
+```
+
+`RefreshStats` 끝의 `RaisePropertyChanged` 묶음에 `RaisePropertyChanged(nameof(FramesMissed));`를
+추가한다. `StatusText`의 grab 중 분기 **양쪽**에 유실을 덧붙인다. 0일 때는 아무 것도 붙이지
+않는다 — 정상일 때 군더더기를 띄우지 않기 위해서다.
+
+```csharp
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
+                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
+                         + RawStatusSuffix();
+```
+
+- [ ] **Step 2: 프레임 바이트 수를 노출한다**
+
+버스를 실제로 지나가는 것은 **grab 버퍼**다. 디스플레이 버퍼가 아니라 이쪽을 재야 한다.
+
+```csharp
+        /// <summary>Bytes one grabbed frame occupies (what actually crosses the bus). 0 when idle.</summary>
+        public long BytesPerFrame
+        {
+            get
+            {
+                if (_grabBuffers.Count == 0 || _grabBuffers[0] == MIL.M_NULL) return 0;
+                try
+                {
+                    return MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_X, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_Y, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_BAND, MIL.M_NULL);
+                }
+                catch (MILException) { return 0; }
+            }
+        }
+```
+
+- [ ] **Step 3: 합계 대역폭을 툴바에 노출한다**
+
+`src/ViewModels/MainViewModel.cs`에 추가한다. 500 ms 스탯 틱이 이미 모든 채널을 돌고 있으므로 새
+타이머가 필요 없고, **가정한 184 fps가 아니라 실제 fps로 계산**하는 편이 더 정직하다.
+
+```csharp
+        /// <summary>
+        /// Aggregate host DMA load across the running channels, against the measured ceiling.
+        ///
+        /// Computed from the live frame rate rather than an assumed one, so it reports what is
+        /// actually crossing the bus. Warns above ChannelRoi.WarnBytesPerSecond (80% of the
+        /// ceiling) — past that the board starts dropping frames and picks the victim channel
+        /// itself, unfairly.
+        /// </summary>
+        public string BandwidthText
+        {
+            get
+            {
+                double total = 0;
+                foreach (var channel in _manager.Channels)
+                {
+                    if (!channel.IsGrabbing) continue;
+                    total += channel.FrameRate * channel.BytesPerFrame;
+                }
+                if (total <= 0)
+                    return "";
+                string s = $"DMA {total / 1e9:F2} GB/s";
+                return total >= ChannelRoi.WarnBytesPerSecond
+                    ? s + $" ⚠ over budget ({ChannelRoi.HostDmaCeilingBytesPerSecond / 1e9:F1} GB/s ceiling)"
+                    : s;
+            }
+        }
+
+        /// <summary>Decimation factors offered in each pane's combo.</summary>
+        public Array DecimationOptions => ChannelRoi.AllowedDecimation;
+```
+
+스탯 틱의 `RaiseChanged(nameof(AnyRecording));` 옆에 추가한다.
+
+```csharp
+                RaiseChanged(nameof(BandwidthText));
+```
+
+`using MatroxFrameGrabber.Infrastructure;`는 이미 있다.
+
+`src/Views/MainWindow.xaml`에서 `SystemStatus`를 표시하는 `TextBlock`을 찾아 그 옆에 둔다.
+
+```xml
+                    <TextBlock Text="{Binding BandwidthText}" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontSize="11"
+                               Foreground="{StaticResource MutedTextBrush}" />
+```
+
+- [ ] **Step 4: pane에 디시메이션 콤보를 추가한다**
+
+`src/Views/CameraPaneView.xaml`의 Settings `StackPanel` 안, White balance 행 뒤에 넣는다.
+
+```xml
+                    <!-- On-board decimation. The only lever that reduces host DMA traffic on this
+                         camera — cropping is accepted and ignored (see CLAUDE.md). Changing it
+                         reallocates the digitizer and buffers, so the grab briefly stops. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                        <Label Content="Decim" Width="42" />
+                        <ComboBox Width="52" FontSize="11"
+                                  ItemsSource="{Binding DataContext.DecimationOptions,
+                                               RelativeSource={RelativeSource AncestorType=Window}}"
+                                  SelectedItem="{Binding Decimation, Mode=OneWay}"
+                                  SelectionChanged="Decimation_Changed"
+                                  IsEnabled="{Binding SupportsDecimation}" />
+                        <TextBlock Text="{Binding DecimationHint}" Margin="6,0,0,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                    </StackPanel>
+```
+
+`src/Views/CameraPaneView.xaml.cs`에 핸들러를 추가한다. 기존 핸들러들과 같은 형태로 맞춘다.
+
+```csharp
+        private void Decimation_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!(sender is ComboBox combo) || !(combo.SelectedItem is int factor)) return;
+            if (factor == channel.Decimation) return;   // echo of our own OneWay binding
+            // ApplyDecimation returns false when the camera did not take the value. Say so rather
+            // than leaving the combo asserting a factor the hardware refused — this camera returns
+            // success for geometry writes it ignores, which is why the check exists at all.
+            if (!channel.ApplyDecimation(factor))
+                MessageBox.Show(
+                    "디시메이션을 적용하지 못했습니다. 카메라가 값을 받아들이지 않았습니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+```
+
+`using System.Windows.Controls;`가 이미 있는지 확인하고 없으면 추가한다.
+
+- [ ] **Step 5: ⚙ 팝업에 표시 fps 입력을 추가한다**
+
+`src/Views/MainWindow.xaml`의 녹화 설정 `Popup` 안 `Grid`. `Grid.RowDefinitions`에 다섯 번째
+`<RowDefinition Height="Auto" />`를 추가하고, `ffmpeg` 행(`Grid.Row="3"`) 아래에 넣는다.
+
+```xml
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="표시 fps"
+                                               VerticalAlignment="Center" Margin="0,7,12,0" Foreground="#D0D0D0" />
+                                    <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,7,0,0">
+                                        <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                                                 Text="{Binding Output.DisplayUpdateFps, UpdateSourceTrigger=LostFocus}" />
+                                        <TextBlock Text="0 = 무제한 · 취득 fps와 무관"
+                                                   Margin="6,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                                    </StackPanel>
+```
+
+`UpdateSourceTrigger=LostFocus`인 이유: `PropertyChanged`면 한 글자마다 `Save()`가 돌아 설정
+파일을 다시 쓴다(`research.md` 6절이 이미 이 문제를 지적한다).
+
+- [ ] **Step 6: 빌드와 테스트**
+
+Run: `dotnet build MatroxFrameGrabber.slnx -c Release`
+Expected: 경고 0개, 오류 0개
+
+Run: `dotnet test MatroxFrameGrabber.slnx -c Release`
+Expected: 전부 통과 (15개)
+
+Run: `grep -c "MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE)" src/Mil/CameraChannel.cs; grep -c "MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE)" src/Mil/CameraChannel.cs`
+Expected: 두 값이 같다(현재 8/8). 이 작업은 새 가드를 추가하지 않는다.
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add src/Mil/CameraChannel.cs src/ViewModels/MainViewModel.cs src/Views/CameraPaneView.xaml src/Views/CameraPaneView.xaml.cs src/Views/MainWindow.xaml
+git commit -m "Show what the payload costs, and let the operator change it"
+```
+
+커밋 메시지 본문:
+
+```
+Missed frames were only sampled while RAW-recording and never shown, and the
+bandwidth warn threshold was defined and read by nothing. Between them the
+acceptance criterion of this whole change had nowhere to appear: leave
+decimation at 1 in the field and the app drops most of its frames while
+showing a plausible fps and saying nothing.
+
+The DMA figure is computed from live frame rates rather than an assumed 184,
+so it reports what is actually crossing the bus rather than what we hoped.
+
+The decimation combo reports failure loudly because this camera returns
+success for geometry writes it ignores; a silent combo would assert a factor
+the hardware refused.
+```
