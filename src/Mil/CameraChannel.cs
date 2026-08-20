@@ -1248,8 +1248,9 @@ namespace MatroxFrameGrabber.Mil
             if (_rawRecording && _rawSegments != null)
             {
                 var t = DateTime.Now - _rawStartTime;
-                string missed = _rawMissed > 0 ? $"  ⚠ missed {_rawMissed}" : "";
-                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}{missed}";
+                // Missed frames are reported by StatusText itself now, from the same inquiry that
+                // feeds _rawMissed — printing them here too put the same number on one line twice.
+                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}";
             }
             if (_rawConverting)
                 return "  (converting segments → MP4…)";
