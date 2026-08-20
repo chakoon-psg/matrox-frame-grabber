@@ -131,6 +131,12 @@ namespace MatroxFrameGrabber.Mil
         // refused by this camera; decimation is the lever instead (see CLAUDE.md).
         private int _decimation = 1;
 
+        // Analysis ROI (software-only: which pixels the anomaly metrics read, not a camera
+        // setting — see AnalysisRoi below).
+        private ChannelRoi _analysisRoi = ChannelRoi.FullFrame;
+        private string _roiInX = "0", _roiInY = "0", _roiInW = "0", _roiInH = "0";
+        private MIL_ID _overlayId = MIL.M_NULL;
+
         // Display-copy decimation. Time-based rather than every-Nth-frame: channels can grab at
         // very different rates (a long exposure caps one camera at 10 fps while its neighbours
         // run at 184), and a fixed divider would give each of them a different display rate.
@@ -389,6 +395,34 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
+        // ----- Analysis ROI (which pixels the anomaly metrics are computed over) -----
+
+        /// <summary>
+        /// The region the anomaly metrics are computed over, in coordinates of the acquired
+        /// (already decimated) frame. Full frame by default.
+        ///
+        /// This is a software value, not a camera setting: nothing in hardware can refuse it and
+        /// changing it needs no reallocation. That is the whole reason it exists — this camera
+        /// ignores writes to Width/Height/OffsetX/OffsetY (see CLAUDE.md), so the rectangle moved
+        /// here, where it says which pixels we look at rather than which pixels we ask for.
+        /// </summary>
+        public ChannelRoi AnalysisRoi => _analysisRoi;
+
+        /// <summary>Frame size the ROI is clamped against, for the input hint.</summary>
+        public string AnalysisRoiHint
+        {
+            get
+            {
+                if (!TryGetFrameSize(out int w, out int h)) return "no camera";
+                return _analysisRoi.IsFullFrame ? $"full {w}×{h}" : $"of {w}×{h}";
+            }
+        }
+
+        public string RoiInX { get => _roiInX; set { _roiInX = value; RaisePropertyChanged(nameof(RoiInX)); } }
+        public string RoiInY { get => _roiInY; set { _roiInY = value; RaisePropertyChanged(nameof(RoiInY)); } }
+        public string RoiInW { get => _roiInW; set { _roiInW = value; RaisePropertyChanged(nameof(RoiInW)); } }
+        public string RoiInH { get => _roiInH; set { _roiInH = value; RaisePropertyChanged(nameof(RoiInH)); } }
+
         public bool TriggerOn
         {
             get => _triggerOn;
@@ -592,6 +626,13 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException e) { MilErrorLog.Write($"{Name}: set display background colour", e); }
             ApplyDisplayUpdateCap();
 
+            // The overlay buffer belongs to the selected display buffer, so a reallocation
+            // invalidates the cached id — drop it and let the next draw re-fetch.
+            _overlayId = MIL.M_NULL;
+            _analysisRoi = Output?.GetRoi(_index) ?? ChannelRoi.FullFrame;
+            SyncRoiInputs();
+            DrawAnalysisRoiOverlay();
+
             if (CameraPresent)
             {
                 // Allocate as many grab buffers as the non-paged pool allows. With
@@ -644,6 +685,9 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MbufFree(_dispBufId);
                 _dispBufId = MIL.M_NULL;
             }
+
+            // The overlay buffer went away with the display buffer it was attached to.
+            _overlayId = MIL.M_NULL;
         }
 
         /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
@@ -1420,6 +1464,9 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(SupportsDecimation));
             RaisePropertyChanged(nameof(Decimation));
             RaisePropertyChanged(nameof(DecimationHint));
+
+            RaisePropertyChanged(nameof(AnalysisRoi));
+            RaisePropertyChanged(nameof(AnalysisRoiHint));
         }
 
         private void UpdateCameraInfo()
@@ -1679,6 +1726,102 @@ namespace MatroxFrameGrabber.Mil
             _decimation = (actualH == wanted && actualV == wanted)
                 ? wanted
                 : ChannelRoi.ClampDecimation((int)actualH);
+        }
+
+        /// <summary>Size of the frames actually arriving, which is what the ROI is clamped to.</summary>
+        private bool TryGetFrameSize(out int width, out int height)
+        {
+            width = 0; height = 0;
+            if (_dispBufId == MIL.M_NULL) return false;
+            try
+            {
+                width = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                height = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+                return width > 0 && height > 0;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read frame size for the analysis ROI", e);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Applies the four input boxes as the analysis region. No reallocation: this only changes
+        /// which pixels we measure. Returns false only if a box is not an integer.
+        /// </summary>
+        public bool ApplyAnalysisRoiFromInputs()
+        {
+            if (!int.TryParse(_roiInX, out int x) || !int.TryParse(_roiInY, out int y) ||
+                !int.TryParse(_roiInW, out int w) || !int.TryParse(_roiInH, out int h))
+                return false;
+            SetAnalysisRoi(new ChannelRoi(x, y, w, h));
+            return true;
+        }
+
+        /// <summary>Back to measuring the whole frame.</summary>
+        public void ClearAnalysisRoi() => SetAnalysisRoi(ChannelRoi.FullFrame);
+
+        private void SetAnalysisRoi(ChannelRoi requested)
+        {
+            ChannelRoi snapped = requested;
+            if (!requested.IsFullFrame && TryGetFrameSize(out int fw, out int fh))
+                snapped = requested.Snap(fw, fh);
+
+            _analysisRoi = snapped;
+            Output?.SetRoi(_index, snapped);
+            SyncRoiInputs();
+            DrawAnalysisRoiOverlay();
+            RaisePropertyChanged(nameof(AnalysisRoi));
+            RaisePropertyChanged(nameof(AnalysisRoiHint));
+        }
+
+        /// <summary>Writes the applied (snapped) values back, so the operator sees what was taken.</summary>
+        private void SyncRoiInputs()
+        {
+            RoiInX = _analysisRoi.OffsetX.ToString(CultureInfo.InvariantCulture);
+            RoiInY = _analysisRoi.OffsetY.ToString(CultureInfo.InvariantCulture);
+            RoiInW = (_analysisRoi.IsFullFrame ? 0 : _analysisRoi.Width).ToString(CultureInfo.InvariantCulture);
+            RoiInH = (_analysisRoi.IsFullFrame ? 0 : _analysisRoi.Height).ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// Draws the analysis region on the display overlay, or clears it for a full-frame ROI.
+        ///
+        /// The overlay is this task's acceptance surface, not decoration: nothing consumes the
+        /// analysis ROI yet (the tile metrics arrive in a later plan), so a rectangle on screen is
+        /// the only way to tell that the coordinates landed where the operator asked.
+        /// </summary>
+        private void DrawAnalysisRoiOverlay()
+        {
+            if (_dispId == MIL.M_NULL || _graId == MIL.M_NULL)
+                return;
+            try
+            {
+                if (_overlayId == MIL.M_NULL)
+                {
+                    MIL.MdispControl(_dispId, MIL.M_OVERLAY, MIL.M_ENABLE);
+                    MIL.MdispControl(_dispId, MIL.M_OVERLAY_SHOW, MIL.M_ENABLE);
+                    MIL.MdispInquire(_dispId, MIL.M_OVERLAY_ID, ref _overlayId);
+                }
+                if (_overlayId == MIL.M_NULL)
+                    return;
+
+                MIL.MdispControl(_dispId, MIL.M_OVERLAY_CLEAR, MIL.M_DEFAULT);
+                if (_analysisRoi.IsFullFrame)
+                    return;
+
+                MIL.MgraControl(_graId, MIL.M_COLOR, MIL.M_COLOR_GREEN);
+                MIL.MgraRect(_graId, _overlayId,
+                    _analysisRoi.OffsetX,
+                    _analysisRoi.OffsetY,
+                    _analysisRoi.OffsetX + _analysisRoi.Width - 1,
+                    _analysisRoi.OffsetY + _analysisRoi.Height - 1);
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: draw the analysis ROI overlay", e);
+            }
         }
 
         /// <summary>

@@ -121,6 +121,7 @@ namespace MatroxFrameGrabber.Views
                 case "exposure": ApplyExposure_Click(sender, e); break;
                 case "acqrate":  ApplyAcqRate_Click(sender, e); break;
                 case "balance":  ApplyBalance_Click(sender, e); break;
+                case "roi":      ApplyRoi_Click(sender, e); break;
                 default: return;
             }
             e.Handled = true;
@@ -166,6 +167,17 @@ namespace MatroxFrameGrabber.Views
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
+
+        private void ApplyRoi_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyAnalysisRoiFromInputs())
+                MessageBox.Show("ROI를 적용하지 못했습니다. 네 값이 모두 정수여야 합니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void ClearRoi_Click(object sender, RoutedEventArgs e) => Channel?.ClearAnalysisRoi();
 
         // Copy this camera's capture settings (exposure / acq rate / trigger / WB) to every other camera.
         private void ApplyAll_Click(object sender, RoutedEventArgs e) =>

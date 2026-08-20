@@ -166,6 +166,35 @@
                                    VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
                     </StackPanel>
 
+                    <!-- Analysis ROI: which pixels the anomaly metrics are computed over. Software
+                         only — no reallocation, and the camera cannot refuse it. 0 width or height
+                         means the whole frame. The green overlay rectangle shows the result. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                        <Label Content="ROI" Width="42" />
+                        <TextBox Width="44" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInX, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="OffsetX in frame coordinates" />
+                        <TextBox Width="44" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInY, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="OffsetY in frame coordinates" />
+                        <TextBlock Text="+" Margin="3,0" VerticalAlignment="Center" Foreground="#9A9A9A" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInW, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Width (0 = whole frame)" />
+                        <TextBox Width="50" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInH, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Height (0 = whole frame)" />
+                        <TextBlock Text="{Binding AnalysisRoiHint}" Margin="4,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                        <Button Content="Apply" Click="ApplyRoi_Click" />
+                        <Button Content="Full" Margin="2,0,0,0" Click="ClearRoi_Click"
+                                ToolTip="Measure the whole frame" />
+                    </StackPanel>
+
                     <!-- DCF / feature browser -->
                     <StackPanel Orientation="Horizontal">
                         <Label Content="DCF" Width="34" />
