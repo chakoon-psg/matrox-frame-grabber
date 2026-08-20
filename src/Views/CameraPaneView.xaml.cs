@@ -106,6 +106,26 @@ namespace MatroxFrameGrabber.Views
 
         // ----- Settings strip -----
 
+        /// <summary>
+        /// Enter in a settings field applies that row, so the operator does not have to reach for
+        /// the Apply button. The row is identified by the box's Tag, set in XAML — keeping the
+        /// mapping in the markup next to the field it belongs to.
+        /// </summary>
+        private void SettingsField_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter) return;
+            if (!(sender is FrameworkElement box) || !(box.Tag is string row)) return;
+
+            switch (row)
+            {
+                case "exposure": ApplyExposure_Click(sender, e); break;
+                case "acqrate":  ApplyAcqRate_Click(sender, e); break;
+                case "balance":  ApplyBalance_Click(sender, e); break;
+                default: return;
+            }
+            e.Handled = true;
+        }
+
         private void ApplyExposure_Click(object sender, RoutedEventArgs e)
         {
             var channel = Channel;
