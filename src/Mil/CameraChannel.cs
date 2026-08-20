@@ -1558,6 +1558,21 @@ namespace MatroxFrameGrabber.Mil
                 : 2;   // ChannelRoi.Snap floors this at 2 anyway; 2 is just the honest default
 
         /// <summary>
+        /// Writes an integer feature only when it is not already at the target value.
+        ///
+        /// Some nodes are read-only in states where their current value is the only legal one —
+        /// this camera locks OffsetX while Width is at maximum, so writing the 0 it already holds
+        /// is rejected outright. Treating "already correct" as success keeps a harmless no-op from
+        /// looking like a hardware refusal.
+        /// </summary>
+        private bool SetIntIfDifferent(string feature, long value)
+        {
+            if (_features.TryGetInt(MIL.M_FEATURE_VALUE, feature, out long current) && current == value)
+                return true;
+            return _features.SetInt(feature, value);
+        }
+
+        /// <summary>
         /// Writes <see cref="_roi"/> to the camera. Called from AllocateCamera BEFORE
         /// AllocateBuffers, so M_SIZE_X/M_SIZE_Y are inquired after the ROI has taken effect.
         ///
@@ -1571,45 +1586,58 @@ namespace MatroxFrameGrabber.Mil
             if (_digId == MIL.M_NULL || !SupportsRoi)
                 return;
 
-            // Offsets to zero before reading the bounds: Width's maximum is offset-dependent on
-            // cameras that do not expose WidthMax, so reading bounds while a previous crop still
-            // stands makes them shrink a little on every apply.
-            _features.SetInt(F_OFFSET_X, 0);
-            _features.SetInt(F_OFFSET_Y, 0);
-
-            RefreshRoiBounds();
-            if (_sensorMaxW <= 0 || _sensorMaxH <= 0)
-                return;
-
-            if (_roi.IsFullFrame)
+            // A rejected feature write prints before it throws, and with printing enabled that
+            // print is a MODAL dialog on this thread — it hangs the app rather than failing soft,
+            // which is the whole reason SetInt returns a bool. Same trap CLAUDE.md documents for
+            // MdigAlloc on an empty port. The restore MUST be in the finally: leaving printing
+            // disabled would silently swallow every later MIL error in the process.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
             {
-                _features.SetInt(F_WIDTH, _sensorMaxW);
-                _features.SetInt(F_HEIGHT, _sensorMaxH);
-                return;
+                // Offsets to zero before reading the bounds: Width's maximum is offset-dependent on
+                // cameras that do not expose WidthMax, so reading bounds while a previous crop still
+                // stands makes them shrink a little on every apply.
+                SetIntIfDifferent(F_OFFSET_X, 0);
+                SetIntIfDifferent(F_OFFSET_Y, 0);
+
+                RefreshRoiBounds();
+                if (_sensorMaxW <= 0 || _sensorMaxH <= 0)
+                    return;
+
+                if (_roi.IsFullFrame)
+                {
+                    SetIntIfDifferent(F_WIDTH, _sensorMaxW);
+                    SetIntIfDifferent(F_HEIGHT, _sensorMaxH);
+                    return;
+                }
+
+                ChannelRoi snapped = _roi.Snap(_roiIncX, _roiIncY, _roiIncW, _roiIncH,
+                                               (int)_sensorMaxW, (int)_sensorMaxH);
+
+                bool ok = SetIntIfDifferent(F_WIDTH, snapped.Width);
+                ok &= SetIntIfDifferent(F_HEIGHT, snapped.Height);
+                ok &= SetIntIfDifferent(F_OFFSET_X, snapped.OffsetX);
+                ok &= SetIntIfDifferent(F_OFFSET_Y, snapped.OffsetY);
+
+                if (ok)
+                {
+                    _roi = snapped;
+                    return;
+                }
+
+                // A partly-applied ROI is the worst outcome: the picture would look plausibly cropped
+                // while the offsets sat at zero, and _roi would assert a crop the camera refused. Put
+                // the sensor back to full frame and say so, rather than reporting a crop we do not have.
+                SetIntIfDifferent(F_OFFSET_X, 0);
+                SetIntIfDifferent(F_OFFSET_Y, 0);
+                SetIntIfDifferent(F_WIDTH, _sensorMaxW);
+                SetIntIfDifferent(F_HEIGHT, _sensorMaxH);
+                _roi = ChannelRoi.FullFrame;
             }
-
-            ChannelRoi snapped = _roi.Snap(_roiIncX, _roiIncY, _roiIncW, _roiIncH,
-                                           (int)_sensorMaxW, (int)_sensorMaxH);
-
-            bool ok = _features.SetInt(F_WIDTH, snapped.Width);
-            ok &= _features.SetInt(F_HEIGHT, snapped.Height);
-            ok &= _features.SetInt(F_OFFSET_X, snapped.OffsetX);
-            ok &= _features.SetInt(F_OFFSET_Y, snapped.OffsetY);
-
-            if (ok)
+            finally
             {
-                _roi = snapped;
-                return;
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
             }
-
-            // A partly-applied ROI is the worst outcome: the picture would look plausibly cropped
-            // while the offsets sat at zero, and _roi would assert a crop the camera refused. Put
-            // the sensor back to full frame and say so, rather than reporting a crop we do not have.
-            _features.SetInt(F_OFFSET_X, 0);
-            _features.SetInt(F_OFFSET_Y, 0);
-            _features.SetInt(F_WIDTH, _sensorMaxW);
-            _features.SetInt(F_HEIGHT, _sensorMaxH);
-            _roi = ChannelRoi.FullFrame;
         }
 
         /// <summary>
@@ -1625,7 +1653,11 @@ namespace MatroxFrameGrabber.Mil
             if (!CameraPresent || !SupportsRoi)
                 return false;
 
-            RefreshRoiBounds();
+            // A bounds read can print too, on a locked node — same trap as WriteRoiToCamera.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try { RefreshRoiBounds(); }
+            finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
+
             ChannelRoi snapped = requested.IsFullFrame
                 ? ChannelRoi.FullFrame
                 : requested.Snap(_roiIncX, _roiIncY, _roiIncW, _roiIncH,
