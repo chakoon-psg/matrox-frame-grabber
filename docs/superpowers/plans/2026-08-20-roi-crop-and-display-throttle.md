@@ -625,7 +625,12 @@ and that reads back as full frame rather than throwing."
 
 ---
 
-### Task 4: `CameraChannel`에 ROI 적용
+### Task 4: `CameraChannel`에 ROI 적용  (SUPERSEDED — Task 4R을 볼 것)
+
+> **2026-08-20 폐기.** 이 카메라는 `Width`/`Height`/`OffsetX`/`OffsetY` 쓰기를 받아들이고
+> 무시한다(실측). 커밋 366f8a9/26b1874/aee9708로 구현되어 있으나 하드웨어에서 동작하지 않는다.
+> 대체 작업은 이 문서 끝의 **Task 4R**이다. 여기서 살아남는 것은 `SetIntIfDifferent`,
+> `_features.Digitizer` 배선 수정, 그리고 `M_PRINT_DISABLE` 가드다.
 
 **Files:**
 - Modify: `src/Mil/CameraChannel.cs` — 피처 이름 상수, `AllocateCamera`, 새 `ApplyRoi`/`Roi`
@@ -1421,3 +1426,375 @@ Task 1의 테스트, Task 4의 `WriteRoiToCamera`와 `ApplyRoi` 세 곳에서 �
 **남은 주의:** `MIL.M_MAX_REFRESH_RATE`는 어셈블리 메타데이터에 존재를 확인했으나 `M_UPDATE_RATE_MAX`의
 "무제한" 값으로 실제 동작하는지는 검증하지 않았다. Task 5 Step 4에서 `DisplayUpdateFps = 0`이
 실제로 캡을 푸는지 확인한다. 풀지 않으면 캡을 걸지 않는 분기(`if (fps > 0)`)로 바꾼다.
+
+---
+
+### Task 4R: 카메라 디시메이션 적용 + `ChannelRoi`를 분석 ROI로 전환
+
+Task 4를 대체한다. 근거는 [스펙 2절의 2026-08-20 개정](../specs/2026-08-20-avn-anomaly-detection-design.md)이다.
+
+**Files:**
+- Modify: `src/Infrastructure/ChannelRoi.cs` — 카메라 크롭 전제 제거, 분석 ROI로 의미 전환
+- Modify: `tests/ChannelRoiTests.cs` — 하드웨어 증분 테스트 제거, 디시메이션 산술 추가
+- Modify: `src/Infrastructure/OutputSettings.cs` — 채널별 디시메이션 계수 추가
+- Modify: `src/Mil/CameraChannel.cs` — 카메라 ROI 코드 제거, 디시메이션 적용 추가
+
+**Interfaces:**
+- Consumes: `GenICamFeatures.SetInt`/`TryGetInt` (Task 2), `OutputSettings` 영속화 패턴 (Task 3), `SetIntIfDifferent` (Task 4 fix round 2, 유지)
+- Produces:
+  - `static int ChannelRoi.ClampDecimation(int requested)` — 1·2·4 중 하나
+  - `static int ChannelRoi.DecimatedWidth(int sensorWidth, int decimation)` / `DecimatedHeight(...)`
+  - `OutputSettings.GetDecimation(int ch)` / `SetDecimation(int ch, int factor)`
+  - `int CameraChannel.Decimation { get; }` — read-back으로 확인된 실제 값
+  - `bool CameraChannel.SupportsDecimation { get; }`
+  - `bool CameraChannel.ApplyDecimation(int factor)`
+  - `string CameraChannel.DecimationHint { get; }`
+
+**살아남는 것과 사라지는 것.** Task 4의 세 커밋에서 `SetIntIfDifferent`, `_features.Digitizer`
+조기 배선, `M_PRINT_DISABLE` 가드는 **모두 유지한다** — 디시메이션 쓰기에도 똑같이 필요하다.
+사라지는 것은 카메라 크롭 전용 표면뿐이다. `ChannelRoi` 자체는 **분석 ROI로 계속 쓴다**.
+
+- [ ] **Step 1: `ChannelRoi`에서 카메라 크롭 전제를 걷어낸다**
+
+클래스 XML 주석을 교체한다.
+
+```csharp
+    /// <summary>
+    /// One channel's ANALYSIS region — which pixels the anomaly metrics are computed over, in
+    /// coordinates of the (possibly decimated) acquired frame. All four values zero means the
+    /// whole frame.
+    ///
+    /// This used to be the camera's acquisition ROI. It is not: this camera accepts writes to
+    /// Width/Height/OffsetX/OffsetY and ignores them (see CLAUDE.md), so payload reduction is done
+    /// with DecimationHorizontal/Vertical instead. As a software rectangle there is no hardware
+    /// increment to satisfy and nothing can refuse it — only even alignment still earns its keep,
+    /// so every tile of the metric grid sees the same Bayer CFA phase.
+    /// </summary>
+```
+
+`Snap`의 시그니처를 `Snap(int maxWidth, int maxHeight)`로 바꾸고, 본문 첫 네 줄
+(`int ex = EvenIncrement(xInc);` …)을 다음으로 교체한다.
+
+```csharp
+            const int ex = CfaIncrement, ey = CfaIncrement, ew = CfaIncrement, eh = CfaIncrement;
+```
+
+`EvenIncrement` 메서드를 **삭제한다** — 호출자가 없어진다. `Snap`의 XML 주석에서
+`M_FEATURE_INCREMENT` 문장을 다음으로 교체한다.
+
+```csharp
+        /// Rounds this region onto an even-pixel grid and clamps it inside the frame.
+        ///
+        /// Offsets and sizes both round DOWN: rounding a size up could push the region past the
+        /// frame edge, and rounding an offset up would move it off the area the operator picked.
+        /// Even alignment keeps the Bayer CFA phase identical in every metric tile.
+```
+
+`BytesPerFrame` 바로 아래에 디시메이션 산술을 추가한다.
+
+```csharp
+        /// <summary>Decimation factors this app offers. Powers of two keep the CFA phase intact.</summary>
+        public static readonly int[] AllowedDecimation = { 1, 2, 4 };
+
+        /// <summary>
+        /// Snaps a requested decimation factor to one this app offers. Anything unrecognised
+        /// becomes 1 (full resolution) rather than an error: a bad settings value must degrade to
+        /// the safe default, not refuse to start.
+        /// </summary>
+        public static int ClampDecimation(int requested)
+        {
+            foreach (int allowed in AllowedDecimation)
+                if (allowed == requested)
+                    return requested;
+            return 1;
+        }
+
+        /// <summary>Frame width the camera delivers at this decimation factor.</summary>
+        public static int DecimatedWidth(int sensorWidth, int decimation) =>
+            sensorWidth / ClampDecimation(decimation);
+
+        /// <summary>Frame height the camera delivers at this decimation factor.</summary>
+        public static int DecimatedHeight(int sensorHeight, int decimation) =>
+            sensorHeight / ClampDecimation(decimation);
+```
+
+- [ ] **Step 2: 테스트를 갱신한다**
+
+`tests/ChannelRoiTests.cs`에서 `Snap_HonoursLargerHardwareIncrement`,
+`Snap_DoublesAnOddHardwareIncrementToStayEven`, `Snap_DoesNotOverflowOnAnAbsurdOddIncrement`
+세 테스트를 **삭제한다** — 하드웨어 증분은 더 이상 이 타입의 관심사가 아니다. 남은 `Snap` 호출을
+새 시그니처로 바꾼다: `.Snap(2, 2, 2, 2, MaxW, MaxH)` → `.Snap(MaxW, MaxH)`.
+
+`Snap_HonoursLargerHardwareIncrement`가 검증했던 "더 큰 격자에 맞춘다"는 성질은 사라지는 것이
+맞다 — 소프트웨어 ROI에는 격자가 짝수뿐이다. 다음을 추가한다.
+
+```csharp
+        [Fact]
+        public void ClampDecimation_AcceptsOnlyTheOfferedFactors()
+        {
+            Assert.Equal(1, ChannelRoi.ClampDecimation(1));
+            Assert.Equal(2, ChannelRoi.ClampDecimation(2));
+            Assert.Equal(4, ChannelRoi.ClampDecimation(4));
+        }
+
+        [Fact]
+        public void ClampDecimation_FallsBackToFullResolution()
+        {
+            // A bad settings value must degrade to full resolution, not refuse to start.
+            Assert.Equal(1, ChannelRoi.ClampDecimation(0));
+            Assert.Equal(1, ChannelRoi.ClampDecimation(3));
+            Assert.Equal(1, ChannelRoi.ClampDecimation(-2));
+            Assert.Equal(1, ChannelRoi.ClampDecimation(int.MaxValue));
+        }
+
+        [Fact]
+        public void DecimatedSize_HalvesAtFactorTwo()
+        {
+            Assert.Equal(1032, ChannelRoi.DecimatedWidth(MaxW, 2));
+            Assert.Equal(772, ChannelRoi.DecimatedHeight(MaxH, 2));
+            Assert.Equal(2064, ChannelRoi.DecimatedWidth(MaxW, 1));
+            Assert.Equal(516, ChannelRoi.DecimatedWidth(MaxW, 4));
+        }
+
+        [Fact]
+        public void MeasuredCeiling_AcceptsDecimationTwoColourAt184Fps()
+        {
+            // The configuration this whole plan exists to reach: 3 channels, colour, 184 fps.
+            long bytes = (long)ChannelRoi.DecimatedWidth(MaxW, 2)
+                       * ChannelRoi.DecimatedHeight(MaxH, 2) * 3;
+            double load = 3 * 184.0 * bytes;
+            Assert.True(load < ChannelRoi.WarnBytesPerSecond,
+                $"expected under the warn threshold, got {load / 1e9:F2} GB/s");
+        }
+```
+
+**주의:** `DecimatedSize_HalvesAtFactorTwo`는 **산술만** 고정한다. 실측에서 이 카메라는
+decimation 2에서 1024×772를 냈다(1032이 아니다) — 즉 산술은 예측이고 하드웨어가 권위다.
+Step 6에서 실제 값을 읽어 비교하며, 어긋나면 테스트가 아니라 `DecimationHint`가 진실을 보고한다.
+
+- [ ] **Step 3: 테스트가 실패하는 것을 확인한다**
+
+Run: `dotnet test MatroxFrameGrabber.slnx -c Release`
+Expected: Step 1 적용 전이면 컴파일 실패(`ClampDecimation` 없음, `Snap` 인자 개수 불일치).
+Step 1 적용 후 PASS.
+
+- [ ] **Step 4: `OutputSettings`에 디시메이션을 영속화한다**
+
+`GetRoi`/`SetRoi`는 **그대로 둔다** — 분석 ROI로 계속 쓴다. 그 아래에 추가한다.
+
+```csharp
+        private readonly int[] _channelDecimation = new int[ChannelCount];
+
+        /// <summary>
+        /// Per-channel on-board decimation factor (1, 2 or 4). The only lever that reduces host DMA
+        /// traffic on this camera — see research.md section 8 and CLAUDE.md. Zero-initialised, so
+        /// ClampDecimation turns an untouched slot into 1.
+        /// </summary>
+        public int GetDecimation(int channelIndex) =>
+            channelIndex < 0 || channelIndex >= ChannelCount
+                ? 1
+                : ChannelRoi.ClampDecimation(_channelDecimation[channelIndex]);
+
+        public void SetDecimation(int channelIndex, int factor)
+        {
+            if (channelIndex < 0 || channelIndex >= ChannelCount) return;
+            int v = ChannelRoi.ClampDecimation(factor);
+            if (_channelDecimation[channelIndex] == v) return;
+            _channelDecimation[channelIndex] = v;
+            Save();
+        }
+```
+
+`Dto`에 `public int[] ChannelDecimation { get; set; }`를 추가하고, `Load()`에서 ROI 배열을 읽는
+블록 바로 뒤에 넣는다.
+
+```csharp
+                        if (dto.ChannelDecimation != null)
+                        {
+                            for (int i = 0; i < ChannelCount && i < dto.ChannelDecimation.Length; i++)
+                                s._channelDecimation[i] = ChannelRoi.ClampDecimation(dto.ChannelDecimation[i]);
+                        }
+```
+
+`Save()`의 `dto` 초기화에 다음을 추가한다.
+
+```csharp
+                    ChannelDecimation = (int[])_channelDecimation.Clone(),
+```
+
+- [ ] **Step 5: `CameraChannel`의 카메라 ROI를 디시메이션으로 바꾼다**
+
+**삭제한다:** `F_WIDTH`, `F_HEIGHT`, `F_WIDTH_MAX`, `F_HEIGHT_MAX`, `F_OFFSET_X`, `F_OFFSET_Y`
+상수 / `_roi`, `_sensorMaxW`, `_sensorMaxH`, `_roiIncX/Y/W/H`, `_roiInputX/Y/W/H` 필드 /
+`Roi`, `SupportsRoi`, `RoiHint`, `RoiInputX/Y/W/H` 프로퍼티 / `RefreshRoiBounds`, `ReadIncrement`,
+`WriteRoiToCamera`, `ApplyRoi`, `ClearRoi`, `ApplyRoiFromInputs`, `SyncRoiInputs` 메서드 /
+`AllocateCamera`의 ROI 블록 / `RefreshFeatureState`의 ROI 관련 `RaisePropertyChanged` 세 줄.
+
+**유지한다:** `SetIntIfDifferent`, 그리고 `_features.Digitizer = _digId` 조기 배선(주석 포함).
+
+피처 이름 상수를 추가한다.
+
+```csharp
+        private const string F_DECIM_H = "DecimationHorizontal";
+        private const string F_DECIM_V = "DecimationVertical";
+```
+
+필드와 프로퍼티를 추가한다.
+
+```csharp
+        private int _decimation = 1;
+
+        /// <summary>The decimation factor confirmed applied by reading it back from the camera.</summary>
+        public int Decimation => _decimation;
+
+        /// <summary>True if the camera exposes decimation. This one does; cropping it does not.</summary>
+        public bool SupportsDecimation => FeatureAvailable(F_DECIM_H);
+
+        /// <summary>Effective frame size the digitizer reports, for the pane hint.</summary>
+        public string DecimationHint
+        {
+            get
+            {
+                if (_digId == MIL.M_NULL) return "no camera";
+                try
+                {
+                    MIL_INT sx = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+                    MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+                    return $"{sx}×{sy}";
+                }
+                catch (MILException) { return "?"; }
+            }
+        }
+```
+
+쓰기. **read-back 확인이 이 메서드의 핵심이다.**
+
+```csharp
+        /// <summary>
+        /// Writes the decimation factor and CONFIRMS IT BY READING IT BACK.
+        ///
+        /// The read-back is not belt-and-braces. This camera accepts writes to the geometry
+        /// features and silently ignores them: MdigControlFeature does not throw, nothing prints
+        /// under M_PRINT_DISABLE, and the wrapper therefore returns true while the value never
+        /// changes. That cost several rounds of debugging on the crop path before anyone read the
+        /// value back. Decimation does take effect here — but the only way to know is to look.
+        /// Called from AllocateCamera BEFORE AllocateBuffers, so M_SIZE_X/M_SIZE_Y reflect it.
+        /// </summary>
+        private void WriteDecimationToCamera()
+        {
+            if (_digId == MIL.M_NULL || !SupportsDecimation)
+            {
+                _decimation = 1;
+                return;
+            }
+
+            int wanted = ChannelRoi.ClampDecimation(Output?.GetDecimation(_index) ?? 1);
+
+            // A rejected feature write prints before it throws, and a print here is a MODAL dialog
+            // on this thread. The restore MUST be in the finally, or every later MIL error in the
+            // process disappears silently.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
+            {
+                SetIntIfDifferent(F_DECIM_H, wanted);
+                SetIntIfDifferent(F_DECIM_V, wanted);
+
+                // Read back, and believe only this.
+                long actualH = 1, actualV = 1;
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_H, out actualH);
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_V, out actualV);
+                _decimation = (actualH == wanted && actualV == wanted)
+                    ? wanted
+                    : ChannelRoi.ClampDecimation((int)actualH);
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+            }
+        }
+```
+
+`AllocateCamera`에서 삭제한 ROI 블록의 자리에 넣는다 — `AllocateBuffers` 호출보다 **앞**이다.
+
+```csharp
+                    // Decimation before AllocateBuffers: the buffer sizes come from
+                    // M_SIZE_X/M_SIZE_Y, which only reflect it once it is written. This is the one
+                    // lever that reduces host DMA traffic on this camera — cropping is refused.
+                    WriteDecimationToCamera();
+```
+
+공개 적용 메서드. `ReloadWithDcf`를 그대로 따른다.
+
+```csharp
+        /// <summary>
+        /// Applies a decimation factor: persists it and reallocates the digitizer and buffers.
+        /// Resumes grabbing if it was active. Mirrors <see cref="ReloadWithDcf"/>, which solves the
+        /// same reallocation problem for the DCF. Returns false if the camera did not take it.
+        /// </summary>
+        public bool ApplyDecimation(int factor)
+        {
+            if (!CameraPresent || !SupportsDecimation)
+                return false;
+
+            int wanted = ChannelRoi.ClampDecimation(factor);
+            bool wasGrabbing = _isGrabbing;
+            if (wasGrabbing)
+                StopGrab();
+
+            Output?.SetDecimation(_index, wanted);
+
+            FreeCamera();
+            _cameraAvailable = true;
+            AllocateCamera();
+
+            if (wasGrabbing)
+                TryStartGrab();
+
+            RaisePropertyChanged(nameof(DisplayId));
+            RaisePropertyChanged(nameof(Decimation));
+            RaisePropertyChanged(nameof(DecimationHint));
+            return CameraPresent && _decimation == wanted;
+        }
+```
+
+`RefreshFeatureState` 끝에 추가한다.
+
+```csharp
+            RaisePropertyChanged(nameof(SupportsDecimation));
+            RaisePropertyChanged(nameof(Decimation));
+            RaisePropertyChanged(nameof(DecimationHint));
+```
+
+- [ ] **Step 6: 빌드·테스트·가드 감사**
+
+Run: `dotnet build MatroxFrameGrabber.slnx -c Release`
+Expected: 경고 0개, 오류 0개
+
+Run: `dotnet test MatroxFrameGrabber.slnx -c Release`
+Expected: 전부 통과
+
+Run: `grep -c "M_PRINT_DISABLE" src/Mil/CameraChannel.cs; grep -c "M_PRINT_ENABLE" src/Mil/CameraChannel.cs`
+Expected: 두 값이 같다. 모든 DISABLE이 `finally`로 복원되는지 확인해 보고한다.
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add src/Infrastructure/ChannelRoi.cs tests/ChannelRoiTests.cs src/Infrastructure/OutputSettings.cs src/Mil/CameraChannel.cs
+git commit -m "Reduce the payload with decimation, since this camera refuses to crop"
+```
+
+커밋 메시지 본문에 다음을 넣는다.
+
+```
+Width, Height and the offsets are accepted and ignored here: the write
+returns success, nothing throws, nothing prints, and the value does not
+change. Decimation does take effect on the same allocated digitizer, so it
+becomes the lever - and every geometry write now confirms itself by reading
+the value back, because on this camera a return value proves nothing.
+
+ChannelRoi survives as the analysis region instead, which is where a
+rectangle belonged all along: it says which pixels the metrics are computed
+over, no hardware can refuse it, and it needs no reallocation. Its hardware
+increment logic is gone with the crop that needed it; even alignment stays,
+so every metric tile sees the same CFA phase.
+```
