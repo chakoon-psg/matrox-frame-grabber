@@ -174,16 +174,16 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <local:CameraPaneView Grid.Row="0" Grid.Column="0" DataContext="{Binding Channels[0]}"
+                <local:CameraPaneView x:Name="Pane0" Grid.Row="0" Grid.Column="0" DataContext="{Binding Channels[0]}"
                                       FullscreenRequested="Pane_FullscreenRequested"
                                       ApplyToAllRequested="Pane_ApplyToAllRequested" />
-                <local:CameraPaneView Grid.Row="0" Grid.Column="1" DataContext="{Binding Channels[1]}"
+                <local:CameraPaneView x:Name="Pane1" Grid.Row="0" Grid.Column="1" DataContext="{Binding Channels[1]}"
                                       FullscreenRequested="Pane_FullscreenRequested"
                                       ApplyToAllRequested="Pane_ApplyToAllRequested" />
-                <local:CameraPaneView Grid.Row="1" Grid.Column="0" DataContext="{Binding Channels[2]}"
+                <local:CameraPaneView x:Name="Pane2" Grid.Row="1" Grid.Column="0" DataContext="{Binding Channels[2]}"
                                       FullscreenRequested="Pane_FullscreenRequested"
                                       ApplyToAllRequested="Pane_ApplyToAllRequested" />
-                <local:CameraPaneView Grid.Row="1" Grid.Column="1" DataContext="{Binding Channels[3]}"
+                <local:CameraPaneView x:Name="Pane3" Grid.Row="1" Grid.Column="1" DataContext="{Binding Channels[3]}"
                                       FullscreenRequested="Pane_FullscreenRequested"
                                       ApplyToAllRequested="Pane_ApplyToAllRequested" />
             </Grid>

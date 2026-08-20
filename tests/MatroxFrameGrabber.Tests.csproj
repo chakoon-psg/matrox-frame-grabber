@@ -15,6 +15,7 @@
        MIL dependency, so pulling the single file in keeps these tests runnable anywhere. -->
   <ItemGroup>
     <Compile Include="..\src\Infrastructure\ChannelRoi.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\DisplayMapping.cs" LinkBase="Included" />
   </ItemGroup>
 
   <ItemGroup>

@@ -215,7 +215,14 @@
         <Grid>
             <Border x:Name="ViewBorder" Background="Black" BorderBrush="#404040" BorderThickness="1"
                     SizeChanged="ViewBorder_SizeChanged"
-                    PreviewMouseLeftButtonDown="ViewBorder_PreviewMouseLeftButtonDown" />
+                    PreviewMouseLeftButtonDown="ViewBorder_PreviewMouseLeftButtonDown">
+                <Grid x:Name="ViewContentGrid">
+                    <Rectangle x:Name="RoiRect" Visibility="Collapsed"
+                               Stroke="{StaticResource Ch1Brush}" StrokeThickness="1.5"
+                               HorizontalAlignment="Left" VerticalAlignment="Top"
+                               IsHitTestVisible="False" />
+                </Grid>
+            </Border>
 
             <!-- Persistent recording banner: red = live H.264, orange = RAW lossless -->
             <Border VerticalAlignment="Top" Padding="8,4"

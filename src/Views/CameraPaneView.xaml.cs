@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Matrox.MatroxImagingLibrary.WPF;
+using MatroxFrameGrabber.Infrastructure;
 using MatroxFrameGrabber.Mil;
 using Microsoft.Win32;
 
@@ -38,9 +39,43 @@ namespace MatroxFrameGrabber.Views
             if (_display == null && Channel != null && Channel.DisplayId != Matrox.MatroxImagingLibrary.MIL.M_NULL)
             {
                 _display = new MILWPFDisplay { DisplayId = Channel.DisplayId };
-                ViewBorder.Child = _display;
+                // Inserted below RoiRect (already in the Grid from XAML) so the rectangle stays
+                // on top of the live image in z-order.
+                ViewContentGrid.Children.Insert(0, _display);
                 Channel.FitToWindow();
             }
+        }
+
+        /// <summary>
+        /// Positions the analysis-ROI rectangle over the live image. Called from the window's
+        /// 500 ms stats tick because MIL handles zoom and pan natively and raises no event we
+        /// could hook — polling is the only way to follow the operator's zoom.
+        /// </summary>
+        public void RefreshRoiOverlay()
+        {
+            var channel = Channel;
+            if (channel == null || RoiRect == null) return;
+
+            ChannelRoi roi = channel.AnalysisRoi;
+            if (roi.IsFullFrame ||
+                !channel.TryGetViewGeometry(out int fw, out int fh, out double zoom, out double ox, out double oy))
+            {
+                RoiRect.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            var map = DisplayMapping.Create(ViewBorder.ActualWidth, ViewBorder.ActualHeight,
+                                            fw, fh, zoom, ox, oy);
+            if (!map.IsValid)
+            {
+                RoiRect.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            RoiRect.Margin = new Thickness(map.ToControlX(roi.OffsetX), map.ToControlY(roi.OffsetY), 0, 0);
+            RoiRect.Width = roi.Width * map.Scale;
+            RoiRect.Height = roi.Height * map.Scale;
+            RoiRect.Visibility = Visibility.Visible;
         }
 
         // ----- View sizing / interaction -----

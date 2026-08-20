@@ -1739,6 +1739,29 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>
+        /// Current view geometry, for drawing over the live image. False when it cannot be read.
+        /// </summary>
+        public bool TryGetViewGeometry(out int frameWidth, out int frameHeight,
+                                      out double zoom, out double offsetX, out double offsetY)
+        {
+            zoom = 0; offsetX = 0; offsetY = 0;
+            if (!TryGetFrameSize(out frameWidth, out frameHeight))
+                return false;
+            try
+            {
+                MIL.MdispInquire(_dispId, MIL.M_REAL_ZOOM_FACTOR_X, ref zoom);
+                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_X, ref offsetX);
+                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_Y, ref offsetY);
+                return zoom > 0;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read view geometry for the ROI overlay", e);
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Applies the four input boxes as the analysis region. No reallocation: this only changes
         /// which pixels we measure. Returns false only if a box is not an integer.
         /// </summary>
