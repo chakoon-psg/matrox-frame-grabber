@@ -151,8 +151,10 @@ namespace MatroxFrameGrabber.Mil
             // StartGrab throws on MIL failure (StartRawRecording relies on that to restore the
             // board), so the command binds to the non-throwing wrapper instead — an unhandled
             // MILException on the UI thread would take the app down.
-            StartCommand = new RelayCommand(() => TryStartGrab(), () => CameraPresent);
-            StopCommand = new RelayCommand(StopGrab, () => CameraPresent);
+            // Start is pointless while already grabbing and Stop while stopped — and the buttons
+            // must track that, because Start/Stop All changes it without touching the pane.
+            StartCommand = new RelayCommand(() => TryStartGrab(), () => CameraPresent && !IsGrabbing);
+            StopCommand = new RelayCommand(StopGrab, () => CameraPresent && IsGrabbing);
             FitCommand = new RelayCommand(FitToWindow, () => CameraPresent);
             OneToOneCommand = new RelayCommand(ZoomActual, () => CameraPresent);
         }
@@ -720,6 +722,7 @@ namespace MatroxFrameGrabber.Mil
             _isGrabbing = true;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
+            RaiseCommandStates();
         }
 
         /// <summary>
@@ -764,6 +767,7 @@ namespace MatroxFrameGrabber.Mil
             _isGrabbing = false;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
+            RaiseCommandStates();
         }
 
         /// <summary>Raised when a recording stops on its own (ffmpeg died); carries the error text.</summary>

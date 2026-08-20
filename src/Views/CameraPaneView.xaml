@@ -41,7 +41,7 @@
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="▶ Start" Command="{Binding StartCommand}" />
-                <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding CameraPresent}"
+                <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding IsGrabbing}"
                         Margin="0,0,10,0" ToolTip="Stop acquisition (confirms if recording)" />
                 <ToggleButton Content="● Rec" Style="{StaticResource RecToggle}" FontSize="11"
                               Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
