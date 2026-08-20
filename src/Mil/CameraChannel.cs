@@ -563,6 +563,7 @@ namespace MatroxFrameGrabber.Mil
             // Fit the whole image to the control initially (aspect ratio preserved). M_ONCE
             // fits one time and then leaves manual zoom/pan usable (M_ENABLE would lock them).
             MIL.MdispControl(_dispId, MIL.M_SCALE_DISPLAY, MIL.M_ONCE);
+            ApplyDisplayUpdateCap();
 
             if (CameraPresent)
             {
@@ -893,6 +894,31 @@ namespace MatroxFrameGrabber.Mil
         #endregion
 
         #region View control (fit / zoom / snapshot)
+
+        /// <summary>
+        /// Caps the MIL display's update rate at OutputSettings.DisplayUpdateFps (0 = uncapped).
+        ///
+        /// This buys CPU, not frame rate: with the display switched off entirely the aggregate
+        /// acquisition rate did not move, because the ceiling is board/PCIe DMA rather than host
+        /// memory bandwidth (research.md section 8). Apply it only once the ROI has taken the
+        /// load off — under oversubscription the extra display threads starve a channel.
+        /// </summary>
+        public void ApplyDisplayUpdateCap()
+        {
+            if (_dispId == MIL.M_NULL)
+                return;
+            int fps = Output?.DisplayUpdateFps ?? 0;
+            try
+            {
+                MIL.MdispControl(_dispId, MIL.M_UPDATE_RATE_MAX,
+                    fps > 0 ? (double)fps : MIL.M_MAX_REFRESH_RATE);
+            }
+            catch (MILException)
+            {
+                // An older board/driver may not support the control. An uncapped display is a
+                // performance regression, not a failure — never take the app down for it.
+            }
+        }
 
         /// <summary>Scales the whole image to fit the display control once (aspect preserved).</summary>
         public void FitToWindow()
