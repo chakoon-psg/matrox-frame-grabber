@@ -35,6 +35,20 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
+        public void Snap_DoublesAnOddHardwareIncrementToStayEven()
+        {
+            // A camera reporting increment 3 must not be allowed to place an odd offset: the
+            // result has to be a multiple of 6, satisfying both the hardware step and the CFA.
+            var snapped = new ChannelRoi(9, 9, 9, 9).Snap(3, 3, 3, 3, MaxW, MaxH);
+            Assert.Equal(6, snapped.OffsetX);
+            Assert.Equal(6, snapped.OffsetY);
+            Assert.Equal(6, snapped.Width);
+            Assert.Equal(6, snapped.Height);
+            Assert.Equal(0, snapped.OffsetX % 2);
+            Assert.Equal(0, snapped.Width % 2);
+        }
+
+        [Fact]
         public void Snap_HonoursLargerHardwareIncrement()
         {
             var snapped = new ChannelRoi(100, 100, 1000, 1000).Snap(16, 8, 16, 8, MaxW, MaxH);

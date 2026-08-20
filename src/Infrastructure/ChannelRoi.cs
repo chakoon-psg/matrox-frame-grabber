@@ -55,10 +55,10 @@ namespace MatroxFrameGrabber.Infrastructure
             if (IsFullFrame)
                 return FullFrame;
 
-            int ex = Math.Max(CfaIncrement, xInc);
-            int ey = Math.Max(CfaIncrement, yInc);
-            int ew = Math.Max(CfaIncrement, wInc);
-            int eh = Math.Max(CfaIncrement, hInc);
+            int ex = EvenIncrement(xInc);
+            int ey = EvenIncrement(yInc);
+            int ew = EvenIncrement(wInc);
+            int eh = EvenIncrement(hInc);
 
             // Offset first: it bounds how much width is left. Leave at least one width increment.
             int x = RoundDown(Clamp(OffsetX, 0, Math.Max(0, maxWidth - ew)), ex);
@@ -88,6 +88,21 @@ namespace MatroxFrameGrabber.Infrastructure
 
         public override string ToString() =>
             IsFullFrame ? "full frame" : $"{Width}x{Height} @ {OffsetX},{OffsetY}";
+
+        /// <summary>
+        /// The smallest step that satisfies both the hardware's increment and the even-pixel rule.
+        ///
+        /// Flooring at 2 is not enough: a camera reporting an increment of 3 would let offset 9
+        /// and width 9 straight through, shifting the CFA phase and swapping the colours. Nor can
+        /// an odd increment simply be rounded up to 4 — 4 is not a multiple of 3, so the hardware
+        /// would reject or re-snap it. Doubling an odd increment gives the least common multiple
+        /// of it and 2, which satisfies both.
+        /// </summary>
+        private static int EvenIncrement(int increment)
+        {
+            int i = Math.Max(CfaIncrement, increment);
+            return i % 2 == 0 ? i : i * 2;
+        }
 
         private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
 
