@@ -43,6 +43,7 @@ namespace MatroxFrameGrabber.ViewModels
                     channel.RefreshStats();
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(AnyRawRecording));
+                RaiseChanged(nameof(BandwidthText));
                 StatsRefreshed?.Invoke();
             };
             _statsTimer.Start();
@@ -60,6 +61,36 @@ namespace MatroxFrameGrabber.ViewModels
         /// <summary>Board / system summary shown in the header.</summary>
         public string SystemStatus =>
             $"System: {_manager.AllocatedSystemDescriptor}   Digitizers: {_manager.DigitizerCount}";
+
+        /// <summary>
+        /// Aggregate host DMA load across the running channels, against the measured ceiling.
+        ///
+        /// Computed from the live frame rate rather than an assumed one, so it reports what is
+        /// actually crossing the bus. Warns above ChannelRoi.WarnBytesPerSecond (80% of the
+        /// ceiling) — past that the board starts dropping frames and picks the victim channel
+        /// itself, unfairly.
+        /// </summary>
+        public string BandwidthText
+        {
+            get
+            {
+                double total = 0;
+                foreach (var channel in _manager.Channels)
+                {
+                    if (!channel.IsGrabbing) continue;
+                    total += channel.FrameRate * channel.BytesPerFrame;
+                }
+                if (total <= 0)
+                    return "";
+                string s = $"DMA {total / 1e9:F2} GB/s";
+                return total >= ChannelRoi.WarnBytesPerSecond
+                    ? s + $" ⚠ over budget ({ChannelRoi.HostDmaCeilingBytesPerSecond / 1e9:F1} GB/s ceiling)"
+                    : s;
+            }
+        }
+
+        /// <summary>Decimation factors offered in each pane's combo.</summary>
+        public Array DecimationOptions => ChannelRoi.AllowedDecimation;
 
         /// <summary>True if any camera is currently recording (drives the Rec-All toggle).</summary>
         public bool AnyRecording

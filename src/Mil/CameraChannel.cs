@@ -122,6 +122,7 @@ namespace MatroxFrameGrabber.Mil
         private int _rawW, _rawH, _rawDisplayCounter;
         private long _rawMissed;
         private DateTime _rawStartTime;
+        private long _framesMissed;
 
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
@@ -207,6 +208,26 @@ namespace MatroxFrameGrabber.Mil
         public long FrameCount => _hookData?.FrameCount ?? 0;
         public double FrameRate => _frameRate;
 
+        /// <summary>Frames the board dropped for want of host bandwidth. Non-zero means the
+        /// payload does not fit — see research.md section 8.</summary>
+        public long FramesMissed => _framesMissed;
+
+        /// <summary>Bytes one grabbed frame occupies (what actually crosses the bus). 0 when idle.</summary>
+        public long BytesPerFrame
+        {
+            get
+            {
+                if (_grabBuffers.Count == 0 || _grabBuffers[0] == MIL.M_NULL) return 0;
+                try
+                {
+                    return MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_X, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_Y, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_BAND, MIL.M_NULL);
+                }
+                catch (MILException) { return 0; }
+            }
+        }
+
         /// <summary>This channel's brightness readings, appended on each stats tick.</summary>
         public BrightnessHistory Brightness => _brightness.History;
 
@@ -264,12 +285,16 @@ namespace MatroxFrameGrabber.Mil
                 if (_cameraLost)
                     return "⚠ Camera disconnected — press Stop";
                 if (_rawRecording)
-                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){RawStatusSuffix()}";
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
+                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
+                         + RawStatusSuffix();
                 if (_rawConverting)
                     return "Converting raw → MP4…";
                 string rec = _recording?.StatusSuffix() ?? "";
                 if (_isGrabbing)
-                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){rec}";
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
+                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
+                         + rec;
                 if (_grabBuffers.Count < MIN_USABLE_GRAB_BUFFERS)
                     return $"Low memory: only {_grabBuffers.Count} grab buffer(s)";
                 return $"Ready  ({_grabBuffers.Count} buffers)";
@@ -783,15 +808,16 @@ namespace MatroxFrameGrabber.Mil
                 if (BrightnessEnabled)
                     _brightness.Sample(_dispBufId);
 
-                // While RAW-recording, track frames the board missed (queue back-pressure on a slow
-                // sink), so a "lossless" capture that actually lost frames is visible in the status.
+                // Frames the board dropped because the host could not take them fast enough.
+                // Read on every tick, not only while RAW-recording: this is the acceptance
+                // criterion for the whole payload change, and an over-budget configuration loses
+                // frames silently otherwise.
+                MIL_INT missed = 0;
+                try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
+                catch (MILException) { }
+                _framesMissed = missed;
                 if (_rawRecording)
-                {
-                    MIL_INT missed = 0;
-                    try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
-                    catch (MILException) { }
                     _rawMissed = missed;
-                }
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -844,6 +870,7 @@ namespace MatroxFrameGrabber.Mil
 
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
+            RaisePropertyChanged(nameof(FramesMissed));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));

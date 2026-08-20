@@ -147,6 +147,21 @@
                                 IsEnabled="{Binding CanSetBalanceManually}" />
                     </StackPanel>
 
+                    <!-- On-board decimation. The only lever that reduces host DMA traffic on this
+                         camera — cropping is accepted and ignored (see CLAUDE.md). Changing it
+                         reallocates the digitizer and buffers, so the grab briefly stops. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                        <Label Content="Decim" Width="42" />
+                        <ComboBox Width="52" FontSize="11"
+                                  ItemsSource="{Binding DataContext.DecimationOptions,
+                                               RelativeSource={RelativeSource AncestorType=Window}}"
+                                  SelectedItem="{Binding Decimation, Mode=OneWay}"
+                                  SelectionChanged="Decimation_Changed"
+                                  IsEnabled="{Binding SupportsDecimation}" />
+                        <TextBlock Text="{Binding DecimationHint}" Margin="6,0,0,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                    </StackPanel>
+
                     <!-- DCF / feature browser -->
                     <StackPanel Orientation="Horizontal">
                         <Label Content="DCF" Width="34" />
