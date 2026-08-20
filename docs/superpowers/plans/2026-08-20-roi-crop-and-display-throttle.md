@@ -140,6 +140,20 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
+        public void Snap_DoublesAnOddHardwareIncrementToStayEven()
+        {
+            // A camera reporting increment 3 must not be allowed to place an odd offset: the
+            // result has to be a multiple of 6, satisfying both the hardware step and the CFA.
+            var snapped = new ChannelRoi(9, 9, 9, 9).Snap(3, 3, 3, 3, MaxW, MaxH);
+            Assert.Equal(6, snapped.OffsetX);
+            Assert.Equal(6, snapped.OffsetY);
+            Assert.Equal(6, snapped.Width);
+            Assert.Equal(6, snapped.Height);
+            Assert.Equal(0, snapped.OffsetX % 2);
+            Assert.Equal(0, snapped.Width % 2);
+        }
+
+        [Fact]
         public void Snap_HonoursLargerHardwareIncrement()
         {
             var snapped = new ChannelRoi(100, 100, 1000, 1000).Snap(16, 8, 16, 8, MaxW, MaxH);
@@ -283,10 +297,10 @@ namespace MatroxFrameGrabber.Infrastructure
             if (IsFullFrame)
                 return FullFrame;
 
-            int ex = Math.Max(CfaIncrement, xInc);
-            int ey = Math.Max(CfaIncrement, yInc);
-            int ew = Math.Max(CfaIncrement, wInc);
-            int eh = Math.Max(CfaIncrement, hInc);
+            int ex = EvenIncrement(xInc);
+            int ey = EvenIncrement(yInc);
+            int ew = EvenIncrement(wInc);
+            int eh = EvenIncrement(hInc);
 
             // Offset first: it bounds how much width is left. Leave at least one width increment.
             int x = RoundDown(Clamp(OffsetX, 0, Math.Max(0, maxWidth - ew)), ex);
@@ -317,6 +331,21 @@ namespace MatroxFrameGrabber.Infrastructure
         public override string ToString() =>
             IsFullFrame ? "full frame" : $"{Width}x{Height} @ {OffsetX},{OffsetY}";
 
+        /// <summary>
+        /// The smallest step that satisfies both the hardware's increment and the even-pixel rule.
+        ///
+        /// Flooring at 2 is not enough: a camera reporting an increment of 3 would let offset 9
+        /// and width 9 straight through, shifting the CFA phase and swapping the colours. Nor can
+        /// an odd increment simply be rounded up to 4 — 4 is not a multiple of 3, so the hardware
+        /// would reject or re-snap it. Doubling an odd increment gives the least common multiple
+        /// of it and 2, which satisfies both.
+        /// </summary>
+        private static int EvenIncrement(int increment)
+        {
+            int i = Math.Max(CfaIncrement, increment);
+            return i % 2 == 0 ? i : i * 2;
+        }
+
         private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
 
         private static int RoundDown(int v, int increment) => v - (v % increment);
@@ -327,7 +356,7 @@ namespace MatroxFrameGrabber.Infrastructure
 - [ ] **Step 5: 테스트가 통과하는 것을 확인한다**
 
 Run: `dotnet test MatroxFrameGrabber.slnx -c Release`
-Expected: PASS — 12개 통과, 실패 0
+Expected: PASS — 13개 통과, 실패 0
 
 앱 빌드도 깨지지 않았는지 확인한다.
 
@@ -1047,8 +1076,132 @@ always right."
 - Modify: `src/Views/MainWindow.xaml` — ⚙ 팝업에 표시 fps 입력
 
 **Interfaces:**
-- Consumes: `CameraChannel.RoiInputX/Y/W/H`, `ApplyRoiFromInputs()`, `ClearRoi()`, `SupportsRoi`, `RoiHint` (Task 4); `OutputSettings.DisplayUpdateFps` (Task 3)
-- Produces: 없음 (UI 말단)
+- Consumes: `CameraChannel.RoiInputX/Y/W/H`, `ApplyRoiFromInputs()`, `ClearRoi()`, `SupportsRoi`, `RoiHint` (Task 4); `OutputSettings.DisplayUpdateFps` (Task 3); `ChannelRoi.WarnBytesPerSecond` (Task 1)
+- Produces:
+  - `long CameraChannel.FramesMissed { get; }` — `M_PROCESS_FRAME_MISSED`, read on every stats tick
+  - `string MainViewModel.BandwidthText { get; }` — 합계 대역폭과 초과 경고
+
+**왜 이 두 개가 여기 붙는가 (Ruling 3):** 계획 전체의 인수 기준이 "`M_PROCESS_FRAME_MISSED`가
+증가하지 않는다"인데, 지금 이 값은 **RAW 녹화 중에만** 읽히고(`CameraChannel.cs:740-746`) UI에
+전혀 나오지 않는다. 그리고 `ChannelRoi.WarnBytesPerSecond`는 Task 1에서 정의했지만 **어떤 코드도
+쓰지 않는다** — 2절의 1/4 상한이 런타임에 아무 표면도 갖지 못한다는 뜻이다.
+
+둘을 합치면 실패 모드가 이렇게 된다: 현장에서 ROI를 원본 1/2로 잡으면 프레임의 60%가 사라지는데
+**앱은 아무 말도 하지 않는다.** fps 숫자는 보이지만 그게 184여야 하는지 70이어도 되는지를 화면이
+말해주지 않는다. 이 계획이 존재하는 이유가 바로 그 손실이므로, 그것을 조용히 두는 것은 계획의
+목적과 모순된다.
+
+- [ ] **Step 0a: 유실 프레임을 항상 읽고 노출한다**
+
+`src/Mil/CameraChannel.cs`의 `RefreshStats`에서 `if (_rawRecording)`로 감싸인 블록
+(`CameraChannel.cs:740-746` 부근)을 조건 밖으로 꺼낸다. 취득 중이면 항상 읽는다.
+
+```csharp
+                // Frames the board dropped because the host could not take them fast enough.
+                // Read on every tick, not only while RAW-recording: this is the acceptance
+                // criterion for the whole ROI change, and an over-budget crop loses frames
+                // silently otherwise.
+                MIL_INT missed = 0;
+                try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
+                catch (MILException) { }
+                _framesMissed = missed;
+                if (_rawRecording)
+                    _rawMissed = missed;
+```
+
+필드와 프로퍼티를 추가한다.
+
+```csharp
+        private long _framesMissed;
+
+        /// <summary>Frames the board dropped for want of host bandwidth. Non-zero means the
+        /// payload does not fit — see research.md section 8.</summary>
+        public long FramesMissed => _framesMissed;
+```
+
+`RefreshStats` 끝의 `RaisePropertyChanged` 묶음에 `RaisePropertyChanged(nameof(FramesMissed));`를
+추가하고, `StatusText`의 grab 중 분기에 유실을 덧붙인다. 0일 때는 아무 것도 붙이지 않는다 —
+정상 상태에 잡음을 넣지 않기 위해서다.
+
+```csharp
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
+                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
+                         + RawStatusSuffix();
+```
+
+기존 두 분기(`RawStatusSuffix()` 쪽과 `rec` 쪽) 모두에 같은 조각을 넣는다.
+
+- [ ] **Step 0b: 합계 대역폭을 툴바에 노출한다**
+
+`src/ViewModels/MainViewModel.cs`에 추가한다. 500 ms 스탯 틱이 이미 모든 채널을 돌고 있으므로
+새 타이머가 필요 없고, **가정한 184 fps가 아니라 실제 fps로 계산**하는 편이 더 정직하다.
+
+```csharp
+        /// <summary>
+        /// Aggregate host DMA load across the running channels, against the measured ceiling.
+        ///
+        /// Computed from the live frame rate rather than an assumed one, so it reports what is
+        /// actually crossing the bus. Warns above ChannelRoi.WarnBytesPerSecond (80% of the
+        /// ceiling) — past that the board starts dropping frames and picks the victim channel
+        /// itself, unfairly.
+        /// </summary>
+        public string BandwidthText
+        {
+            get
+            {
+                double total = 0;
+                foreach (var channel in _manager.Channels)
+                {
+                    if (!channel.IsGrabbing) continue;
+                    total += channel.FrameRate * channel.BytesPerFrame;
+                }
+                if (total <= 0)
+                    return "";
+                string s = $"DMA {total / 1e9:F2} GB/s";
+                return total >= ChannelRoi.WarnBytesPerSecond
+                    ? s + $" ⚠ over budget ({ChannelRoi.HostDmaCeilingBytesPerSecond / 1e9:F1} GB/s ceiling)"
+                    : s;
+            }
+        }
+```
+
+틱에서 갱신을 올린다 — `RaiseChanged(nameof(AnyRecording));` 옆에 넣는다.
+
+```csharp
+                RaiseChanged(nameof(BandwidthText));
+```
+
+`using MatroxFrameGrabber.Infrastructure;`는 이미 있다.
+
+`CameraChannel`에 프레임 바이트 수를 노출한다. 디스플레이 버퍼가 아니라 **grab 버퍼**를 재야 한다
+— DMA를 건너는 것이 그쪽이다.
+
+```csharp
+        /// <summary>Bytes one grabbed frame occupies (what actually crosses the bus). 0 when idle.</summary>
+        public long BytesPerFrame
+        {
+            get
+            {
+                if (_grabBuffers.Count == 0 || _grabBuffers[0] == MIL.M_NULL) return 0;
+                try
+                {
+                    return MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_X, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_Y, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_BAND, MIL.M_NULL);
+                }
+                catch (MILException) { return 0; }
+            }
+        }
+```
+
+`src/Views/MainWindow.xaml`의 헤더에서 `SystemStatus`를 표시하는 `TextBlock`을 찾아, 그 옆에
+하나를 더 둔다.
+
+```xml
+                    <TextBlock Text="{Binding BandwidthText}" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontSize="11"
+                               Foreground="{StaticResource MutedTextBrush}" />
+```
 
 - [ ] **Step 1: pane 설정에 ROI 행을 추가한다**
 
@@ -1177,15 +1330,15 @@ that pattern elsewhere in this popup."
 
 - [ ] **Step 1: 유실 프레임을 확인한다 — 이것이 합격선이다**
 
-스트립의 진단 툴팁(`MainWindow.xaml.cs`의 `BrightnessStrip.ToolTip`)은 밝기 측정 시간만 보여주고
-유실은 보여주지 않는다. `StatusText`가 RAW 중에만 유실을 노출한다. 이 검증에서는 pane의 프레임
-수를 직접 쓴다.
+Task 7 Step 0a·0b가 이 검증의 계측을 만들어 둔다 — pane 상태에 `⚠ N missed`가, 툴바에
+`DMA x.xx GB/s`가 나온다. 손으로 프레임을 세지 않고 그것을 읽는다.
 
 세 채널의 노출을 5388 µs로 맞춘다(Camera 1이 100000 µs면 10 fps에 묶인다 — pane의 `Exp`에
 `5388` 입력 후 Apply). 세 채널에 ROI `1024x772`를 적용하고 `Start All` 후 60초 둔다.
 
-Expected: 세 pane 모두 **184.x fps**이고 `(N frames)`가 서로 **거의 같다**(약 11000). 한 채널만
-낮으면 그 채널의 노출이나 ROI가 다른 것이다.
+Expected: 세 pane 모두 **184.x fps**, `(N frames)`가 서로 **거의 같고**(약 11000),
+**`⚠ missed`가 어느 pane에도 나타나지 않는다.** 툴바가 `DMA 1.25 GB/s` 부근을 경고 없이 보여준다.
+한 채널만 낮으면 그 채널의 노출이나 ROI가 다른 것이다.
 
 - [ ] **Step 2: 대역폭 산술을 확인한다**
 
@@ -1194,8 +1347,10 @@ Expected: 세 pane 모두 **184.x fps**이고 `(N frames)`가 서로 **거의 �
 
 ROI를 `1460x1090`(원본의 약 1/2)으로 올려 같은 시험을 반복한다.
 
-Expected: **유실이 나타난다** — 합계 2.5 GB/s로 천장을 넘기 때문이다. 프레임 수가 서로 벌어지고
-fps가 184 아래로 떨어진다. 이것이 2절의 1/4 상한이 실재함을 보이는 반례 시험이다. 확인 후 다시
+Expected: **유실이 나타난다** — 합계 2.5 GB/s로 천장을 넘기 때문이다. pane에 `⚠ N missed`가 뜨고
+그 수가 계속 늘며, fps가 184 아래로 떨어지고 채널 간 배분이 불공정해진다. 툴바가
+`⚠ over budget`을 보여준다. 이것이 2절의 1/4 상한이 실재함을 보이는 반례 시험이고, 동시에 Step 1의
+계측이 실제로 유실을 잡아낸다는 확인이다(경고가 뜨지 않으면 계측이 틀린 것이다). 확인 후 다시
 `1024x772`로 되돌린다.
 
 - [ ] **Step 3: 표시 감축이 녹화를 훼손하지 않는지 확인한다**
