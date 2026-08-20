@@ -795,7 +795,7 @@ namespace MatroxFrameGrabber.Mil
                 // frames silently otherwise.
                 MIL_INT missed = 0;
                 try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
-                catch (MILException e) { MilErrorLog.Write($"{Name}: read M_PROCESS_FRAME_MISSED", e); }
+                catch (MILException e) { MilErrorLog.Write($"{Name}: read missed-frame counter", e); }
                 _framesMissed = missed;
                 if (_rawRecording)
                     _rawMissed = missed;
@@ -1237,7 +1237,7 @@ namespace MatroxFrameGrabber.Mil
             }
             catch (MILException e)
             {
-                MilErrorLog.Write($"{Name}: read M_SELECTED_FRAME_RATE", e);
+                MilErrorLog.Write($"{Name}: read the camera's configured frame rate", e);
             }
             return 30.0;
         }
@@ -1415,7 +1415,7 @@ namespace MatroxFrameGrabber.Mil
                 MIL_INT payload = MIL.MdigInquire(_digId, MIL.M_GC_PAYLOAD_SIZE, MIL.M_NULL);
                 sb.Append($"  payload={(long)payload}B");
             }
-            catch (MILException e) { MilErrorLog.Write($"{Name}: read M_GC_PAYLOAD_SIZE", e); }
+            catch (MILException e) { MilErrorLog.Write($"{Name}: read GenICam payload size", e); }
 
             return sb.ToString();
         }
