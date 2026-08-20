@@ -470,11 +470,12 @@ refused to move, so the new methods say so where someone will read it."
                 ? ChannelRoi.FullFrame
                 : _channelRois[channelIndex];
 
+        // No RaiseChanged here: nothing binds the ROI through OutputSettings. The pane binds
+        // CameraChannel.RoiInputX/Y/W/H, which CameraChannel raises after it applies the crop.
         public void SetRoi(int channelIndex, ChannelRoi roi)
         {
             if (channelIndex < 0 || channelIndex >= ChannelCount) return;
             _channelRois[channelIndex] = roi;
-            RaiseChanged(nameof(GetRoi));
             Save();
         }
 
@@ -616,6 +617,8 @@ and that reads back as full frame rather than throwing."
 ```csharp
         private const string F_WIDTH = "Width";
         private const string F_HEIGHT = "Height";
+        private const string F_WIDTH_MAX = "WidthMax";
+        private const string F_HEIGHT_MAX = "HeightMax";
         private const string F_OFFSET_X = "OffsetX";
         private const string F_OFFSET_Y = "OffsetY";
 ```
@@ -658,14 +661,21 @@ and that reads back as full frame rather than throwing."
 ```csharp
         /// <summary>
         /// Reads the sensor bounds and increments so a requested ROI can be snapped to them.
-        /// Falls back to the current Width/Height when WidthMax/HeightMax are absent.
+        ///
+        /// Prefers the WidthMax/HeightMax features over Width's own M_FEATURE_MAX. Width's maximum
+        /// is offset-dependent — with OffsetX already at 1500 it reports what is left of the row,
+        /// not the sensor — so reading it while a previous crop is still applied would shrink the
+        /// bounds a little more every time a ROI is set. WidthMax/HeightMax are sensor constants.
+        /// This camera exposes both (verified 2026-08-20: 2064 x 1544).
         /// </summary>
         private void RefreshRoiBounds()
         {
-            if (!_features.TryGetInt(MIL.M_FEATURE_MAX, F_WIDTH, out long maxW) || maxW <= 0)
-                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_WIDTH, out maxW);
-            if (!_features.TryGetInt(MIL.M_FEATURE_MAX, F_HEIGHT, out long maxH) || maxH <= 0)
-                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_HEIGHT, out maxH);
+            if (!_features.TryGetInt(MIL.M_FEATURE_VALUE, F_WIDTH_MAX, out long maxW) || maxW <= 0)
+                if (!_features.TryGetInt(MIL.M_FEATURE_MAX, F_WIDTH, out maxW) || maxW <= 0)
+                    _features.TryGetInt(MIL.M_FEATURE_VALUE, F_WIDTH, out maxW);
+            if (!_features.TryGetInt(MIL.M_FEATURE_VALUE, F_HEIGHT_MAX, out long maxH) || maxH <= 0)
+                if (!_features.TryGetInt(MIL.M_FEATURE_MAX, F_HEIGHT, out maxH) || maxH <= 0)
+                    _features.TryGetInt(MIL.M_FEATURE_VALUE, F_HEIGHT, out maxH);
             _sensorMaxW = maxW;
             _sensorMaxH = maxH;
 
