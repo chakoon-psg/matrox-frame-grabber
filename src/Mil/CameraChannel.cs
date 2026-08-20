@@ -474,6 +474,12 @@ namespace MatroxFrameGrabber.Mil
 
                 if (_digId != MIL.M_NULL)
                 {
+                    // The feature wrapper needs the digitizer id before anything below asks it a
+                    // question: Available() returns false on a null id, so a ROI write placed
+                    // above this line silently does nothing. The assignment after AllocateBuffers
+                    // stays, because the no-camera path must still clear a stale id.
+                    _features.Digitizer = _digId;
+
                     // Force hardware Bayer→RGB conversion ON (color). M_BAYER_CONVERSION is a
                     // PERSISTENT board setting: once disabled (e.g. to grab raw band-1 Bayer) it
                     // stays off across grabs and app restarts, and the color pipeline then misreads
@@ -1297,6 +1303,7 @@ namespace MatroxFrameGrabber.Mil
             SyncRoiInputs();
             RaisePropertyChanged(nameof(SupportsRoi));
             RaisePropertyChanged(nameof(RoiHint));
+            RaisePropertyChanged(nameof(Roi));
         }
 
         private void UpdateCameraInfo()
@@ -1564,12 +1571,15 @@ namespace MatroxFrameGrabber.Mil
             if (_digId == MIL.M_NULL || !SupportsRoi)
                 return;
 
+            // Offsets to zero before reading the bounds: Width's maximum is offset-dependent on
+            // cameras that do not expose WidthMax, so reading bounds while a previous crop still
+            // stands makes them shrink a little on every apply.
+            _features.SetInt(F_OFFSET_X, 0);
+            _features.SetInt(F_OFFSET_Y, 0);
+
             RefreshRoiBounds();
             if (_sensorMaxW <= 0 || _sensorMaxH <= 0)
                 return;
-
-            _features.SetInt(F_OFFSET_X, 0);
-            _features.SetInt(F_OFFSET_Y, 0);
 
             if (_roi.IsFullFrame)
             {
@@ -1580,12 +1590,26 @@ namespace MatroxFrameGrabber.Mil
 
             ChannelRoi snapped = _roi.Snap(_roiIncX, _roiIncY, _roiIncW, _roiIncH,
                                            (int)_sensorMaxW, (int)_sensorMaxH);
-            _roi = snapped;
 
-            _features.SetInt(F_WIDTH, snapped.Width);
-            _features.SetInt(F_HEIGHT, snapped.Height);
-            _features.SetInt(F_OFFSET_X, snapped.OffsetX);
-            _features.SetInt(F_OFFSET_Y, snapped.OffsetY);
+            bool ok = _features.SetInt(F_WIDTH, snapped.Width);
+            ok &= _features.SetInt(F_HEIGHT, snapped.Height);
+            ok &= _features.SetInt(F_OFFSET_X, snapped.OffsetX);
+            ok &= _features.SetInt(F_OFFSET_Y, snapped.OffsetY);
+
+            if (ok)
+            {
+                _roi = snapped;
+                return;
+            }
+
+            // A partly-applied ROI is the worst outcome: the picture would look plausibly cropped
+            // while the offsets sat at zero, and _roi would assert a crop the camera refused. Put
+            // the sensor back to full frame and say so, rather than reporting a crop we do not have.
+            _features.SetInt(F_OFFSET_X, 0);
+            _features.SetInt(F_OFFSET_Y, 0);
+            _features.SetInt(F_WIDTH, _sensorMaxW);
+            _features.SetInt(F_HEIGHT, _sensorMaxH);
+            _roi = ChannelRoi.FullFrame;
         }
 
         /// <summary>
