@@ -1124,7 +1124,7 @@ always right."
         public long FramesMissed => _framesMissed;
 ```
 
-`RefreshStats` 끝의 `RaisePropertyChanged` 묶음에 `RaisePropertyChanged(nameof(FramesMissed));`를
+`RefreshStats` 끝의 `RaisePropertyChanged` 호출들 옆에 `RaisePropertyChanged(nameof(FramesMissed));`를
 추가하고, `StatusText`의 grab 중 분기에 유실을 덧붙인다. 0일 때는 아무 것도 붙이지 않는다 —
 정상 상태에 잡음을 넣지 않기 위해서다.
 
@@ -1859,7 +1859,7 @@ so every metric tile sees the same CFA phase.
         public long FramesMissed => _framesMissed;
 ```
 
-`RefreshStats` 끝의 `RaisePropertyChanged` 묶음에 `RaisePropertyChanged(nameof(FramesMissed));`를
+`RefreshStats` 끝의 `RaisePropertyChanged` 호출들 옆에 `RaisePropertyChanged(nameof(FramesMissed));`를
 추가한다. `StatusText`의 grab 중 분기 **양쪽**에 유실을 덧붙인다. 0일 때는 아무 것도 붙이지
 않는다 — 정상일 때 군더더기를 띄우지 않기 위해서다.
 
