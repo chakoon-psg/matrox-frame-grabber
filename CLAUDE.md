@@ -82,7 +82,7 @@ research.md                    src/ 심층 분석
 | | `● Rec` (Live recording) | `◆ RAW` (RAW recording) |
 |---|---|---|
 | 클래스 | `RecordingSession` | `RawSegmentSession` + `RawFrameWriter` |
-| 소스 | 디스플레이 버퍼 (3밴드 컬러) | grab 버퍼 (1밴드 Bayer) |
+| 소스 | grab 버퍼 (3밴드 컬러) | grab 버퍼 (1밴드 Bayer) |
 | 경로 | MIL → 메모리 → ffmpeg **stdin 파이프** | MIL → 로컬 `.raw` segment → ffmpeg **배치** |
 | 픽셀 포맷 | `gbrp` / `gray` | 센서의 `bayer_*8` (`M_BAYER_PATTERN`에서 조회) |
 | 부하 시 | **프레임을 버린다** (라이브 뷰 우선) | **훅을 막는다** (프레임을 잃지 않는다) |

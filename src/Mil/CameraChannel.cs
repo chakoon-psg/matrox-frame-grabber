@@ -136,6 +136,12 @@ namespace MatroxFrameGrabber.Mil
         private int _roiIncX = 2, _roiIncY = 2, _roiIncW = 2, _roiIncH = 2;
         private string _roiInputX = "0", _roiInputY = "0", _roiInputW = "0", _roiInputH = "0";
 
+        // Display-copy decimation. Time-based rather than every-Nth-frame: channels can grab at
+        // very different rates (a long exposure caps one camera at 10 fps while its neighbours
+        // run at 184), and a fixed divider would give each of them a different display rate.
+        private readonly Stopwatch _dispClock = Stopwatch.StartNew();
+        private long _lastDispCopyMs;
+
         // Camera-disconnect detection (polled in RefreshStats; 2 strikes to avoid false positives).
         private bool _cameraLost;
         private int _lostPolls;
@@ -885,7 +891,22 @@ namespace MatroxFrameGrabber.Mil
             }
 
             // ---- Per-frame processing / display update ----
-            MIL.MbufCopy(grabbedBuffer, displayBuffer);
+            // The display copy is 2.3 MB (cropped colour) and triggers a UI-thread update, so it
+            // runs at DisplayUpdateFps rather than every frame. Recording is unaffected:
+            // RecordingSession.Feed works from the grab buffer, never the display buffer.
+            int dispFps = Output?.DisplayUpdateFps ?? 0;
+            bool copyToDisplay = true;
+            if (dispFps > 0)
+            {
+                long now = _dispClock.ElapsedMilliseconds;
+                long interval = 1000 / dispFps;
+                if (now - _lastDispCopyMs < interval)
+                    copyToDisplay = false;
+                else
+                    _lastDispCopyMs = now;
+            }
+            if (copyToDisplay)
+                MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
             // ---- Recording feed (RecordingSession guards start/stop vs feed internally) ----
             _recording?.Feed(grabbedBuffer);
