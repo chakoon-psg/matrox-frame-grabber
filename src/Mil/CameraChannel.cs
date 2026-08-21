@@ -826,6 +826,11 @@ namespace MatroxFrameGrabber.Mil
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
 
+            // Leave the run its own evidence. The acceptance criterion for the whole payload
+            // change is that frames missed does not increase, and until now reading it meant
+            // transcribing the status line by hand while the run was still going.
+            LogGrabSummary();
+
             // A stopped channel is no longer measuring anything; keeping the old readings would
             // have the strip assert a value nobody is watching anymore.
             _brightness.Reset();
@@ -1543,8 +1548,11 @@ namespace MatroxFrameGrabber.Mil
 
             try
             {
+                // This camera answers -1 here. A nonsense number in a diagnostic line is worse than
+                // no number, so only print it when it is one.
                 MIL_INT payload = MIL.MdigInquire(_digId, MIL.M_GC_PAYLOAD_SIZE, MIL.M_NULL);
-                sb.Append($"  payload={(long)payload}B");
+                if ((long)payload > 0)
+                    sb.Append($"  payload={(long)payload}B");
             }
             catch (MILException e) { MilErrorLog.Write($"{Name}: read GenICam payload size", e); }
 
@@ -1714,6 +1722,27 @@ namespace MatroxFrameGrabber.Mil
             if (_features.TryGetInt(MIL.M_FEATURE_VALUE, feature, out long current) && current == value)
                 return true;
             return _features.SetInt(feature, value);
+        }
+
+        /// <summary>
+        /// Records how the run that just ended actually went: frames, rate, frames missed, and the
+        /// payload that produced them. Missed frames are re-inquired rather than taken from the
+        /// last stats tick, so the number is the run.s final count and not one up to half a second
+        /// stale.
+        /// </summary>
+        private void LogGrabSummary()
+        {
+            long missed = _framesMissed;
+            try
+            {
+                MIL_INT m = 0;
+                MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref m);
+                missed = m;
+            }
+            catch (MILException) { /* keep the last polled value */ }
+
+            MilErrorLog.Note($"{Name}: grab stopped — {FrameCount} frames, {_frameRate:F1} fps, "
+                           + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
         }
 
         /// <summary>
