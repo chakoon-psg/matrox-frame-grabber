@@ -31,7 +31,16 @@ namespace MatroxFrameGrabber.Infrastructure
         /// Records one failure. <paramref name="context"/> says what the app was attempting, in
         /// words a field engineer can act on — "Camera 1: write DecimationHorizontal", not "SetInt".
         /// </summary>
-        public static void Write(string context, Exception e)
+        public static void Write(string context, Exception e) => Append(context, e);
+
+        /// <summary>
+        /// Records a diagnostic line that is not a failure — a hardware state worth having in the
+        /// log when someone asks why the camera refused something. Same file, same trimming, and
+        /// the same best-effort contract and per-frame prohibition as <see cref="Write"/>.
+        /// </summary>
+        public static void Note(string context) => Append(context, null);
+
+        private static void Append(string context, Exception e)
         {
             try
             {
@@ -49,9 +58,12 @@ namespace MatroxFrameGrabber.Infrastructure
                             $"--- trimmed {DateTime.Now:yyyy-MM-dd HH:mm:ss}, older entries dropped ---{Environment.NewLine}");
                     }
 
-                    string message = e == null ? "(no exception)" : e.Message.Replace('\r', ' ').Replace('\n', ' ');
+                    // A Note has no exception; keep its line clean rather than tacking on a
+                    // placeholder that reads like a swallowed error.
+                    string message = e?.Message.Replace('\r', ' ').Replace('\n', ' ');
+                    string suffix = message == null ? "" : "  |  " + message;
                     File.AppendAllText(LogPath,
-                        $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}  {context}  |  {message}{Environment.NewLine}");
+                        $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}  {context}{suffix}{Environment.NewLine}");
                 }
             }
             catch (Exception)

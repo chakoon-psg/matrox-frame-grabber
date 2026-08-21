@@ -110,6 +110,23 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
+        /// <summary>
+        /// The camera's own answer to "can I write this?" — `M_FEATURE_ACCESS_MODE`, as a short tag
+        /// ("RW" / "RO" / raw hex / "?" when the node is not implemented).
+        ///
+        /// This is the only direct evidence available for a node this camera refuses. A write
+        /// followed by a read-back can show that a value did not change, but never why — and
+        /// "implemented read-only" and "temporarily locked" look identical through that lens.
+        /// </summary>
+        public string AccessMode(string name)
+        {
+            if (!TryGetInt(MIL.M_FEATURE_ACCESS_MODE, name, out long mode))
+                return "?";
+            if (mode == (long)MIL.M_READ_WRITE) return "RW";
+            if (mode == (long)MIL.M_READ_ONLY) return "RO";
+            return "0x" + mode.ToString("X");
+        }
+
         /// <summary>Reads a double feature property (M_FEATURE_VALUE / _MIN / _MAX / ...).</summary>
         public bool TryGetDouble(long inquireType, string name, out double value)
         {

@@ -50,6 +50,13 @@ namespace MatroxFrameGrabber.Mil
         private const string F_DECIM_H = "DecimationHorizontal";
         private const string F_DECIM_V = "DecimationVertical";
 
+        // Geometry nodes. This camera accepts writes to these and ignores them (see CLAUDE.md), so
+        // they are named here only for the access-mode probe below — nothing writes them.
+        private const string F_WIDTH = "Width";
+        private const string F_HEIGHT = "Height";
+        private const string F_OFFSET_X = "OffsetX";
+        private const string F_OFFSET_Y = "OffsetY";
+
         #endregion
 
         #region Hook data
@@ -548,6 +555,10 @@ namespace MatroxFrameGrabber.Mil
                     // above this line silently does nothing. The assignment after AllocateBuffers
                     // stays, because the no-camera path must still clear a stale id.
                     _features.Digitizer = _digId;
+
+                    // Ask the camera about the geometry nodes BEFORE anything below writes to it,
+                    // so the log shows the state as found.
+                    LogGeometryAccess();
 
                     // Force hardware Bayer→RGB conversion ON (color). M_BAYER_CONVERSION is a
                     // PERSISTENT board setting: once disabled (e.g. to grab raw band-1 Bayer) it
@@ -1698,6 +1709,30 @@ namespace MatroxFrameGrabber.Mil
             if (_features.TryGetInt(MIL.M_FEATURE_VALUE, feature, out long current) && current == value)
                 return true;
             return _features.SetInt(feature, value);
+        }
+
+        /// <summary>
+        /// Logs the camera's own access mode for the geometry nodes, once per allocation.
+        ///
+        /// This app concluded that cropping is unsupported by writing `Width` / `OffsetX` and
+        /// reading the value back unchanged. That evidence cannot separate two very different
+        /// causes: a node this camera implements as read-only, and a node temporarily locked
+        /// because the app was killed last run (CLAUDE.md — the symptom is an identical silent
+        /// refusal). `M_FEATURE_ACCESS_MODE` is the camera answering directly, so the log says
+        /// which one it is instead of leaving the next person to re-derive it.
+        /// </summary>
+        private void LogGeometryAccess()
+        {
+            if (_digId == MIL.M_NULL)
+                return;
+            var sb = new StringBuilder();
+            foreach (string f in new[] { F_WIDTH, F_HEIGHT, F_OFFSET_X, F_OFFSET_Y, F_DECIM_H, F_DECIM_V })
+            {
+                if (!_features.Available(f)) { sb.Append($" {f}=absent"); continue; }
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, f, out long v);
+                sb.Append($" {f}={v}/{_features.AccessMode(f)}");
+            }
+            MilErrorLog.Note($"{Name}: geometry nodes (value/access):{sb}");
         }
 
         /// <summary>
