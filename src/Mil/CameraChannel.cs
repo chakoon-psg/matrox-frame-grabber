@@ -560,6 +560,11 @@ namespace MatroxFrameGrabber.Mil
                     // so the log shows the state as found.
                     LogGeometryAccess();
 
+                    // And the acquisition-limiting settings, so "why is this one channel slow" is
+                    // answered in the log instead of being re-derived. CLAUDE.md warns that the
+                    // first suspect is exposure, not the cable — this line names it.
+                    MilErrorLog.Note(DumpDiagnostics());
+
                     // Force hardware Bayer→RGB conversion ON (color). M_BAYER_CONVERSION is a
                     // PERSISTENT board setting: once disabled (e.g. to grab raw band-1 Bayer) it
                     // stays off across grabs and app restarts, and the color pipeline then misreads
@@ -1516,7 +1521,7 @@ namespace MatroxFrameGrabber.Mil
             MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
             sb.Append($"{OutputName}: {sx}x{sy}");
 
-            // Reading a feature name the camera does not expose raises a MIL error.
+            // Absent features are skipped silently — GenICamFeatures gates every read on presence.
             if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, "ExposureTime", out double exp))
                 sb.Append($"  Exposure={exp:F0}us(=>{(exp > 0 ? 1e6 / exp : 0):F0}fps max)");
             if (TryGetFeatureString("ExposureAuto", out string expAuto) && !string.IsNullOrEmpty(expAuto))
@@ -1608,11 +1613,11 @@ namespace MatroxFrameGrabber.Mil
             BlueRatioInput = ReadBalanceRatio("Blue");
         }
 
-        private string ReadBalanceRatio(string channel)
+        private string ReadBalanceRatio(string band)
         {
             if (!FeatureAvailable(F_BALANCE_RATIO))
                 return "";
-            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, channel))
+            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, band))
                 return "";
             if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_BALANCE_RATIO, out double v))
                 return v.ToString("0.###", CultureInfo.InvariantCulture);
@@ -1644,11 +1649,11 @@ namespace MatroxFrameGrabber.Mil
             return ok;
         }
 
-        private bool SetBalanceRatio(string channel, string text)
+        private bool SetBalanceRatio(string band, string text)
         {
             if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
                 return false;
-            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, channel))
+            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, band))
                 return false;
             return SetFeatureDouble(F_BALANCE_RATIO, v);
         }

@@ -15,6 +15,10 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>The digitizer these features operate on (M_NULL when no camera).</summary>
         public MIL_ID Digitizer { get; set; } = MIL.M_NULL;
 
+        // Every accessor gates on Available(name) first — readers as well as writers. Reading a
+        // feature this camera does not expose raises a MIL error, and the catch blocks below would
+        // then log one line per probe; DumpDiagnostics alone probes a dozen names, so absent
+        // features used to bury the log they share with real failures.
         private bool HasDigitizer => Digitizer != MIL.M_NULL;
 
         /// <summary>True if the camera exposes the named feature.</summary>
@@ -95,7 +99,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetInt(long inquireType, string name, out long value)
         {
             value = 0;
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 MIL_INT v = 0;
@@ -131,7 +135,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetDouble(long inquireType, string name, out double value)
         {
             value = 0;
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 double v = 0;
@@ -150,7 +154,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetString(string name, out string value)
         {
             value = "";
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 var sb = new StringBuilder(256);
@@ -209,7 +213,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetBool(string name, out bool value)
         {
             value = false;
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 bool v = false;
