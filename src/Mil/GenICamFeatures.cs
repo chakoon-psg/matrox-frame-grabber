@@ -126,8 +126,11 @@ namespace MatroxFrameGrabber.Mil
         {
             if (!TryGetInt(MIL.M_FEATURE_ACCESS_MODE, name, out long mode))
                 return "?";
-            if (mode == (long)MIL.M_READ_WRITE) return "RW";
-            if (mode == (long)MIL.M_READ_ONLY) return "RO";
+            if (mode == (long)MIL.M_FEATURE_READ_WRITE) return "RW";
+            if (mode == (long)MIL.M_FEATURE_READ_ONLY) return "RO";
+            if (mode == (long)MIL.M_FEATURE_WRITE_ONLY) return "WO";
+            if (mode == (long)MIL.M_FEATURE_NOT_AVAILABLE) return "NA";
+            if (mode == (long)MIL.M_FEATURE_NOT_IMPLEMENTED) return "NI";
             return "0x" + mode.ToString("X");
         }
 
