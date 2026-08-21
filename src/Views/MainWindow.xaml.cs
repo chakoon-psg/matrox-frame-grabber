@@ -80,22 +80,36 @@ namespace MatroxFrameGrabber.Views
             Pane3?.RefreshRoiOverlay();
         }
 
+        /// <summary>
+        /// Reports something the operator should see. In an unattended --autostart run there is
+        /// nobody to dismiss a dialog, and a modal one would hold the process until the caller
+        /// gives up waiting — so the message goes to the log instead. Interactive runs are
+        /// unchanged.
+        /// </summary>
+        private static void Report(string message, string title, MessageBoxImage icon)
+        {
+            if (App.Unattended)
+            {
+                MilErrorLog.Note($"autostart: {title} - {(message ?? "").Replace('\n', ' ')}");
+                return;
+            }
+            MessageBox.Show(message, title, MessageBoxButton.OK, icon);
+        }
+
         private void OnRecordingFailed(CameraChannel channel, string error)
         {
-            MessageBox.Show($"Recording stopped: {error}", channel.Name,
-                MessageBoxButton.OK, MessageBoxImage.Warning);
+            Report($"Recording stopped: {error}", channel.Name, MessageBoxImage.Warning);
         }
 
         private void OnGrabFailed(CameraChannel channel, string error)
         {
-            MessageBox.Show($"Could not start acquisition: {error}", channel.Name,
-                MessageBoxButton.OK, MessageBoxImage.Warning);
+            Report($"Could not start acquisition: {error}", channel.Name, MessageBoxImage.Warning);
         }
 
         private void OnCameraLost(CameraChannel channel)
         {
-            MessageBox.Show("Camera was disconnected. Press Stop, reconnect it, then Start again.",
-                channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+            Report("Camera was disconnected. Press Stop, reconnect it, then Start again.",
+                channel.Name, MessageBoxImage.Warning);
         }
 
         private void Window_SourceInitialized(object sender, EventArgs e)
@@ -107,10 +121,46 @@ namespace MatroxFrameGrabber.Views
         {
             if (_initError != null)
             {
-                MessageBox.Show(_initError, "MIL Allocation Error",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                Report(_initError, "MIL Allocation Error", MessageBoxImage.Error);
+                if (App.Unattended)
+                    Close();   // nothing to run, and nobody to close the window
                 return;
             }
+
+            if (App.Unattended)
+                BeginAutoRun(App.AutoRunSeconds);
+        }
+
+        /// <summary>
+        /// Unattended run: grab on every present camera for a fixed number of seconds, then stop
+        /// and close. Each channel's <c>grab stopped</c> line in the log is the result.
+        ///
+        /// Closing through <see cref="Window.Close"/> rather than ending the process is the whole
+        /// point of doing it this way: Window_Closing is what frees MIL and restores the board's
+        /// Bayer conversion, and a killed app is what leaves the camera's geometry nodes silently
+        /// refusing writes afterwards (see CLAUDE.md).
+        /// </summary>
+        private void BeginAutoRun(int seconds)
+        {
+            if (_viewModel == null)
+                return;
+
+            MilErrorLog.Note($"autostart: grabbing for {seconds}s, then closing");
+            _viewModel.StartAllCommand.Execute(null);
+
+            var timer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(seconds)
+            };
+            timer.Tick += (s, args) =>
+            {
+                timer.Stop();
+                // Straight to the view model rather than StopAll_Click: that one asks the operator
+                // to confirm while a recording is in progress, and there is nobody to answer.
+                _viewModel.StopAllCommand.Execute(null);
+                Close();
+            };
+            timer.Start();
         }
 
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)

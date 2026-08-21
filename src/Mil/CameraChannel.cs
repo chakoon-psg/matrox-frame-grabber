@@ -1741,7 +1741,7 @@ namespace MatroxFrameGrabber.Mil
             }
             catch (MILException) { /* keep the last polled value */ }
 
-            MilErrorLog.Note($"{Name}: grab stopped — {FrameCount} frames, {_frameRate:F1} fps, "
+            MilErrorLog.Note($"{Name}: grab stopped - {FrameCount} frames, {_frameRate:F1} fps, "
                            + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
         }
 
