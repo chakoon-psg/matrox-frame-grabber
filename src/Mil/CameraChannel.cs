@@ -130,6 +130,7 @@ namespace MatroxFrameGrabber.Mil
         private long _rawMissed;
         private DateTime _rawStartTime;
         private long _framesMissed;
+        private long _missedAtGrabStart;   // cumulative counter when this grab started
 
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
@@ -789,6 +790,21 @@ namespace MatroxFrameGrabber.Mil
                 throw;
             }
 
+            // Baseline the missed-frame counter. MIL keeps it cumulative — there is a separate
+            // M_PROCESS_FRAME_MISSED_RESET constant, which is why — so a second grab in the same
+            // session would otherwise inherit the first one's losses and read as a regression that
+            // never happened. Subtracting a baseline is correct whether or not MIL also clears the
+            // counter on M_START: if it does, this is zero and the subtraction is a no-op.
+            _missedAtGrabStart = 0;
+            try
+            {
+                MIL_INT m = 0;
+                MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref m);
+                _missedAtGrabStart = m;
+            }
+            catch (MILException e) { MilErrorLog.Write($"{Name}: baseline the missed-frame counter", e); }
+            _framesMissed = 0;
+
             _isGrabbing = true;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
@@ -875,9 +891,10 @@ namespace MatroxFrameGrabber.Mil
                 MIL_INT missed = 0;
                 try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
                 catch (MILException e) { MilErrorLog.Write($"{Name}: read missed-frame counter", e); }
-                _framesMissed = missed;
+                // This run's losses, not the digitizer's lifetime total (see StartGrab).
+                _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
                 if (_rawRecording)
-                    _rawMissed = missed;
+                    _rawMissed = _framesMissed;   // same number the status line shows
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -1737,7 +1754,7 @@ namespace MatroxFrameGrabber.Mil
             {
                 MIL_INT m = 0;
                 MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref m);
-                missed = m;
+                missed = Math.Max(0, (long)m - _missedAtGrabStart);   // this run only
             }
             catch (MILException) { /* keep the last polled value */ }
 
