@@ -75,6 +75,38 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>
+        /// Re-expresses this region for a different decimation factor.
+        ///
+        /// The region is stored in coordinates of the decimated frame, so the same four numbers
+        /// point at a different part of the scene once the factor changes: a rectangle drawn at
+        /// decimation 1 lands outside the frame entirely at decimation 2, which is how two
+        /// channels ended up with their rectangle off the image. The operator picked a part of the
+        /// panel, not a part of a buffer, so the rectangle has to move when the frame does.
+        ///
+        /// A region valid at the old factor is always valid at the new one — offset+size scales by
+        /// the same ratio as the frame — so this needs no clamp of its own.
+        ///
+        /// Factors this app does not offer are ignored rather than applied. A settings file can
+        /// hold anything, and scaling by a garbage ratio is worse than leaving the rectangle put.
+        /// </summary>
+        public ChannelRoi Rescale(int fromDecimation, int toDecimation)
+        {
+            if (IsFullFrame)
+                return FullFrame;
+            if (fromDecimation == toDecimation)
+                return this;
+            if (ClampDecimation(fromDecimation) != fromDecimation ||
+                ClampDecimation(toDecimation) != toDecimation)
+                return this;
+
+            return new ChannelRoi(
+                RoundDown(OffsetX * fromDecimation / toDecimation, CfaIncrement),
+                RoundDown(OffsetY * fromDecimation / toDecimation, CfaIncrement),
+                RoundDown(Width * fromDecimation / toDecimation, CfaIncrement),
+                RoundDown(Height * fromDecimation / toDecimation, CfaIncrement));
+        }
+
+        /// <summary>
         /// Bytes one frame occupies for this ROI. <paramref name="bands"/> is 3 with on-board Bayer
         /// conversion enabled and 1 without — the 3x difference is what makes cropping necessary.
         /// </summary>
