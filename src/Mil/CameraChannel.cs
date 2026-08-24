@@ -595,7 +595,13 @@ namespace MatroxFrameGrabber.Mil
             // The analysis rectangle as actually applied, after the load-time snap. Logged because
             // a stale one is invisible until somebody notices the overlay sitting off the image.
             if (CameraPresent)
-                MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {DecimationHint} (decim {_decimation})");
+            {
+                // Frame size formatted here rather than reused from DecimationHint: that one is
+                // UI text and carries a multiplication sign, which the log should not (see the
+                // ASCII note on MilErrorLog).
+                TryGetFrameSize(out int frameW, out int frameH);
+                MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {frameW}x{frameH} (decim {_decimation})");
+            }
 
             RaisePropertyChanged(nameof(CameraPresent));
             RaisePropertyChanged(nameof(StatusText));
