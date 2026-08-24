@@ -144,6 +144,10 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   고정되고, 초과분은 `M_PROCESS_FRAME_MISSED`로 조용히 사라진다. 성능 작업을 하기 전에
   [research.md](research.md) 8절의 실측표를 볼 것 — **표시 경로를 최적화해도 취득 fps는 늘지
   않는다**(측정으로 확인). 프레임당 페이로드만이 레버다.
+  **그 천장은 PCIe 링크 폭이다.** 2026-08-24에 확인: 보드가 Gen2 **x4**로 붙어 있고(실효
+  1.6~1.8 GB/s = 실측값과 일치) 보드 자체는 **x8을 지원한다**(`MaxLinkWidth = 8`). x8 슬롯으로
+  옮기면 천장이 대략 두 배가 되어 이 제약 자체가 사라질 수 있다 — 소프트웨어로 페이로드를 깎기
+  전에 **슬롯을 먼저 확인할 것**. 확인 명령은 research.md 8절에 있다.
 - **카메라 GenICam 설정 일부는 보드가 아니라 카메라에 영속된다.** `AcquisitionFrameRate` /
   `AcquisitionFrameRateEnable`, `DecimationHorizontal` / `Vertical`이 그렇다. 앱을 닫아도 남으니
   `M_BAYER_CONVERSION`과 같은 복구 규율을 적용할 것. 그리고 이들은 **정수형 피처라

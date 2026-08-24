@@ -616,6 +616,41 @@ Rapixo CXP + 카메라 3대에서 계측해 얻은 값이다. 코드만 읽어�
 - 카메라 60 fps 제한은 천장의 96%라 마진이 없다 — 60초 런에서 한 채널이 387프레임을 놓쳤다.
   45~50 fps가 안전선이다.
 
+**그 천장의 정체는 PCIe 링크 폭이다 (2026-08-24 확인)**
+
+보드가 **Gen2 x4**로 붙어 있고, **보드 자체는 x8을 지원한다.**
+
+```powershell
+$id = (Get-PnpDevice | Where-Object { $_.FriendlyName -match 'Rapixo' }).InstanceId
+'CurrentLinkSpeed','CurrentLinkWidth','MaxLinkSpeed','MaxLinkWidth' | ForEach-Object {
+  "$_ = " + (Get-PnpDeviceProperty -InstanceId $id -KeyName "DEVPKEY_PciDevice_$_").Data }
+# CurrentLinkSpeed = 2   CurrentLinkWidth = 4
+# MaxLinkSpeed     = 2   MaxLinkWidth     = 8
+```
+
+`LinkSpeed = 2`는 5.0 GT/s(Gen2)다. Gen2는 8b/10b 인코딩이라 레인당 실효 500 MB/s이므로:
+
+| 구성 | 이론 | 실효(오버헤드 감안) | 실측 |
+|---|---|---|---|
+| **현재 — Gen2 x4** | 2.0 GB/s | 1.6~1.8 GB/s | **1.7~1.79 GB/s** |
+| Gen2 x8 (보드 최대) | 4.0 GB/s | 3.2~3.6 GB/s | 미측정 |
+
+**실측 천장이 x4의 실효 대역폭과 일치한다.** 즉 병목은 보드의 DMA 엔진이나 호스트 메모리가
+아니라 **링크 폭**이다. 그리고 `MaxLinkSpeed = 2`이므로 세대는 올릴 수 없고, **폭만 올릴 수 있다.**
+
+**x8 슬롯으로 옮기면 천장이 대략 두 배가 되고, 지금까지 설계를 지배한 제약이 사라진다.**
+원본 해상도 컬러 3채널 100 fps는 2.87 GB/s여서 x4에서는 불가능하지만 x8의 실효 안에 들어온다.
+그러면 디시메이션도 1밴드 취득도 필요 없어진다.
+
+확인해야 할 것:
+
+- 지금 꽂힌 슬롯이 **물리적으로 x8 이상이면서 전기적으로도 8레인**인지. x16 슬롯이 x4로만
+  배선된 경우가 흔하다(칩셋 레인 배분·바이퍼케이션).
+- BIOS의 레인 배분 설정. 슬롯은 x8인데 BIOS가 x4로 묶어 둔 경우도 있다.
+- 옮긴 뒤 **위 명령으로 `CurrentLinkWidth = 8`을 확인**하고, 그다음 실제 취득량을 다시 잰다.
+  링크가 넓어져도 보드의 DMA 엔진이 그만큼 못 낼 가능성은 남아 있다 — 링크가 유일한 병목이었다는
+  것은 x4에서의 일치로부터 추론한 것이고, x8에서 재보기 전까지는 추론이다.
+
 **표시 경로 — UI 스레드 1개 공유**
 
 `MILWPFDisplay`는 `HwndHost`도 `D3DImage`도 아니다. 어셈블리에 `_writeableBitmap`,
