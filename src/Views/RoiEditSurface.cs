@@ -32,6 +32,7 @@ namespace MatroxFrameGrabber.Views
         private enum DragMode { None, New, Move, Resize }
 
         private readonly FrameworkElement _surface;
+        private readonly Panel _overlay;
         private readonly string _label;
         private readonly Func<CameraChannel> _channel;
         private bool _hidden = true;   // so the first successful draw is not logged as a change
@@ -51,6 +52,7 @@ namespace MatroxFrameGrabber.Views
                               string label)
         {
             _surface = surface;
+            _overlay = overlay;
             _channel = channel;
             _label = label;
 
@@ -287,6 +289,23 @@ namespace MatroxFrameGrabber.Views
                 case RoiHandle.Inside: _surface.Cursor = Cursors.SizeAll; break;
                 default: _surface.Cursor = Cursors.Cross; break;
             }
+        }
+
+        /// <summary>
+        /// Takes this surface's visuals back out of the overlay it was given.
+        ///
+        /// The fullscreen overlay builds a surface per entry, and the visuals belong to the
+        /// surface rather than to the panel — leaving them behind stacked a frozen rectangle and
+        /// eight frozen handles on every entry, which reads exactly like the rectangle no longer
+        /// being tracked. Idempotent.
+        /// </summary>
+        public void RemoveVisuals()
+        {
+            ExitEditMode();
+            _overlay.Children.Remove(_rect);
+            _overlay.Children.Remove(_newRect);
+            foreach (Rectangle handle in _handles)
+                _overlay.Children.Remove(handle);
         }
 
         /// <summary>Clears the cursor and hides the handles — call when leaving edit mode.</summary>

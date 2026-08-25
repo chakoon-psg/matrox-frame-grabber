@@ -280,6 +280,11 @@ namespace MatroxFrameGrabber.Views
             _fullscreenPane = pane;
             _fullscreenDisplay = display;
             FullscreenTitle.Text = $"{channel.Name} — double-click or press ESC to exit";
+            // The overlay must be empty on entry. It has now been left holding visuals twice, and
+            // the symptom both times was a rectangle that looked untracked rather than an error.
+            if (FullscreenContentGrid.Children.Count != 0)
+                MilErrorLog.Note($"fullscreen overlay entered holding "
+                               + $"{FullscreenContentGrid.Children.Count} leftover element(s)");
             FullscreenContentGrid.Children.Insert(0, display);
 
             // Edit mode starts off every time. Carrying the pane toggle's state across would leave
@@ -303,7 +308,9 @@ namespace MatroxFrameGrabber.Views
 
             RemoveEscHook();
             FullscreenOverlay.Visibility = Visibility.Collapsed;
-            _fullscreenRoi?.ExitEditMode();
+            // The visuals belong to the surface, not to the grid: the grid keeps the display
+            // control, which is handed back to the pane.
+            _fullscreenRoi?.RemoveVisuals();
             _fullscreenRoi = null;
 
             if (_fullscreenDisplay != null)
