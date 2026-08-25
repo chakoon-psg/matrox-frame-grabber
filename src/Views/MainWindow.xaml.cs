@@ -277,7 +277,8 @@ namespace MatroxFrameGrabber.Views
             // Edit mode starts off every time. Carrying the pane toggle's state across would leave
             // the operator wondering why the handles are showing on a screen they just opened.
             FullscreenRoiToggle.IsChecked = false;
-            _fullscreenRoi = new RoiEditSurface(FullscreenBorder, FullscreenContentGrid, () => _fullscreenChannel);
+            _fullscreenRoi = new RoiEditSurface(FullscreenBorder, FullscreenContentGrid,
+                                                () => _fullscreenChannel, "fullscreen");
 
             MainContent.Visibility = Visibility.Collapsed;
             FullscreenOverlay.Visibility = Visibility.Visible;

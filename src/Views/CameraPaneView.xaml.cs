@@ -31,7 +31,7 @@ namespace MatroxFrameGrabber.Views
             InitializeComponent();
             // The rectangle and its handles are built in code so this pane and the fullscreen
             // overlay show the same thing without the visuals being declared twice.
-            _roi = new RoiEditSurface(ViewBorder, ViewContentGrid, () => Channel);
+            _roi = new RoiEditSurface(ViewBorder, ViewContentGrid, () => Channel, "pane");
             DataContextChanged += OnDataContextChanged;
         }
 

@@ -32,7 +32,9 @@ namespace MatroxFrameGrabber.Views
         private enum DragMode { None, New, Move, Resize }
 
         private readonly FrameworkElement _surface;
+        private readonly string _label;
         private readonly Func<CameraChannel> _channel;
+        private bool _hidden = true;   // so the first successful draw is not logged as a change
         private readonly Rectangle _rect;
         private readonly Rectangle _newRect;
         private readonly Rectangle[] _handles = new Rectangle[8];
@@ -44,10 +46,12 @@ namespace MatroxFrameGrabber.Views
         private double _grabImageX, _grabImageY;
         private ChannelRoi _candidate;      // what a release would commit
 
-        public RoiEditSurface(FrameworkElement surface, Panel overlay, Func<CameraChannel> channel)
+        public RoiEditSurface(FrameworkElement surface, Panel overlay, Func<CameraChannel> channel,
+                              string label)
         {
             _surface = surface;
             _channel = channel;
+            _label = label;
 
             Brush roiBrush = FindBrush("Ch1Brush", Brushes.DeepSkyBlue);
             Brush newBrush = FindBrush("AccentBrush", Brushes.Orange);
@@ -230,11 +234,27 @@ namespace MatroxFrameGrabber.Views
         {
             if (_mode != DragMode.None)
                 return;     // a drag is showing its own candidate; don't fight it
-            if (!TryMap(out DisplayMapping map, out ChannelRoi roi, out _, out _))
+            if (!TryMap(out DisplayMapping map, out ChannelRoi roi, out _, out _, out string reason))
             {
+                // Logged on the transition only, never per tick: a rectangle that stops drawing is
+                // invisible by definition, so the reason has to be recorded when it happens.
+                if (!_hidden)
+                    MilErrorLog.Note($"{Who()} ROI rectangle hidden - {reason}");
+                _hidden = true;
                 Hide();
                 return;
             }
+            // No rectangle to draw is not the same as failing to draw one, and only the second is
+            // worth a log line.
+            if (roi.IsFullFrame)
+            {
+                _hidden = true;
+                Hide();
+                return;
+            }
+            if (_hidden)
+                MilErrorLog.Note($"{Who()} ROI rectangle drawing again");
+            _hidden = false;
             Draw(roi, map);
         }
 
@@ -325,22 +345,48 @@ namespace MatroxFrameGrabber.Views
         }
 
         private bool TryMap(out DisplayMapping map, out ChannelRoi roi, out int frameW, out int frameH)
+            => TryMap(out map, out roi, out frameW, out frameH, out _);
+
+        /// <summary>
+        /// The mapping, and when it cannot be built, why. The reason is worth carrying: a
+        /// rectangle that silently stops drawing looks identical whether the control has no size,
+        /// MIL will not report a zoom, or the channel is gone — and this app has now lost the
+        /// rectangle twice for reasons that were only distinguishable from the inside.
+        /// </summary>
+        private bool TryMap(out DisplayMapping map, out ChannelRoi roi, out int frameW, out int frameH,
+                            out string reason)
         {
             map = default(DisplayMapping);
             roi = ChannelRoi.FullFrame;
             frameW = 0; frameH = 0;
+            reason = null;
 
             CameraChannel channel = _channel();
             if (channel == null)
+            {
+                reason = "no channel bound";
                 return false;
+            }
             if (!channel.TryGetViewGeometry(out frameW, out frameH, out double zoom, out double ox, out double oy))
+            {
+                reason = "MIL would not report the view geometry";
                 return false;
+            }
 
             map = DisplayMapping.Create(_surface.ActualWidth, _surface.ActualHeight,
                                         frameW, frameH, zoom, ox, oy);
             roi = channel.AnalysisRoi;
-            return map.IsValid;
+            if (!map.IsValid)
+            {
+                reason = $"mapping invalid: surface {_surface.ActualWidth:F0}x{_surface.ActualHeight:F0}, "
+                       + $"frame {frameW}x{frameH}, zoom {zoom:F3}";
+                return false;
+            }
+            return true;
         }
+
+        /// <summary>Which surface this is, for the log — four panes and an overlay share the code.</summary>
+        private string Who() => $"{_channel()?.Name ?? "no channel"} ({_label}):";
 
         private static Brush FindBrush(string key, Brush fallback)
         {
