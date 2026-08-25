@@ -35,6 +35,7 @@ namespace MatroxFrameGrabber.Views
         private readonly string _label;
         private readonly Func<CameraChannel> _channel;
         private bool _hidden = true;   // so the first successful draw is not logged as a change
+        private bool _offSurface;
         private readonly Rectangle _rect;
         private readonly Rectangle _newRect;
         private readonly Rectangle[] _handles = new Rectangle[8];
@@ -316,6 +317,22 @@ namespace MatroxFrameGrabber.Views
             _rect.Width = w;
             _rect.Height = h;
             _rect.Visibility = Visibility.Visible;
+
+            // Drawn is not the same as visible. If the mapping is built from a zoom that belongs to
+            // a different control — the display is shared with the fullscreen overlay — the
+            // rectangle lands outside this surface and the operator sees nothing, with no failure
+            // anywhere to notice.
+            double sw = _surface.ActualWidth, sh = _surface.ActualHeight;
+            bool offSurface = left + w <= 0 || top + h <= 0 || left >= sw || top >= sh;
+            if (offSurface != _offSurface)
+            {
+                _offSurface = offSurface;
+                if (offSurface)
+                    MilErrorLog.Note($"{Who()} ROI drawn off the surface - rect {left:F0},{top:F0} "
+                                   + $"{w:F0}x{h:F0} in surface {sw:F0}x{sh:F0}, scale {map.Scale:F3}");
+                else
+                    MilErrorLog.Note($"{Who()} ROI back on the surface");
+            }
 
             if (!EditMode)
             {

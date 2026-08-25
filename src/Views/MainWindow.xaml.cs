@@ -29,6 +29,7 @@ namespace MatroxFrameGrabber.Views
         private MainViewModel _viewModel;
         private CameraChannel _fullscreenChannel;
         private MILWPFDisplay _fullscreenDisplay;
+        private CameraPaneView _fullscreenPane;
         private RoiEditSurface _fullscreenRoi;
         private bool _escHookInstalled;
         private string _initError;
@@ -250,29 +251,36 @@ namespace MatroxFrameGrabber.Views
 
         // ----- Fullscreen -----
 
-        private void Pane_FullscreenRequested(object sender, CameraChannel channel)
-        {
-            EnterFullscreen(channel);
-        }
-
-        // A pane's "apply to all" button: copy that camera's capture settings to every other camera.
         private void Pane_ApplyToAllRequested(object sender, EventArgs e)
         {
             if ((sender as CameraPaneView)?.DataContext is CameraChannel source)
                 _viewModel?.ApplyAllSettings(source);
         }
 
-        private void EnterFullscreen(CameraChannel channel)
+        private void Pane_FullscreenRequested(object sender, CameraChannel channel)
         {
-            if (channel == null || !channel.CameraPresent || _fullscreenChannel != null)
+            EnterFullscreen(sender as CameraPaneView, channel);
+        }
+
+        /// <summary>
+        /// Moves the pane's display control into the overlay. Creating a second control for the
+        /// same DisplayId is what left the pane scaled to the overlay after returning — MIL has one
+        /// zoom per display, and "fit to window" cannot choose between two windows.
+        /// </summary>
+        private void EnterFullscreen(CameraPaneView pane, CameraChannel channel)
+        {
+            if (pane == null || channel == null || !channel.CameraPresent || _fullscreenChannel != null)
+                return;
+
+            MILWPFDisplay display = pane.DetachDisplay();
+            if (display == null)
                 return;
 
             _fullscreenChannel = channel;
+            _fullscreenPane = pane;
+            _fullscreenDisplay = display;
             FullscreenTitle.Text = $"{channel.Name} — double-click or press ESC to exit";
-
-            // Create the display control on demand, bound to the selected camera's display.
-            _fullscreenDisplay = new MILWPFDisplay { DisplayId = channel.DisplayId };
-            FullscreenContentGrid.Children.Insert(0, _fullscreenDisplay);
+            FullscreenContentGrid.Children.Insert(0, display);
 
             // Edit mode starts off every time. Carrying the pane toggle's state across would leave
             // the operator wondering why the handles are showing on a screen they just opened.
@@ -297,15 +305,33 @@ namespace MatroxFrameGrabber.Views
             FullscreenOverlay.Visibility = Visibility.Collapsed;
             _fullscreenRoi?.ExitEditMode();
             _fullscreenRoi = null;
-            FullscreenContentGrid.Children.Clear();   // drops the display control and the ROI visuals
+
+            if (_fullscreenDisplay != null)
+                FullscreenContentGrid.Children.Remove(_fullscreenDisplay);
             _fullscreenDisplay = null;
+
             MainContent.Visibility = Visibility.Visible;
 
-            var channel = _fullscreenChannel;
+            CameraPaneView pane = _fullscreenPane;
+            CameraChannel channel = _fullscreenChannel;
+            _fullscreenPane = null;
             _fullscreenChannel = null;
 
-            Dispatcher.BeginInvoke(new Action(() => channel.FitToWindow()),
-                System.Windows.Threading.DispatcherPriority.Loaded);
+            // Synchronously: the control needs its parent back before the layout pass, or the fit
+            // below is computed against a pane that has no size yet.
+            pane?.ReattachDisplay();
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                channel.FitToWindow();
+                // The zoom the pane will map its ROI rectangle with. Recorded once per exit,
+                // because the whole failure was this number staying at the overlay's fit.
+                if (channel.TryGetViewGeometry(out int fw, out int fh, out double zoom, out double ox, out double oy))
+                    MilErrorLog.Note($"{channel.Name}: back from fullscreen - frame {fw}x{fh}, "
+                                   + $"zoom {zoom:F3}, offset {ox:F0},{oy:F0}");
+                else
+                    MilErrorLog.Note($"{channel.Name}: back from fullscreen - view geometry unreadable");
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
         private void ExitFullscreen_Click(object sender, RoutedEventArgs e) => ExitFullscreen();

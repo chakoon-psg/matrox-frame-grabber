@@ -37,6 +37,34 @@ namespace MatroxFrameGrabber.Views
 
         private CameraChannel Channel => DataContext as CameraChannel;
 
+        /// <summary>
+        /// Hands this pane's MIL display control to the fullscreen overlay.
+        ///
+        /// The control moves rather than a second one being created for the same DisplayId. MIL
+        /// keeps one zoom per display, so two controls bound to one display leave "fit to window"
+        /// with no way to know which window is meant: the pane came back from fullscreen still
+        /// scaled to the overlay — measured at zoom 1.011 where its own fit is 0.30 — and drew its
+        /// ROI rectangle off the surface as a result.
+        /// </summary>
+        public MILWPFDisplay DetachDisplay()
+        {
+            if (_display == null)
+                return null;
+            ViewContentGrid.Children.Remove(_display);
+            return _display;
+        }
+
+        /// <summary>
+        /// Takes the display control back. Does not refit: the caller does that once layout has
+        /// given this pane its size again, or the fit would be computed against nothing.
+        /// </summary>
+        public void ReattachDisplay()
+        {
+            if (_display == null || ViewContentGrid.Children.Contains(_display))
+                return;
+            ViewContentGrid.Children.Insert(0, _display);
+        }
+
         private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
             // Create the MIL display control only once a channel with a valid display id is
