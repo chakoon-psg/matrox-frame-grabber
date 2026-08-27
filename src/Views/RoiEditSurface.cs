@@ -26,6 +26,9 @@ namespace MatroxFrameGrabber.Views
         private const double GrabRadius = 7;
         private const double HandleSize = 8;
 
+        /// <summary>Below this the surface has no room to draw in — collapsing, or being torn down.</summary>
+        private const double MinDrawableSurface = 16;
+
         /// <summary>A press this short in either axis is a missed click, not a new rectangle.</summary>
         private const double MinNewDragPixels = 5;
 
@@ -240,6 +243,14 @@ namespace MatroxFrameGrabber.Views
         {
             if (_mode != DragMode.None)
                 return;     // a drag is showing its own candidate; don't fight it
+
+            // A surface nobody can see, or one with no room to draw in, is not worth reporting on.
+            // Panes stay in the tree while the fullscreen overlay is up, and a window being torn
+            // down passes through sizes like 654x2 on its way out. Neither is a fault, and saying
+            // so in the log makes the lines that are faults harder to find.
+            if (!_surface.IsVisible ||
+                _surface.ActualWidth < MinDrawableSurface || _surface.ActualHeight < MinDrawableSurface)
+                return;
             if (!TryMap(out DisplayMapping map, out ChannelRoi roi, out _, out _, out string reason))
             {
                 // Logged on the transition only, never per tick: a rectangle that stops drawing is
