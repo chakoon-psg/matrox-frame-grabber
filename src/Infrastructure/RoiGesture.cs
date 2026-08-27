@@ -26,14 +26,8 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public static class RoiGesture
     {
-        /// <summary>
-        /// Smallest rectangle a drag can produce, in image pixels.
-        ///
-        /// Not an arbitrary floor: the metrics reduce the region to an 8x8 tile grid, so this
-        /// leaves eight pixels per tile. Below that a tile's standard deviation is noise, and the
-        /// rectangle stops meaning anything even though it still draws.
-        /// </summary>
-        public const int MinSize = ChannelRoi.MinUsefulSize;
+        /// <summary>Smallest rectangle a drag can produce — see <see cref="ChannelRoi.MinEditableSize"/>.</summary>
+        public const int MinSize = ChannelRoi.MinEditableSize;
 
         /// <summary>
         /// The handle under a point, or <see cref="RoiHandle.Inside"/> / <see cref="RoiHandle.None"/>.

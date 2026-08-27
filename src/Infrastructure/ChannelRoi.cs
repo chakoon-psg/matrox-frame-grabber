@@ -24,13 +24,19 @@ namespace MatroxFrameGrabber.Infrastructure
         private const int CfaIncrement = 2;
 
         /// <summary>
-        /// Smallest region that still means something, in image pixels.
+        /// Smallest rectangle editing will produce, in image pixels.
         ///
-        /// The metrics reduce the region to an 8x8 tile grid, so this leaves eight pixels per tile.
-        /// Below it a tile's standard deviation is noise while the rectangle still draws — and on
-        /// screen it is smaller than its own drag handles, which reads as the ROI having vanished.
+        /// This is a limit of the editing surface, not of the measurement. Below roughly this size
+        /// the rectangle is smaller than one of its own drag handles, so the corners stop being
+        /// distinguishable and it cannot be grabbed again — and an unattended rescale can walk it
+        /// down to nothing without anyone asking.
+        ///
+        /// It was 64, on the grounds that an 8x8 tile grid wants eight pixels per tile. That is a
+        /// statement about the metrics, which do not exist yet and can say so themselves; it had no
+        /// business overruling the operator about which pixels to measure. How small a region is
+        /// worth analysing belongs to whatever analyses it.
         /// </summary>
-        public const int MinUsefulSize = 64;
+        public const int MinEditableSize = 16;
 
         /// <summary>
         /// Measured host DMA ceiling, shared across channels (research.md section 8).
@@ -122,8 +128,8 @@ namespace MatroxFrameGrabber.Infrastructure
             return new ChannelRoi(
                 RoundDown(OffsetX * fromDecimation / toDecimation, CfaIncrement),
                 RoundDown(OffsetY * fromDecimation / toDecimation, CfaIncrement),
-                Math.Max(MinUsefulSize, RoundDown(Width * fromDecimation / toDecimation, CfaIncrement)),
-                Math.Max(MinUsefulSize, RoundDown(Height * fromDecimation / toDecimation, CfaIncrement)));
+                Math.Max(MinEditableSize, RoundDown(Width * fromDecimation / toDecimation, CfaIncrement)),
+                Math.Max(MinEditableSize, RoundDown(Height * fromDecimation / toDecimation, CfaIncrement)));
         }
 
         /// <summary>

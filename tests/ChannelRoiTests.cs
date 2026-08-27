@@ -194,7 +194,7 @@ namespace MatroxFrameGrabber.Tests
 
 
         [Fact]
-        public void Rescale_WillNotShrinkBelowTheUsefulMinimum()
+        public void Rescale_WillNotShrinkBelowTheEditableMinimum()
         {
             // Halving on every decimation change, with no floor, drove a field rectangle from
             // 504x308 down to 46x26 over a few toggles — a few pixels on screen, smaller than its
@@ -204,8 +204,8 @@ namespace MatroxFrameGrabber.Tests
 
             var shrunk = roi.Rescale(1, 2).Rescale(1, 2).Rescale(1, 2);
 
-            Assert.True(shrunk.Width >= ChannelRoi.MinUsefulSize, $"width {shrunk.Width}");
-            Assert.True(shrunk.Height >= ChannelRoi.MinUsefulSize, $"height {shrunk.Height}");
+            Assert.True(shrunk.Width >= ChannelRoi.MinEditableSize, $"width {shrunk.Width}");
+            Assert.True(shrunk.Height >= ChannelRoi.MinEditableSize, $"height {shrunk.Height}");
         }
 
         [Fact]
