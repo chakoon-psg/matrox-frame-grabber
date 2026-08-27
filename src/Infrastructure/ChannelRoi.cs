@@ -23,11 +23,19 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Bayer CFA phase floor: an odd offset or size swaps the colours.</summary>
         private const int CfaIncrement = 2;
 
-        /// <summary>Measured host DMA ceiling shared across channels (research.md section 8).</summary>
-        public const double HostDmaCeilingBytesPerSecond = 1.7e9;
+        /// <summary>
+        /// Measured host DMA ceiling, shared across channels (research.md section 8).
+        ///
+        /// 2026-08-27: 1.7 → 3.68 GB/s, after moving the board out of the chipset's x4 slot into
+        /// the CPU-attached x16 one. The link was the ceiling all along — Gen2 x4 carries 2.0 GB/s
+        /// in theory and the board measured 1.7; at x8 it measured 3.68 against a theoretical 4.0.
+        /// Both are now at the board's maximum: MaxLinkSpeed is Gen2 and MaxLinkWidth is 8, so
+        /// this number cannot be raised again without a different board.
+        /// </summary>
+        public const double HostDmaCeilingBytesPerSecond = 3.68e9;
 
         /// <summary>80% of the ceiling — above this the UI warns rather than silently dropping frames.</summary>
-        public const double WarnBytesPerSecond = 1.36e9;
+        public const double WarnBytesPerSecond = 2.94e9;
 
         public ChannelRoi(int offsetX, int offsetY, int width, int height)
         {

@@ -91,6 +91,16 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
+        public void MeasuredCeiling_NowAcceptsThreeFullFrameColourChannelsAt100Fps()
+        {
+            // What the x8 slot bought. At x4 this was 2.87 GB/s against a 1.7 ceiling — the
+            // configuration the whole decimation and 1-band argument existed to avoid.
+            double load = 3 * 100.0 * ChannelRoi.FullFrame.BytesPerFrame(3, MaxW, MaxH);
+            Assert.True(load < ChannelRoi.HostDmaCeilingBytesPerSecond,
+                $"expected under the ceiling, got {load / 1e9:F2} GB/s");
+        }
+
+        [Fact]
         public void MeasuredCeiling_AcceptsQuarterAreaColourAt184Fps()
         {
             var roi = new ChannelRoi(0, 0, 1030, 770);
