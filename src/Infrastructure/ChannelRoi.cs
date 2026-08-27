@@ -24,6 +24,15 @@ namespace MatroxFrameGrabber.Infrastructure
         private const int CfaIncrement = 2;
 
         /// <summary>
+        /// Smallest region that still means something, in image pixels.
+        ///
+        /// The metrics reduce the region to an 8x8 tile grid, so this leaves eight pixels per tile.
+        /// Below it a tile's standard deviation is noise while the rectangle still draws — and on
+        /// screen it is smaller than its own drag handles, which reads as the ROI having vanished.
+        /// </summary>
+        public const int MinUsefulSize = 64;
+
+        /// <summary>
         /// Measured host DMA ceiling, shared across channels (research.md section 8).
         ///
         /// 2026-08-27: 1.7 → 3.68 GB/s, after moving the board out of the chipset's x4 slot into
@@ -107,11 +116,14 @@ namespace MatroxFrameGrabber.Infrastructure
                 ClampDecimation(toDecimation) != toDecimation)
                 return this;
 
+            // Floored, because halving has no natural stop: toggling decimation a few times drove a
+            // field rectangle from 504x308 to 46x26, and nothing said so. Below the minimum the
+            // region means nothing anyway, so keeping the size costs nothing and keeps it visible.
             return new ChannelRoi(
                 RoundDown(OffsetX * fromDecimation / toDecimation, CfaIncrement),
                 RoundDown(OffsetY * fromDecimation / toDecimation, CfaIncrement),
-                RoundDown(Width * fromDecimation / toDecimation, CfaIncrement),
-                RoundDown(Height * fromDecimation / toDecimation, CfaIncrement));
+                Math.Max(MinUsefulSize, RoundDown(Width * fromDecimation / toDecimation, CfaIncrement)),
+                Math.Max(MinUsefulSize, RoundDown(Height * fromDecimation / toDecimation, CfaIncrement)));
         }
 
         /// <summary>

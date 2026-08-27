@@ -192,6 +192,31 @@ namespace MatroxFrameGrabber.Tests
             Assert.Equal(original.Height, roundTrip.Height);
         }
 
+
+        [Fact]
+        public void Rescale_WillNotShrinkBelowTheUsefulMinimum()
+        {
+            // Halving on every decimation change, with no floor, drove a field rectangle from
+            // 504x308 down to 46x26 over a few toggles — a few pixels on screen, smaller than its
+            // own handles, and read as "the ROI disappeared". Drags stop at the minimum; rescaling
+            // has to as well.
+            var roi = new ChannelRoi(100, 100, 96, 96);
+
+            var shrunk = roi.Rescale(1, 2).Rescale(1, 2).Rescale(1, 2);
+
+            Assert.True(shrunk.Width >= ChannelRoi.MinUsefulSize, $"width {shrunk.Width}");
+            Assert.True(shrunk.Height >= ChannelRoi.MinUsefulSize, $"height {shrunk.Height}");
+        }
+
+        [Fact]
+        public void Rescale_StillGrowsFreely()
+        {
+            // The floor must not interfere with the direction that makes the rectangle bigger.
+            var grown = new ChannelRoi(100, 100, 96, 96).Rescale(2, 1);
+
+            Assert.Equal(192, grown.Width);
+            Assert.Equal(200, grown.OffsetX);
+        }
         [Fact]
         public void Rescale_ToTheSameFactorChangesNothing()
         {

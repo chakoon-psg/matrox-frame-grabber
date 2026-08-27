@@ -33,7 +33,7 @@ namespace MatroxFrameGrabber.Infrastructure
         /// leaves eight pixels per tile. Below that a tile's standard deviation is noise, and the
         /// rectangle stops meaning anything even though it still draws.
         /// </summary>
-        public const int MinSize = 64;
+        public const int MinSize = ChannelRoi.MinUsefulSize;
 
         /// <summary>
         /// The handle under a point, or <see cref="RoiHandle.Inside"/> / <see cref="RoiHandle.None"/>.
