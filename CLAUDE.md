@@ -169,11 +169,15 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `DecimationHorizontal` / `Vertical`이며, 이쪽은 같은 할당된 digitizer에서 정상 동작한다
   (실측: decimation 2 → 1024×772 컬러 184.1 fps, 유실 0).
   **지오메트리 피처를 쓴 뒤에는 반드시 다시 읽어 확인할 것.** 반환값만 믿으면 안 된다.
-  2026-08-21에 이유가 확인됐다: `M_FEATURE_ACCESS_MODE`가 네 노드 모두 **`M_FEATURE_READ_ONLY`**
-  (4)로 답한다. 같은 조회에서 decimation은 `M_FEATURE_READ_WRITE`(5)다. 즉 추측이 아니라
-  카메라가 스스로 못 쓴다고 말한다 — 이 값은 앱 시작 때마다 `mil-errors.log`에 찍힌다.
-  주의: 이 확인은 **decimation 2가 걸린 상태**에서 한 것이다. 일부 카메라는 decimation이
-  영역을 지배하면 `Width`를 read-only로 바꾼다 — decimation 1에서도 RO인지는 아직 확인되지 않았다.
+  **access mode는 이 실패를 설명하지 못한다 — 2026-08-27에 그 추론을 철회했다.**
+  `M_FEATURE_ACCESS_MODE`는 **decimation에 따라 답이 바뀐다**: decimation 2에서 네 노드가
+  `M_FEATURE_READ_ONLY`(4)이고, decimation 1에서는 `M_FEATURE_READ_WRITE`(5)다. 그런데 크롭이
+  무시된 그 측정은 `Width`가 2064였을 때, 즉 **decimation 1에서** 한 것이다 — 노드가 RW라고
+  답하는 바로 그 조건이다. 08-21에 "카메라가 스스로 못 쓴다고 말한다"고 적은 것은 decimation 2에서
+  읽은 값을 다른 조건의 실패에 갖다 붙인 것이었다.
+  남는 사실은 처음 그대로다 — **RW라고 답하는 상태에서도 쓰기가 무시된다.** 그래서 read-back
+  규칙이 오히려 더 중요해진다: 반환값도, access mode도 믿을 수 없다. 값은 앱 시작 때마다
+  `mil-errors.log`에 찍히니 지금 어느 상태인지는 거기서 볼 것.
 - **실제 하드웨어 증분은 2가 아니다.** 이 카메라는 `Width` 증분 **16**, `Height` 증분 **4**를
   보고한다. 짝수 가정만으로 계산하면 격자에서 벗어난다 — `M_FEATURE_INCREMENT`를 조회할 것.
 - **앱을 강제 종료하면 카메라의 지오메트리 노드가 잠긴다.** 작업 관리자 종료, 디버거 중단,

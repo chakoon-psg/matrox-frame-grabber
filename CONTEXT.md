@@ -72,9 +72,10 @@ _피할 말_: 디베이어, 디모자이크, 컬러 변환
 **Acquisition ROI**
 센서가 실제로 읽어내는 화소 범위(`OffsetX` / `OffsetY` / `Width` / `Height`). 페이로드가 이것에
 비례해 줄어드는 이유는 받은 이미지를 잘라내기 때문이 아니라 **애초에 그만큼만 읽기** 때문이다
-(벤더 문서의 windowing · partial readout이 같은 것을 가리킨다). **이 카메라는 이 네 노드를
-read-only로 구현했다** — 2026-08-21에 `M_FEATURE_ACCESS_MODE`로 확인했다(decimation은 같은
-자리에서 RW로 보고된다). 쓰기가 예외도 오류도 없이 통과하는 것은 그것과 별개의 함정이다.
+(벤더 문서의 windowing · partial readout이 같은 것을 가리킨다). **이 카메라는 이 쓰기를 받아들이고
+무시한다** — 값이 그대로인 것을 read-back으로 확인했다. `M_FEATURE_ACCESS_MODE`는 이것을 설명하지
+못한다: decimation 2에서는 네 노드가 read-only로, decimation 1에서는 read-write로 답하는데,
+무시된 그 쓰기는 read-write라고 답하는 조건에서 한 것이다.
 
 Analysis ROI와 이름이 겹치므로 **어느 쪽인지 반드시 붙여서 말한다** — 둘은 층도 효과도 다르다.
 취득 ROI는 대역폭을 줄이고, 분석 ROI는 판정 품질을 올린다.

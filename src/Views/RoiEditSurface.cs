@@ -35,7 +35,10 @@ namespace MatroxFrameGrabber.Views
         private readonly Panel _overlay;
         private readonly string _label;
         private readonly Func<CameraChannel> _channel;
-        private bool _hidden = true;   // so the first successful draw is not logged as a change
+        // null means "drawing". The initial value is neither null nor any real reason, so whatever
+        // the first evaluation concludes gets recorded — a surface that never manages to draw at
+        // all used to be silent, which is exactly the case that needed explaining.
+        private string _hiddenReason = "(not evaluated yet)";
         private bool _offSurface;
         private readonly Rectangle _rect;
         private readonly Rectangle _newRect;
@@ -241,9 +244,11 @@ namespace MatroxFrameGrabber.Views
             {
                 // Logged on the transition only, never per tick: a rectangle that stops drawing is
                 // invisible by definition, so the reason has to be recorded when it happens.
-                if (!_hidden)
-                    MilErrorLog.Note($"{Who()} ROI rectangle hidden - {reason}");
-                _hidden = true;
+                if (_hiddenReason != reason)
+                {
+                    MilErrorLog.Note($"{Who()} ROI rectangle not drawn - {reason}");
+                    _hiddenReason = reason;
+                }
                 Hide();
                 return;
             }
@@ -251,13 +256,19 @@ namespace MatroxFrameGrabber.Views
             // worth a log line.
             if (roi.IsFullFrame)
             {
-                _hidden = true;
+                if (_hiddenReason != "full frame")
+                {
+                    MilErrorLog.Note($"{Who()} ROI rectangle not drawn - full frame, nothing to draw");
+                    _hiddenReason = "full frame";
+                }
                 Hide();
                 return;
             }
-            if (_hidden)
-                MilErrorLog.Note($"{Who()} ROI rectangle drawing again");
-            _hidden = false;
+            if (_hiddenReason != null)
+            {
+                MilErrorLog.Note($"{Who()} ROI rectangle drawing");
+                _hiddenReason = null;
+            }
             Draw(roi, map);
         }
 
