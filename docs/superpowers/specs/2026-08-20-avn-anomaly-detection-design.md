@@ -200,17 +200,23 @@ running_median뿐이다. 프레임 버퍼는 하나도 더 붙들지 않는다.
 유도된 값이 아니었다. 요구에서 다시 유도하면 사슬이 이렇게 묶인다.
 
 ```
-PWM 주파수 → 소거 노출 T = k/f_pwm → 최대 fps = 1/(T + 45 µs) → 카메라 상한 184
+PWM 주파수 → 플리커 프리 노출 시간 T = k/f_pwm → 최대 fps = 1/(T + 45 µs) → 카메라 상한 184
              (flicker-free exposure time)
 ```
 
 **노출과 fps는 독립적으로 고를 수 없다.** 백라이트 PWM 리플을 소거하려면 노출이 PWM 주기의
 정수배여야 하는데(박스 적분의 `|sinc(pi*f*T)|`가 `f*T` 정수에서 0), 그 노출이 곧 fps 상한이다.
 
-용어를 고정한다 — **소거 노출의 원문은 `flicker-free exposure time`**이고, 그것이 동작하는 기제는
+용어를 고정한다 — **플리커 프리 노출 시간**(`flicker-free exposure time`)이 표준 표현이고, 기제는
 노출을 사각 창으로 보는 **`box integration`**, 그 응답이 0이 되는 지점이 **`sinc null`**이다.
 카메라 제조사의 `Anti-Flicker` / `Flicker Reduction` 기능이 같은 원리지만 전원 주파수(50/60 Hz)
-전용이라 임의의 백라이트 PWM에는 쓸 수 없다. 정의는 CONTEXT.md의 `Flicker-free exposure` 참고.
+전용이라 임의의 백라이트 PWM에는 쓸 수 없다 — **이 카메라에는 그런 노드가 아예 없다**(GenICam
+XML 513개 피처 확인. `AcquisitionControl`에 노출·트리거·레이트뿐이다). 따라서 스윕을 건너뛸
+길은 없다.
+
+**주의: 여기의 "플리커"는 이 문서의 `Flicker`가 아니다.** `Flicker`는 검출 대상인 이상이고,
+이 노출이 없애는 것은 정상 동작인 백라이트 PWM의 가짜 깜박임이다. 업계 표준 용어가 하필 같은
+낱말을 쓸 뿐이다. 정의는 CONTEXT.md의 `Flicker-free exposure time` 항목.
 
 | PWM | 쓸 수 있는 노출 | 그때 fps |
 |---|---|---|
