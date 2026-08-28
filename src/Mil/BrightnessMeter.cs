@@ -29,6 +29,9 @@ namespace MatroxFrameGrabber.Mil
         private byte[] _r, _g, _b;
         private int _stripBytes;
 
+        /// <summary>Whether the current <see cref="Sample"/> call got as far as appending.</summary>
+        private bool _appended;
+
         public BrightnessHistory History { get; } = new BrightnessHistory();
 
         /// <summary>Wall time the last <see cref="Sample"/> took, for the 500 ms budget check.</summary>
@@ -44,11 +47,16 @@ namespace MatroxFrameGrabber.Mil
         ///
         /// Does nothing when the buffer is unbound. Never throws: a MIL failure here must not cost
         /// the caller its stats tick.
+        ///
+        /// Returns whether a reading was actually appended. The stats tick ignores that, but the
+        /// PWM sweep must not mistake a skipped reading for a repeated one.
         /// </summary>
-        public void Sample(MIL_ID displayBuffer, ChannelRoi roi)
+        public bool Sample(MIL_ID displayBuffer, ChannelRoi roi)
         {
             if (displayBuffer == MIL.M_NULL)
-                return;
+                return false;
+
+            _appended = false;
 
             var watch = Stopwatch.StartNew();
             try
@@ -60,7 +68,7 @@ namespace MatroxFrameGrabber.Mil
                 BrightnessSampleRegion region =
                     BrightnessSamplePlan.For(roi, (int)width, (int)height);
                 if (region.IsEmpty)
-                    return;
+                    return false;
 
                 // The display buffer's bit depth follows the camera (CameraChannel applies
                 // M_BIT_SHIFT for anything over 8 bits). Sampling raw bytes from a >8-bit buffer
@@ -68,7 +76,7 @@ namespace MatroxFrameGrabber.Mil
                 // a permanent false-saturation warning. A blank graph is more honest than that.
                 MIL_INT sizeBit = MIL.MbufInquire(displayBuffer, MIL.M_SIZE_BIT, MIL.M_NULL);
                 if (sizeBit > 8)
-                    return;   // deeper buffers would need a ushort path; a blank graph beats a fabricated one
+                    return false;  // deeper buffers would need a ushort path; a blank graph beats a fabricated one
 
                 EnsureBuffers(region.Width);
 
@@ -90,6 +98,8 @@ namespace MatroxFrameGrabber.Mil
             {
                 LastSampleMs = watch.Elapsed.TotalMilliseconds;
             }
+
+            return _appended;
         }
 
         public void Reset() => History.Clear();
@@ -193,6 +203,7 @@ namespace MatroxFrameGrabber.Mil
                 (float)(100.0 * clipped / counted),
                 (float)(100.0 * black / counted)));
             ConsecutiveFailures = 0;
+            _appended = true;
         }
     }
 }

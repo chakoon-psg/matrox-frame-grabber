@@ -246,6 +246,41 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>This channel's brightness readings, appended on each stats tick.</summary>
         public BrightnessHistory Brightness => _brightness.History;
 
+        /// <summary>
+        /// Takes one brightness reading right now and returns it, instead of waiting for the stats
+        /// tick. Only the PWM sweep uses this: the sweep needs the spread of readings at each
+        /// exposure, and thirty samples in fifteen seconds understates a spread that hundreds
+        /// would show. Returns false when there is nothing to read.
+        ///
+        /// This appends to the same history the graph draws, which is why it is not on the normal
+        /// path — during an unattended sweep there is no graph to disturb.
+        /// </summary>
+        public bool TrySampleBrightnessNow(out BrightnessSample sample)
+        {
+            // The return value, not the history count: once the ring buffer is full the count stops
+            // moving, and Latest would hand back the previous reading — the sweep would then
+            // average a value it never measured.
+            if (!_brightness.Sample(_dispBufId, _analysisRoi))
+            {
+                sample = default;
+                return false;
+            }
+
+            sample = _brightness.History.Latest;
+            return true;
+        }
+
+        /// <summary>Sets the exposure directly, for the unattended sweep. Reads back afterwards.</summary>
+        public bool SetExposureUs(double us)
+        {
+            if (!_supportsExposure)
+                return false;
+
+            bool ok = SetFeatureDouble(F_EXPOSURE_TIME, us);
+            RefreshExposureReadback();
+            return ok;
+        }
+
         /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
         public double LastBrightnessSampleMs => _brightness.LastSampleMs;
 
