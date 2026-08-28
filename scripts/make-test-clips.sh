@@ -84,7 +84,54 @@ blank_clip "blank-1frame.mp4" 1
 blank_clip "blank-2frame.mp4" 2
 blank_clip "blank-5frame.mp4" 5
 
-# ---- 5. The negative test ----
+# ---- 5. The depth staircase ----
+# The threshold is on depth, not on duration. From the detector's side a 0.5 ms blackout and a
+# frame that is 10% dimmer are the same event — both are "brightness fell by a tenth" — so the
+# sensitivity floor can be probed by varying how dark the dip goes, on an ordinary 60 Hz monitor,
+# with no LED and no high-refresh panel.
+#
+# The dip codes are not the depths. A monitor applies a gamma curve and the camera sensor is
+# linear, so a code ratio of 0.9 arrives as roughly 0.9^2.2 = 0.79 of the light. The codes below
+# are chosen to land either side of a 0.10 threshold once that curve is accounted for, but the
+# figure that matters is the one the app measures — see the README.
+DEPTH_CODES=(100 110 116 120 123 125 126 127)
+DEPTH_PASSES=4
+
+depth_clip() {
+  local name="depth-staircase.mp4"
+  local steps=${#DEPTH_CODES[@]}
+  local events=$((steps * DEPTH_PASSES))
+  local frames=$((LEADIN + events * PERIOD))
+  local dur; dur=$(awk -v f="$frames" -v r="$FPS" 'BEGIN{printf "%.4f", f/r}')
+
+  # One drawbox per step, each firing only on the event frames whose index falls on that step.
+  local vf="" s code hex
+  for s in $(seq 0 $((steps - 1))); do
+    code=${DEPTH_CODES[$s]}
+    hex=$(printf '0x%02x%02x%02x' "$code" "$code" "$code")
+    [ -n "$vf" ] && vf="$vf,"
+    vf="${vf}drawbox=x=0:y=0:w=iw:h=ih:color=${hex}@1:t=fill:enable='gte(n\\,${LEADIN})*eq(mod(n-${LEADIN}\\,${PERIOD})\\,0)*eq(mod(floor((n-${LEADIN})/${PERIOD})\\,${steps})\\,${s})'"
+  done
+
+  echo "  $name — ${steps}단계 x ${DEPTH_PASSES}회 = ${events}개 사건"
+  # No -color_range override. Tagging this clip differently from the others made its grey decode to
+  # a different level, which would have the operator re-setting the aperture between clips — and an
+  # aperture change mid-session invalidates the comparison the clips exist to make.
+  "$FFMPEG" -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=${GREY}:s=${W}x${H}:r=${FPS}:d=${dur}" \
+    -vf "$vf" "${ENC[@]}" "$OUT/$name"
+}
+
+# probe_y FILE FRAME — the luma one frame decodes to. scale=1:1 averages the (flat) frame.
+probe_y() {
+  "$FFMPEG" -hide_banner -loglevel error -i "$1" \
+    -vf "select='eq(n\,$2)',scale=1:1" -fps_mode passthrough \
+    -f rawvideo -pix_fmt gray - 2>/dev/null | od -An -tu1 | tr -d ' \n'
+}
+
+depth_clip
+
+# ---- 6. The negative test ----
 # A bright box crossing a grey field. Brightness inside individual tiles swings hard, but the tiles
 # disagree about which way — which is exactly what the spatial coherence gate exists to reject.
 # A detector that fires on this would fire on any animation an AVN plays.
@@ -99,6 +146,21 @@ FIRST_S=$(awk -v l="$LEADIN" -v f="$FPS" 'BEGIN{printf "%.2f", l/f}')
 GAP_S=$(awk -v p="$PERIOD" -v f="$FPS" 'BEGIN{printf "%.2f", p/f}')
 COUNT=$(awk -v d="$DUR" -v f="$FPS" -v l="$LEADIN" -v p="$PERIOD" \
   'BEGIN{print int((d*f - l - 1)/p) + 1}')
+
+# ---- Measure what the staircase actually encoded, rather than repeating the nominal codes ----
+# yuv420p and the encoder both move the values a little, and the shallow steps are only a level or
+# two apart — close enough to the quantiser that assuming the nominal code would misreport which
+# step is which.
+DEPTH_STEPS=${#DEPTH_CODES[@]}
+DEPTH_EVENTS=$((DEPTH_STEPS * DEPTH_PASSES))
+DEPTH_BASE=$(probe_y "$OUT/depth-staircase.mp4" 100)
+DEPTH_TABLE=""
+for s in $(seq 0 $((DEPTH_STEPS - 1))); do
+  y=$(probe_y "$OUT/depth-staircase.mp4" $((LEADIN + s * PERIOD)))
+  DEPTH_TABLE="${DEPTH_TABLE}$(awk -v n=$((s+1)) -v c="${DEPTH_CODES[$s]}" -v y="$y" -v b="$DEPTH_BASE" \
+    'BEGIN{ printf "| %d | %d | %d | %.3f | %.3f |", n, c, y, 1-y/b, 1-(y/b)^2.2 }')
+"
+done
 
 cat > "$OUT/README.md" <<EOF
 # 검지 검증용 시험 영상
@@ -117,9 +179,35 @@ cat > "$OUT/README.md" <<EOF
 | \`blank-2frame.mp4\` | 33.3 ms | ${FIRST_S}s | ${GAP_S}s | ${COUNT} | ${COUNT}회, depth ≈ 1.0 |
 | \`blank-5frame.mp4\` | 83.3 ms | ${FIRST_S}s | ${GAP_S}s | ${COUNT} | ${COUNT}회, depth ≈ 1.0 |
 | \`motion-reject.mp4\` | 없음 | — | — | 0 | **검출 0** (coh 게이트가 걸러야 함) |
+| \`depth-staircase.mp4\` | 16.7 ms | ${FIRST_S}s | ${GAP_S}s | ${DEPTH_EVENTS} | 아래 표 참조 |
 
 사건은 프레임 ${LEADIN}부터 ${PERIOD}프레임마다 시작한다. 앞 ${FIRST_S}초는 노출이 안정될
 시간이자, 측정 전에 luma와 clip을 확인할 구간이다.
+
+## depth 계단
+
+\`depth-staircase.mp4\`는 소등 대신 **한 프레임만 조금 어둡게** 한다. 검지기의 임계는 지속시간이
+아니라 depth에 걸려 있고, 검지기가 보기에 "0.5 ms 완전 소등"과 "한 프레임이 10% 어두움"은
+같은 사건이다 — 둘 다 "밝기가 10분의 1 떨어졌다"이다. 그래서 평범한 60 Hz 모니터로,
+LED도 고주사율 패널도 없이 감도 바닥을 훑을 수 있다.
+
+단계는 ${DEPTH_PASSES}회 반복된다. 사건 k번째(1부터)의 단계는 \`((k-1) mod ${DEPTH_STEPS}) + 1\`.
+
+| 단계 | 코드 | 디코드 Y | 코드 depth | 빛 depth (추정) |
+|---|---|---|---|---|
+${DEPTH_TABLE}
+
+- **디코드 Y**는 이 스크립트가 생성 직후 실제로 측정한 값이다(기준 회색 = ${DEPTH_BASE}).
+- **빛 depth**는 모니터 감마를 2.2로 가정한 *추정치*다. 실제 감마는 모니터마다 다르다.
+- **믿을 값은 앱이 재는 luma다.** 기준 구간의 luma와 딥의 luma 비가 검지기가 실제로 보는
+  depth이고, 임계는 거기에 맞춰 정한다. 위 표는 어느 단계가 더 깊은지의 순서일 뿐이다.
+
+### 쓰는 법
+
+검출된 사건이 몇 번째 단계까지 내려가는지 센다. 예를 들어 1~6단계가 검출되고 7·8단계가
+안 잡히면, 감도 바닥은 6단계와 7단계 사이에 있다. 그 값을 \`control-steady.mp4\`에서 나온
+오검출 바닥과 비교한다 — 둘 사이가 임계를 놓을 수 있는 구간이고, 그 구간이 좁거나 뒤집혀
+있으면 지금 광학·노출로는 그 깊이를 분간할 수 없다는 뜻이다.
 
 ## 쓰는 법
 
