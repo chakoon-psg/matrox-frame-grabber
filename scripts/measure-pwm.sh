@@ -244,16 +244,20 @@ write_env PWM_CHANNEL "$PWM_CHANNEL"
 pause
 
 # ── 2 ────────────────────────────────────────────────────────────────────
-stage "광학 — 패널이 프레임을 채우고, 포화되지 않아야 합니다"
-warn "분석 ROI는 아직 밝기 측정에 반영되지 않습니다 (오버레이만 그려집니다)."
-warn "따라서 배경을 제외하는 일은 소프트웨어가 아니라 카메라 프레이밍으로 해야 합니다."
+stage "광학 — ROI가 패널만 덮고, 포화되지 않아야 합니다"
+say "밝기는 분석 ROI 안에서만 측정됩니다. ROI를 그리지 않으면 화면 전체가 대상입니다."
 step "AVN 패널에 정지 화면을 띄웁니다 — 애니메이션, 영상, 지도 이동이 없어야 합니다."
 note "콘텐츠가 움직이면 그 변화가 리플보다 커져서 측정이 불가능합니다."
-step "패널이 화면(프레임)을 최대한 채우도록 카메라를 맞춥니다. 주변 배경을 최소화합니다."
+step "패널 화면 안쪽에 ROI 사각형을 드래그해 그립니다. 베젤과 배경이 들어가지 않게 합니다."
+note "배경이 섞이면 리플이 희석됩니다 — 패널이 프레임의 절반이면 리플도 절반으로 보입니다."
+note "가장자리를 조금 안쪽으로 잡으십시오. 베젤 경계는 반사광이 강해 값을 흔듭니다."
 step "범례의 luma 가 60~180 범위에 오도록 조리개 또는 패널 밝기를 맞춥니다."
 step "범례의 clip 이 0.0% 인지 확인합니다."
 note "포화(clip>0)된 화소는 리플이 255에서 잘려 없어집니다 — 가짜 null의 가장 흔한 원인입니다."
 say ""
+ask PWM_ROI "pane 의 ROI 칸 X/Y/W/H 를 그대로 (없으면 'full'):"
+write_env PWM_ROI "$PWM_ROI"
+note "이 값이 기록에 남아야 나중에 같은 영역에서 다시 잴 수 있습니다."
 ask PWM_PANEL_BRIGHTNESS "패널 밝기 설정값 (예: 50% / 최대 / 불명):"
 write_env PWM_PANEL_BRIGHTNESS "$PWM_PANEL_BRIGHTNESS"
 note "패널을 어둡게 하면 PWM 듀티가 짧아져 리플이 커집니다. 어느 밝기에서 재는지가 기록에 남아야 합니다."
@@ -399,9 +403,10 @@ cat > "$REPORT" <<REPORT_EOF
 
 측정일: $(date +%Y-%m-%d)
 채널: ${PWM_CHANNEL}
+분석 ROI: ${PWM_ROI}
 패널 밝기: ${PWM_PANEL_BRIGHTNESS}
 실내 조명: ${PWM_ROOM_LIGHT}
-설정: Decim 2, 자동 노출 OFF, 자동 WB OFF, Acq Rate Limit OFF, 측정 채널만 grab
+설정: 자동 노출 OFF, 자동 WB OFF, Acq Rate Limit OFF, 측정 채널만 grab
 
 ## 패널 (정지 화면)
 

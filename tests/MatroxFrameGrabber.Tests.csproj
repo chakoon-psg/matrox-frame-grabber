@@ -17,6 +17,7 @@
     <Compile Include="..\src\Infrastructure\ChannelRoi.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\DisplayMapping.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\RoiGesture.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\BrightnessSamplePlan.cs" LinkBase="Included" />
   </ItemGroup>
 
   <ItemGroup>

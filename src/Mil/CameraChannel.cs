@@ -899,8 +899,11 @@ namespace MatroxFrameGrabber.Mil
                 // Brightness is measured here, on the stats tick, and never in the grab hook:
                 // anything added to MdigProcess runs inside the acquisition budget. Still gated by
                 // BrightnessEnabled so the cost can be switched off when measuring frames missed.
+                // Measured inside the analysis ROI, or over the whole frame when none is drawn.
+                // _analysisRoi and the display buffer are in the same space — both are in pixels of
+                // the acquired, already-decimated frame — so no conversion belongs here.
                 if (BrightnessEnabled)
-                    _brightness.Sample(_dispBufId);
+                    _brightness.Sample(_dispBufId, _analysisRoi);
 
                 // Frames the board dropped because the host could not take them fast enough.
                 // Read on every tick, not only while RAW-recording: this is the acceptance
