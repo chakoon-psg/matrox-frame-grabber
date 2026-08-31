@@ -1295,6 +1295,31 @@ namespace MatroxFrameGrabber.Mil
         /// finishes; ok=false carries an error message.</summary>
         public event Action<CameraChannel, bool, string> RawRecordingFinished;
 
+        /// <summary>
+        /// Reads back the board's Bayer conversion state for this channel, as "on"/"off", or "?"
+        /// when it cannot be read.
+        ///
+        /// This exists to settle whether the setting is per-digitizer or board-wide. The API takes
+        /// a digitizer, which suggests per-channel, and the app's own RAW recording turns it off for
+        /// one channel while the others keep their colour — but nobody has ever read one channel
+        /// after writing another, and an architecture that splits the channels across processes
+        /// stands or falls on the answer.
+        /// </summary>
+        public string BayerConversionState()
+        {
+            if (_digId == MIL.M_NULL) return "-";
+            try
+            {
+                MIL_INT v = 0;
+                MIL.MdigInquire(_digId, MIL.M_BAYER_CONVERSION, ref v);
+                return v == MIL.M_DISABLE ? "off" : v == MIL.M_ENABLE ? "on" : $"?({v})";
+            }
+            catch (MILException) { return "?"; }
+        }
+
+        /// <summary>Sets Bayer conversion from outside, for the scope diagnostic.</summary>
+        public bool SetBayerConversionForDiagnostic(bool enable) => SetBayerConversion(enable);
+
         /// <summary>Enables/disables the board's hardware Bayer→RGB conversion (disabled = raw band=1).</summary>
         private bool SetBayerConversion(bool enable)
         {

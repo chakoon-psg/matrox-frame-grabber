@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -135,10 +136,63 @@ namespace MatroxFrameGrabber.Views
                 return;
             }
 
-            if (App.PwmSweeping)
+            // Decimation before anything grabs: it reallocates buffers, and the point of setting it
+            // from the command line is to measure a payload the operator would otherwise have to
+            // dial in by hand on every process of a split run.
+            if (App.StartupDecimation > 0 && _viewModel != null)
+            {
+                foreach (CameraChannel c in _viewModel.Channels)
+                    if (c.CameraPresent)
+                        c.ApplyDecimation(App.StartupDecimation);
+                MilErrorLog.Note($"startup decimation {App.StartupDecimation} applied");
+            }
+
+            if (App.BayerScopeTest)
+                RunBayerScopeTest();
+            else if (App.PwmSweeping)
                 BeginPwmSweep(App.PwmSweepChannel, App.PwmSweepRoom);
             else if (App.Unattended)
                 BeginAutoRun(App.AutoRunSeconds);
+        }
+
+        /// <summary>
+        /// Answers whether M_BAYER_CONVERSION is per-digitizer or board-wide, by disabling it on one
+        /// channel and reading every channel back.
+        ///
+        /// The answer decides whether the channels can be split across processes. Per-digitizer, each
+        /// process owns its own and nothing is shared. Board-wide, it becomes mutable state with no
+        /// owner, and one process starting a RAW recording would corrupt the others' colour — which
+        /// is the single strongest argument against splitting.
+        ///
+        /// It puts the setting back before exiting. The value persists on the board across restarts,
+        /// so leaving it off would quietly change what every later run sees.
+        /// </summary>
+        private void RunBayerScopeTest()
+        {
+            if (_viewModel == null) { Close(); return; }
+
+            void Report(string when) =>
+                MilErrorLog.Note("bayer-scope " + when + ": " + string.Join("  ",
+                    _viewModel.Channels.Select(c => $"{c.Name}={c.BayerConversionState()}")));
+
+            Report("before      ");
+
+            CameraChannel target = _viewModel.Channels.FirstOrDefault(c => c.CameraPresent);
+            if (target == null)
+            {
+                MilErrorLog.Note("bayer-scope: no camera present - nothing to test");
+                Close();
+                return;
+            }
+
+            MilErrorLog.Note($"bayer-scope: disabling on {target.Name} only");
+            target.SetBayerConversionForDiagnostic(false);
+            Report("after disable");
+
+            target.SetBayerConversionForDiagnostic(true);
+            Report("after restore");
+
+            Close();
         }
 
         #region Backlight PWM exposure sweep (--pwm-sweep)

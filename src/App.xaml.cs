@@ -59,6 +59,8 @@ namespace MatroxFrameGrabber
         public static bool PwmSweepScan { get; private set; }
 
         private const string ChannelsSwitch = "--channels";
+        private const string BayerScopeSwitch = "--bayer-scope";
+        private const string DecimSwitch = "--decim";
 
         /// <summary>
         /// Channel indices this process should take a digitizer for, from <c>--channels 0,1</c>.
@@ -70,11 +72,21 @@ namespace MatroxFrameGrabber
         /// </summary>
         public static System.Collections.Generic.HashSet<int> OwnedChannels { get; private set; }
 
+        /// <summary>
+        /// Run the M_BAYER_CONVERSION scope diagnostic and exit, from <c>--bayer-scope</c>.
+        /// Answers whether the setting is per-digitizer or board-wide, which decides whether the
+        /// channels can be split across processes.
+        /// </summary>
+        public static bool BayerScopeTest { get; private set; }
+
+        /// <summary>Decimation to apply to owned channels at startup, from <c>--decim 1</c>. 0 = leave alone.</summary>
+        public static int StartupDecimation { get; private set; }
+
         /// <summary>True while a PWM sweep is driving the app.</summary>
         public static bool PwmSweeping => !string.IsNullOrEmpty(PwmSweepChannel);
 
         /// <summary>True while running unattended, so nothing waits for a person who isn't there.</summary>
-        public static bool Unattended => AutoRunSeconds > 0 || PwmSweeping;
+        public static bool Unattended => AutoRunSeconds > 0 || PwmSweeping || BayerScopeTest;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -83,6 +95,10 @@ namespace MatroxFrameGrabber
             PwmSweepRoom = HasSwitch(e.Args, PwmRoomSwitch);
             PwmSweepScan = HasSwitch(e.Args, PwmScanSwitch);
             OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
+            BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
+            int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,
+                         CultureInfo.InvariantCulture, out int decim);
+            StartupDecimation = decim;
 
             // Processes sharing a board must not share a log file — the log's lock is process-local,
             // so they would interleave and drop each other's lines. Only a split run gets a suffix,
