@@ -151,8 +151,10 @@ namespace MatroxFrameGrabber.Mil
             // StartGrab throws on MIL failure (StartRawRecording relies on that to restore the
             // board), so the command binds to the non-throwing wrapper instead — an unhandled
             // MILException on the UI thread would take the app down.
-            StartCommand = new RelayCommand(() => TryStartGrab(), () => CameraPresent);
-            StopCommand = new RelayCommand(StopGrab, () => CameraPresent);
+            // Start is pointless while already grabbing and Stop while stopped — and the buttons
+            // must track that, because Start/Stop All changes it without touching the pane.
+            StartCommand = new RelayCommand(() => TryStartGrab(), () => CameraPresent && !IsGrabbing);
+            StopCommand = new RelayCommand(StopGrab, () => CameraPresent && IsGrabbing);
             FitCommand = new RelayCommand(FitToWindow, () => CameraPresent);
             OneToOneCommand = new RelayCommand(ZoomActual, () => CameraPresent);
         }
@@ -476,31 +478,22 @@ namespace MatroxFrameGrabber.Mil
             {
                 // A fixed-digitizer board (e.g. Rapixo CXP with 4 ports) reports all its
                 // digitizers even when some ports have no camera. Allocating an empty port
-                // raises a "camera not found" error, so suppress MIL error prints for the
-                // probe and treat any failure as simply "no camera on this port".
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+                // raises a "camera not found" error; treat any failure as simply "no camera
+                // on this port" (MIL error printing is disabled process-wide).
                 try
                 {
-                    try
-                    {
-                        MIL.MdigAlloc(_sysId, MIL.M_DEV0 + _index, _dcfName, MIL.M_DEFAULT, ref _digId);
-                    }
-                    catch (MILException)
-                    {
-                        _digId = MIL.M_NULL;
-                    }
-
-                    if (_digId != MIL.M_NULL &&
-                        MIL.MdigInquire(_digId, MIL.M_CAMERA_PRESENT, MIL.M_NULL) == MIL.M_NO)
-                    {
-                        MIL.MdigFree(_digId);
-                        _digId = MIL.M_NULL;
-                    }
+                    MIL.MdigAlloc(_sysId, MIL.M_DEV0 + _index, _dcfName, MIL.M_DEFAULT, ref _digId);
                 }
-                finally
+                catch (MILException)
                 {
-                    // Always restore error printing, even if an unexpected exception escaped above.
-                    MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                    _digId = MIL.M_NULL;
+                }
+
+                if (_digId != MIL.M_NULL &&
+                    MIL.MdigInquire(_digId, MIL.M_CAMERA_PRESENT, MIL.M_NULL) == MIL.M_NO)
+                {
+                    MIL.MdigFree(_digId);
+                    _digId = MIL.M_NULL;
                 }
 
                 if (_digId != MIL.M_NULL)
@@ -517,10 +510,8 @@ namespace MatroxFrameGrabber.Mil
                     // the mono/raw data as a tiled/garbled image. Re-assert it here, before inquiring
                     // M_SIZE_BAND, so buffers are always 3-band color. (Softly ignored on mono
                     // cameras that have no Bayer filter.)
-                    MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
                     try { MIL.MdigControl(_digId, MIL.M_BAYER_CONVERSION, MIL.M_ENABLE); }
-                    catch (MILException) { }
-                    finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
+                    catch (MILException e) { MilErrorLog.Write($"{Name}: re-assert M_BAYER_CONVERSION", e); }
 
                     // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
                     CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
@@ -593,6 +584,12 @@ namespace MatroxFrameGrabber.Mil
             // Fit the whole image to the control initially (aspect ratio preserved). M_ONCE
             // fits one time and then leaves manual zoom/pan usable (M_ENABLE would lock them).
             MIL.MdispControl(_dispId, MIL.M_SCALE_DISPLAY, MIL.M_ONCE);
+            // The display paints whatever the image does not cover, and its default is white — a
+            // bright slab in a dark themed app. M_COLOR_BLACK is not exactly the panel colour, but
+            // it is the one value MIL takes reliably here and it reads as part of the frame rather
+            // than a hole in it.
+            try { MIL.MdispControl(_dispId, MIL.M_BACKGROUND_COLOR, MIL.M_COLOR_BLACK); }
+            catch (MILException e) { MilErrorLog.Write($"{Name}: set display background colour", e); }
             ApplyDisplayUpdateCap();
 
             if (CameraPresent)
@@ -600,30 +597,22 @@ namespace MatroxFrameGrabber.Mil
                 // Allocate as many grab buffers as the non-paged pool allows. With
                 // M_THROW_EXCEPTION enabled a shortfall would otherwise abort startup, so each
                 // allocation is guarded and we simply stop once the pool is exhausted.
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
-                try
+                for (int i = 0; i < grabCount; i++)
                 {
-                    for (int i = 0; i < grabCount; i++)
+                    MIL_ID buf = MIL.M_NULL;
+                    try
                     {
-                        MIL_ID buf = MIL.M_NULL;
-                        try
-                        {
-                            MIL.MbufAllocColor(_sysId, sizeBand, sizeX, sizeY, bufType,
-                                MIL.M_IMAGE + MIL.M_GRAB + MIL.M_PROC, ref buf);
-                        }
-                        catch (MILException)
-                        {
-                            buf = MIL.M_NULL;
-                        }
-                        if (buf == MIL.M_NULL)
-                            break;
-                        MIL.MbufClear(buf, 0);
-                        _grabBuffers.Add(buf);
+                        MIL.MbufAllocColor(_sysId, sizeBand, sizeX, sizeY, bufType,
+                            MIL.M_IMAGE + MIL.M_GRAB + MIL.M_PROC, ref buf);
                     }
-                }
-                finally
-                {
-                    MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                    catch (MILException)
+                    {
+                        buf = MIL.M_NULL;
+                    }
+                    if (buf == MIL.M_NULL)
+                        break;
+                    MIL.MbufClear(buf, 0);
+                    _grabBuffers.Add(buf);
                 }
             }
         }
@@ -739,6 +728,7 @@ namespace MatroxFrameGrabber.Mil
             _isGrabbing = true;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
+            RaiseCommandStates();
         }
 
         /// <summary>
@@ -783,6 +773,7 @@ namespace MatroxFrameGrabber.Mil
             _isGrabbing = false;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
+            RaiseCommandStates();
         }
 
         /// <summary>Raised when a recording stops on its own (ffmpeg died); carries the error text.</summary>
@@ -814,7 +805,7 @@ namespace MatroxFrameGrabber.Mil
                 // frames silently otherwise.
                 MIL_INT missed = 0;
                 try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
-                catch (MILException) { }
+                catch (MILException e) { MilErrorLog.Write($"{Name}: read missed-frame counter", e); }
                 _framesMissed = missed;
                 if (_rawRecording)
                     _rawMissed = missed;
@@ -955,26 +946,33 @@ namespace MatroxFrameGrabber.Mil
             if (_dispId == MIL.M_NULL)
                 return;
             int fps = Output?.DisplayUpdateFps ?? 0;
-            // Catching MILException is not enough: MIL prints before it throws, and in this app a
-            // MIL error print is a MODAL dialog. AllocateBuffers runs during MainWindow
-            // construction, so an unsupported control here would open one dialog per channel
-            // before the window exists. Same guard the M_BAYER_PATTERN probe uses.
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            // AllocateBuffers runs during MainWindow construction, so an unsupported control here
+            // would previously have opened one modal dialog per channel before the window even
+            // exists. MIL error printing is now disabled process-wide; failures land in the log.
             try
             {
                 MIL.MdispControl(_dispId, MIL.M_UPDATE_RATE_MAX,
                     fps > 0 ? (double)fps : MIL.M_MAX_REFRESH_RATE);
             }
-            catch (MILException)
+            catch (MILException e)
             {
                 // An uncapped display is a performance regression, not a failure — never take the
                 // app down for it.
-            }
-            finally
-            {
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+                MilErrorLog.Write($"{Name}: set display update-rate cap", e);
             }
         }
+
+        // The zoom right after the last fit, to tell "still fitted" from "the operator zoomed in".
+        // Interactive zoom is native to MIL and raises no event we could hook, so this is inferred.
+        //
+        // Only zoom is compared. MIL re-centres the view whenever the display control is resized,
+        // so M_REAL_OFFSET_X/Y move with no operator input at all — measured jumping from 0 to -792
+        // on a plain resize — and an offset comparison therefore reads every resize as a pan and
+        // stops refitting for the rest of the session. Zoom alone is also sufficient: at fit scale
+        // the whole image is visible, so there is nothing to pan to, and panning only becomes
+        // meaningful once zoomed in, where the zoom already differs.
+        private double _fittedZoom;
+        private bool _haveFitBaseline;
 
         /// <summary>Scales the whole image to fit the display control once (aspect preserved).</summary>
         public void FitToWindow()
@@ -982,6 +980,48 @@ namespace MatroxFrameGrabber.Mil
             if (_dispId == MIL.M_NULL)
                 return;
             MIL.MdispControl(_dispId, MIL.M_SCALE_DISPLAY, MIL.M_ONCE);
+            CaptureFitBaseline();
+        }
+
+        /// <summary>
+        /// Re-fits only if the operator has not zoomed or panned since the last fit. The pane calls
+        /// this on resize: expanding the Settings expander resizes the view, and an unconditional
+        /// fit there discards a zoom the operator set deliberately.
+        /// </summary>
+        public void FitToWindowIfUntouched()
+        {
+            if (_dispId == MIL.M_NULL)
+                return;
+            if (_haveFitBaseline && ViewMovedByOperator())
+                return;
+            FitToWindow();
+        }
+
+        private void CaptureFitBaseline()
+        {
+            _haveFitBaseline = TryReadZoom(out _fittedZoom);
+        }
+
+        private bool ViewMovedByOperator()
+        {
+            if (!TryReadZoom(out double zoom))
+                return false;   // cannot tell — prefer fitting, which is the old behaviour
+            return Math.Abs(zoom - _fittedZoom) > 0.001;
+        }
+
+        private bool TryReadZoom(out double zoom)
+        {
+            zoom = 0;
+            try
+            {
+                MIL.MdispInquire(_dispId, MIL.M_REAL_ZOOM_FACTOR_X, ref zoom);
+                return true;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read display zoom factor", e);
+                return false;
+            }
         }
 
         /// <summary>Resets zoom to 100% (1:1) and clears any pan offset.</summary>
@@ -1088,10 +1128,8 @@ namespace MatroxFrameGrabber.Mil
         private bool SetBayerConversion(bool enable)
         {
             if (_digId == MIL.M_NULL) return false;
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
             try { MIL.MdigControl(_digId, MIL.M_BAYER_CONVERSION, enable ? MIL.M_ENABLE : MIL.M_DISABLE); return true; }
             catch (MILException) { return false; }
-            finally { MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE); }
         }
 
         /// <summary>
@@ -1221,8 +1259,7 @@ namespace MatroxFrameGrabber.Mil
             if (_digId == MIL.M_NULL)
                 return fallback;
 
-            // Cameras without a mosaic have no such setting; probing must not raise a modal dialog.
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            // Cameras without a mosaic have no such setting.
             try
             {
                 MIL_INT pattern = MIL.MdigInquire(_digId, MIL.M_BAYER_PATTERN, MIL.M_NULL);
@@ -1236,10 +1273,6 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException)
             {
                 return fallback;
-            }
-            finally
-            {
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
             }
         }
 
@@ -1266,8 +1299,9 @@ namespace MatroxFrameGrabber.Mil
                 if (fps > 1.0)
                     return fps;
             }
-            catch (MILException)
+            catch (MILException e)
             {
+                MilErrorLog.Write($"{Name}: read the camera's configured frame rate", e);
             }
             return 30.0;
         }
@@ -1420,11 +1454,7 @@ namespace MatroxFrameGrabber.Mil
             MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
             sb.Append($"{OutputName}: {sx}x{sy}");
 
-            // Reading a feature name the camera does not expose raises a MIL error (and a modal
-            // error dialog) — suppress printing while probing speculative feature names.
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
-            try
-            {
+            // Reading a feature name the camera does not expose raises a MIL error.
             if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, "ExposureTime", out double exp))
                 sb.Append($"  Exposure={exp:F0}us(=>{(exp > 0 ? 1e6 / exp : 0):F0}fps max)");
             if (TryGetFeatureString("ExposureAuto", out string expAuto) && !string.IsNullOrEmpty(expAuto))
@@ -1449,12 +1479,7 @@ namespace MatroxFrameGrabber.Mil
                 MIL_INT payload = MIL.MdigInquire(_digId, MIL.M_GC_PAYLOAD_SIZE, MIL.M_NULL);
                 sb.Append($"  payload={(long)payload}B");
             }
-            catch (MILException) { }
-            }
-            finally
-            {
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
-            }
+            catch (MILException e) { MilErrorLog.Write($"{Name}: read GenICam payload size", e); }
 
             return sb.ToString();
         }
@@ -1586,8 +1611,9 @@ namespace MatroxFrameGrabber.Mil
             {
                 MIL.MdigControl(_digId, MIL.M_GC_FEATURE_BROWSER, MIL.M_OPEN + MIL.M_ASYNCHRONOUS);
             }
-            catch (MILException)
+            catch (MILException e)
             {
+                MilErrorLog.Write($"{Name}: open GenICam feature browser", e);
             }
         }
 
@@ -1643,27 +1669,16 @@ namespace MatroxFrameGrabber.Mil
 
             int wanted = ChannelRoi.ClampDecimation(Output?.GetDecimation(_index) ?? 1);
 
-            // A rejected feature write prints before it throws, and a print here is a MODAL dialog
-            // on this thread. The restore MUST be in the finally, or every later MIL error in the
-            // process disappears silently.
-            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
-            try
-            {
-                SetIntIfDifferent(F_DECIM_H, wanted);
-                SetIntIfDifferent(F_DECIM_V, wanted);
+            SetIntIfDifferent(F_DECIM_H, wanted);
+            SetIntIfDifferent(F_DECIM_V, wanted);
 
-                // Read back, and believe only this.
-                long actualH = 1, actualV = 1;
-                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_H, out actualH);
-                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_V, out actualV);
-                _decimation = (actualH == wanted && actualV == wanted)
-                    ? wanted
-                    : ChannelRoi.ClampDecimation((int)actualH);
-            }
-            finally
-            {
-                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
-            }
+            // Read back, and believe only this.
+            long actualH = 1, actualV = 1;
+            _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_H, out actualH);
+            _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_V, out actualV);
+            _decimation = (actualH == wanted && actualV == wanted)
+                ? wanted
+                : ChannelRoi.ClampDecimation((int)actualH);
         }
 
         /// <summary>

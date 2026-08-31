@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Text;
 using Matrox.MatroxImagingLibrary;
+using MatroxFrameGrabber.Infrastructure;
 
 namespace MatroxFrameGrabber.Mil
 {
@@ -26,7 +27,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigInquireFeature(Digitizer, MIL.M_FEATURE_PRESENT, name, MIL.M_TYPE_BOOLEAN, ref present);
                 return present;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: check {name} presence", e);
+                return false;
+            }
         }
 
         /// <summary>Writes a string/enum feature (e.g. TriggerMode="On"). Returns false if unavailable.</summary>
@@ -38,7 +43,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_STRING, value);
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: write {name} (string)", e);
+                return false;
+            }
         }
 
         /// <summary>Writes a double feature (e.g. ExposureTime). Returns false if unavailable.</summary>
@@ -51,7 +60,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_DOUBLE, ref v);
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: write {name} (double)", e);
+                return false;
+            }
         }
 
         /// <summary>
@@ -69,7 +82,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_MIL_INT, ref v);
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: write {name} (int)", e);
+                return false;
+            }
         }
 
         /// <summary>
@@ -86,7 +103,11 @@ namespace MatroxFrameGrabber.Mil
                 value = v;
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: read {name} (int)", e);
+                return false;
+            }
         }
 
         /// <summary>Reads a double feature property (M_FEATURE_VALUE / _MIN / _MAX / ...).</summary>
@@ -101,7 +122,11 @@ namespace MatroxFrameGrabber.Mil
                 value = v;
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: read {name} (double)", e);
+                return false;
+            }
         }
 
         /// <summary>Reads a string/enum feature's current value.</summary>
@@ -116,7 +141,11 @@ namespace MatroxFrameGrabber.Mil
                 value = sb.ToString();
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: read {name} (string)", e);
+                return false;
+            }
         }
 
         /// <summary>Enumerates the entry names of an enumeration feature (e.g. TriggerSource).</summary>
@@ -138,7 +167,7 @@ namespace MatroxFrameGrabber.Mil
                         list.Add(name);
                 }
             }
-            catch (MILException) { }
+            catch (MILException e) { MilErrorLog.Write($"GenICam: enumerate {feature} entries", e); }
             return list;
         }
 
@@ -152,7 +181,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_BOOLEAN, ref v);
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: write {name} (bool)", e);
+                return false;
+            }
         }
 
         /// <summary>Reads a boolean feature's current value.</summary>
@@ -167,7 +200,11 @@ namespace MatroxFrameGrabber.Mil
                 value = v;
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: read {name} (bool)", e);
+                return false;
+            }
         }
 
         /// <summary>Executes a command feature (e.g. TriggerSoftware).</summary>
@@ -179,7 +216,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_COMMAND);
                 return true;
             }
-            catch (MILException) { return false; }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"GenICam: execute {name}", e);
+                return false;
+            }
         }
     }
 }

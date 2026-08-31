@@ -41,7 +41,7 @@
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="▶ Start" Command="{Binding StartCommand}" />
-                <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding CameraPresent}"
+                <Button Content="■ Stop" Click="Stop_Click" IsEnabled="{Binding IsGrabbing}"
                         Margin="0,0,10,0" ToolTip="Stop acquisition (confirms if recording)" />
                 <ToggleButton Content="● Rec" Style="{StaticResource RecToggle}" FontSize="11"
                               Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
@@ -93,7 +93,8 @@
                         <Label Content="Exp" Width="34" />
                         <TextBox Width="60" FontSize="11" VerticalContentAlignment="Center"
                                  Text="{Binding ExposureInput, UpdateSourceTrigger=PropertyChanged}"
-                                 IsEnabled="{Binding CanSetExposureManually}" />
+                                 IsEnabled="{Binding CanSetExposureManually}"
+                                 Tag="exposure" KeyDown="SettingsField_KeyDown" />
                         <TextBlock Text="{Binding ExposureRangeHint}" Margin="4,0,6,0"
                                    VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
                         <Button Content="Apply" Click="ApplyExposure_Click"
@@ -110,7 +111,8 @@
                                   IsEnabled="{Binding SupportsAcqRateEnable}" />
                         <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
                                  Text="{Binding AcqRateInput, UpdateSourceTrigger=PropertyChanged}"
-                                 IsEnabled="{Binding CanSetAcqRate}" />
+                                 IsEnabled="{Binding CanSetAcqRate}"
+                                 Tag="acqrate" KeyDown="SettingsField_KeyDown" />
                         <TextBlock Text="{Binding AcqRateHint}" Margin="4,0,6,0"
                                    VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
                         <Button Content="Apply" Click="ApplyAcqRate_Click"
@@ -139,10 +141,12 @@
                                 IsEnabled="{Binding SupportsWhiteBalance}" />
                         <Label Content="R" />
                         <TextBox Width="42" FontSize="11" Text="{Binding RedRatioInput, UpdateSourceTrigger=PropertyChanged}"
-                                 IsEnabled="{Binding CanSetBalanceManually}" />
+                                 IsEnabled="{Binding CanSetBalanceManually}"
+                                 Tag="balance" KeyDown="SettingsField_KeyDown" />
                         <Label Content="B" Margin="4,0,0,0" />
                         <TextBox Width="42" FontSize="11" Text="{Binding BlueRatioInput, UpdateSourceTrigger=PropertyChanged}"
-                                 IsEnabled="{Binding CanSetBalanceManually}" />
+                                 IsEnabled="{Binding CanSetBalanceManually}"
+                                 Tag="balance" KeyDown="SettingsField_KeyDown" />
                         <Button Content="Apply" Margin="4,0,0,0" Click="ApplyBalance_Click"
                                 IsEnabled="{Binding CanSetBalanceManually}" />
                     </StackPanel>
