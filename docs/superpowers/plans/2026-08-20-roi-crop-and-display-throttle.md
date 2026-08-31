@@ -2040,3 +2040,288 @@ The decimation combo reports failure loudly because this camera returns
 success for geometry writes it ignores; a silent combo would assert a factor
 the hardware refused.
 ```
+
+---
+
+### Task 7S: 분석 ROI — 숫자 입력 + 오버레이 사각형
+
+근거는 [스펙 2-1절](../specs/2026-08-20-avn-anomaly-detection-design.md)이다. 드래그 선택은
+**Task 7T**로 분리한다 — 화면→영상 좌표 변환이 필요하고 육안 검증에만 의존하므로, 오버레이가
+먼저 증명된 뒤에 얹는다.
+
+**Files:**
+- Modify: `src/Mil/CameraChannel.cs` — 분석 ROI 상태, 적용, 오버레이 그리기
+- Modify: `src/Views/CameraPaneView.xaml(.cs)` — ROI 입력 행 + 핸들러
+
+**Interfaces:**
+- Consumes: `ChannelRoi`(`Snap(maxWidth, maxHeight)`, `IsFullFrame`, `FullFrame`), `OutputSettings.GetRoi`/`SetRoi`
+- Produces:
+  - `ChannelRoi CameraChannel.AnalysisRoi { get; }`
+  - `string CameraChannel.AnalysisRoiHint { get; }`
+  - `string CameraChannel.RoiInX/RoiInY/RoiInW/RoiInH { get; set; }`
+  - `bool CameraChannel.ApplyAnalysisRoiFromInputs()`
+  - `void CameraChannel.ClearAnalysisRoi()`
+
+**이것이 카메라 ROI와 무엇이 다른가.** 카메라 크롭은 이 하드웨어가 거부한다(`CLAUDE.md` 참고).
+분석 ROI는 **어느 화소를 판정에 쓸지**를 정하는 순수 소프트웨어 값이다. 그래서
+
+- 카메라가 거부할 수 없다
+- **버퍼 재할당이 필요 없다** — `ApplyDecimation`과 결정적으로 다른 점이다
+- 증분·짝수 제약도 하드웨어가 아니라 우리가 정한다(타일별 CFA 위상을 일정하게 두려면 짝수
+  정렬이 여전히 유용해서 `Snap`이 그것만 강제한다)
+
+**지금은 소비자가 없다.** 타일 지표는 계획 ③에서 이 영역을 읽는다. 그래서 이 작업의 검증
+수단은 **오버레이 사각형**이다 — 지정한 영역이 화면에 보이지 않으면 값이 맞는지 확인할 방법이
+없다. 오버레이는 장식이 아니라 이 작업의 인수 수단이다.
+
+- [ ] **Step 1: 상태와 프로퍼티**
+
+`src/Mil/CameraChannel.cs`에 필드를 추가한다(`_decimation` 근처).
+
+```csharp
+        private ChannelRoi _analysisRoi = ChannelRoi.FullFrame;
+        private string _roiInX = "0", _roiInY = "0", _roiInW = "0", _roiInH = "0";
+        private MIL_ID _overlayId = MIL.M_NULL;
+```
+
+프로퍼티를 추가한다(`DecimationHint` 근처).
+
+```csharp
+        /// <summary>
+        /// The region the anomaly metrics are computed over, in coordinates of the acquired
+        /// (already decimated) frame. Full frame by default.
+        ///
+        /// This is a software value, not a camera setting: nothing in hardware can refuse it and
+        /// changing it needs no reallocation. That is the whole reason it exists — this camera
+        /// ignores writes to Width/Height/OffsetX/OffsetY (see CLAUDE.md), so the rectangle moved
+        /// here, where it says which pixels we look at rather than which pixels we ask for.
+        /// </summary>
+        public ChannelRoi AnalysisRoi => _analysisRoi;
+
+        /// <summary>Frame size the ROI is clamped against, for the input hint.</summary>
+        public string AnalysisRoiHint
+        {
+            get
+            {
+                if (!TryGetFrameSize(out int w, out int h)) return "no camera";
+                return _analysisRoi.IsFullFrame ? $"full {w}×{h}" : $"of {w}×{h}";
+            }
+        }
+
+        public string RoiInX { get => _roiInX; set { _roiInX = value; RaisePropertyChanged(nameof(RoiInX)); } }
+        public string RoiInY { get => _roiInY; set { _roiInY = value; RaisePropertyChanged(nameof(RoiInY)); } }
+        public string RoiInW { get => _roiInW; set { _roiInW = value; RaisePropertyChanged(nameof(RoiInW)); } }
+        public string RoiInH { get => _roiInH; set { _roiInH = value; RaisePropertyChanged(nameof(RoiInH)); } }
+```
+
+- [ ] **Step 2: 프레임 크기 조회와 적용**
+
+`WriteDecimationToCamera` 아래에 추가한다.
+
+```csharp
+        /// <summary>Size of the frames actually arriving, which is what the ROI is clamped to.</summary>
+        private bool TryGetFrameSize(out int width, out int height)
+        {
+            width = 0; height = 0;
+            if (_dispBufId == MIL.M_NULL) return false;
+            try
+            {
+                width = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                height = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+                return width > 0 && height > 0;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read frame size for the analysis ROI", e);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Applies the four input boxes as the analysis region. No reallocation: this only changes
+        /// which pixels we measure. Returns false only if a box is not an integer.
+        /// </summary>
+        public bool ApplyAnalysisRoiFromInputs()
+        {
+            if (!int.TryParse(_roiInX, out int x) || !int.TryParse(_roiInY, out int y) ||
+                !int.TryParse(_roiInW, out int w) || !int.TryParse(_roiInH, out int h))
+                return false;
+            SetAnalysisRoi(new ChannelRoi(x, y, w, h));
+            return true;
+        }
+
+        /// <summary>Back to measuring the whole frame.</summary>
+        public void ClearAnalysisRoi() => SetAnalysisRoi(ChannelRoi.FullFrame);
+
+        private void SetAnalysisRoi(ChannelRoi requested)
+        {
+            ChannelRoi snapped = requested;
+            if (!requested.IsFullFrame && TryGetFrameSize(out int fw, out int fh))
+                snapped = requested.Snap(fw, fh);
+
+            _analysisRoi = snapped;
+            Output?.SetRoi(_index, snapped);
+            SyncRoiInputs();
+            DrawAnalysisRoiOverlay();
+            RaisePropertyChanged(nameof(AnalysisRoi));
+            RaisePropertyChanged(nameof(AnalysisRoiHint));
+        }
+
+        /// <summary>Writes the applied (snapped) values back, so the operator sees what was taken.</summary>
+        private void SyncRoiInputs()
+        {
+            RoiInX = _analysisRoi.OffsetX.ToString(CultureInfo.InvariantCulture);
+            RoiInY = _analysisRoi.OffsetY.ToString(CultureInfo.InvariantCulture);
+            RoiInW = (_analysisRoi.IsFullFrame ? 0 : _analysisRoi.Width).ToString(CultureInfo.InvariantCulture);
+            RoiInH = (_analysisRoi.IsFullFrame ? 0 : _analysisRoi.Height).ToString(CultureInfo.InvariantCulture);
+        }
+```
+
+- [ ] **Step 3: 오버레이 사각형**
+
+```csharp
+        /// <summary>
+        /// Draws the analysis region on the display overlay, or clears it for a full-frame ROI.
+        ///
+        /// The overlay is this task's acceptance surface, not decoration: nothing consumes the
+        /// analysis ROI yet (the tile metrics arrive in a later plan), so a rectangle on screen is
+        /// the only way to tell that the coordinates landed where the operator asked.
+        /// </summary>
+        private void DrawAnalysisRoiOverlay()
+        {
+            if (_dispId == MIL.M_NULL || _graId == MIL.M_NULL)
+                return;
+            try
+            {
+                if (_overlayId == MIL.M_NULL)
+                {
+                    MIL.MdispControl(_dispId, MIL.M_OVERLAY, MIL.M_ENABLE);
+                    MIL.MdispControl(_dispId, MIL.M_OVERLAY_SHOW, MIL.M_ENABLE);
+                    MIL.MdispInquire(_dispId, MIL.M_OVERLAY_ID, ref _overlayId);
+                }
+                if (_overlayId == MIL.M_NULL)
+                    return;
+
+                MIL.MdispControl(_dispId, MIL.M_OVERLAY_CLEAR, MIL.M_DEFAULT);
+                if (_analysisRoi.IsFullFrame)
+                    return;
+
+                MIL.MgraColor(_graId, MIL.M_COLOR_GREEN);
+                MIL.MgraRect(_graId, _overlayId,
+                    _analysisRoi.OffsetX,
+                    _analysisRoi.OffsetY,
+                    _analysisRoi.OffsetX + _analysisRoi.Width - 1,
+                    _analysisRoi.OffsetY + _analysisRoi.Height - 1);
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: draw the analysis ROI overlay", e);
+            }
+        }
+```
+
+- [ ] **Step 4: 할당 경로에 연결**
+
+`AllocateBuffers`의 `MdispSelect` 이후, `ApplyDisplayUpdateCap()` 근처에 넣는다. **오버레이
+버퍼는 `MdispSelect`마다 새로 만들어지므로 캐시한 id를 반드시 버려야 한다.**
+
+```csharp
+            // The overlay buffer belongs to the selected display buffer, so a reallocation
+            // invalidates the cached id — drop it and let the next draw re-fetch.
+            _overlayId = MIL.M_NULL;
+            _analysisRoi = Output?.GetRoi(_index) ?? ChannelRoi.FullFrame;
+            SyncRoiInputs();
+            DrawAnalysisRoiOverlay();
+```
+
+`FreeBuffers`에서도 `_overlayId = MIL.M_NULL;`로 되돌린다.
+
+`RefreshFeatureState` 끝에 추가한다.
+
+```csharp
+            RaisePropertyChanged(nameof(AnalysisRoi));
+            RaisePropertyChanged(nameof(AnalysisRoiHint));
+```
+
+- [ ] **Step 5: pane UI**
+
+`src/Views/CameraPaneView.xaml`의 Settings에서 Decim 행 **뒤**에 넣는다.
+
+```xml
+                    <!-- Analysis ROI: which pixels the anomaly metrics are computed over. Software
+                         only — no reallocation, and the camera cannot refuse it. 0 width or height
+                         means the whole frame. The green overlay rectangle shows the result. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                        <Label Content="ROI" Width="42" />
+                        <TextBox Width="44" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInX, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="OffsetX in frame coordinates" />
+                        <TextBox Width="44" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInY, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="OffsetY in frame coordinates" />
+                        <TextBlock Text="+" Margin="3,0" VerticalAlignment="Center" Foreground="#9A9A9A" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInW, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Width (0 = whole frame)" />
+                        <TextBox Width="50" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInH, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Height (0 = whole frame)" />
+                        <TextBlock Text="{Binding AnalysisRoiHint}" Margin="4,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                        <Button Content="Apply" Click="ApplyRoi_Click" />
+                        <Button Content="Full" Margin="2,0,0,0" Click="ClearRoi_Click"
+                                ToolTip="Measure the whole frame" />
+                    </StackPanel>
+```
+
+`src/Views/CameraPaneView.xaml.cs`에 핸들러를 추가하고, 엔터키 스위치에 `roi`를 넣는다.
+
+```csharp
+        private void ApplyRoi_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyAnalysisRoiFromInputs())
+                MessageBox.Show("ROI를 적용하지 못했습니다. 네 값이 모두 정수여야 합니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void ClearRoi_Click(object sender, RoutedEventArgs e) => Channel?.ClearAnalysisRoi();
+```
+
+`SettingsField_KeyDown`의 `switch`에 추가한다.
+
+```csharp
+                case "roi": ApplyRoi_Click(sender, e); break;
+```
+
+- [ ] **Step 6: 빌드와 테스트**
+
+Run: `dotnet build MatroxFrameGrabber.slnx -c Release` → 경고 0개, 오류 0개
+Run: `dotnet test MatroxFrameGrabber.slnx -c Release` → 15개 통과
+Run: `grep -rn "M_PRINT_ENABLE" src/ --include=*.cs` → 출력 없음
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add src/Mil/CameraChannel.cs src/Views/CameraPaneView.xaml src/Views/CameraPaneView.xaml.cs
+git commit -m "Let the operator pick which pixels get measured"
+```
+
+커밋 메시지 본문:
+
+```
+The camera refuses a crop, so the rectangle became an analysis region
+instead: it says which pixels the anomaly metrics read rather than which
+pixels the camera sends. That makes it a software value — nothing in
+hardware can refuse it and it needs no reallocation, unlike decimation.
+
+Nothing consumes it yet; the tile metrics arrive in a later plan. The green
+overlay rectangle is therefore the acceptance surface rather than decoration,
+because without it there is no way to tell whether the coordinates landed
+where they were asked to.
+```

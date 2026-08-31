@@ -131,6 +131,11 @@ namespace MatroxFrameGrabber.Mil
         // refused by this camera; decimation is the lever instead (see CLAUDE.md).
         private int _decimation = 1;
 
+        // Analysis ROI (software-only: which pixels the anomaly metrics read, not a camera
+        // setting — see AnalysisRoi below).
+        private ChannelRoi _analysisRoi = ChannelRoi.FullFrame;
+        private string _roiInX = "0", _roiInY = "0", _roiInW = "0", _roiInH = "0";
+
         // Display-copy decimation. Time-based rather than every-Nth-frame: channels can grab at
         // very different rates (a long exposure caps one camera at 10 fps while its neighbours
         // run at 184), and a fixed divider would give each of them a different display rate.
@@ -373,6 +378,18 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>True if the camera exposes decimation. This one does; cropping it does not.</summary>
         public bool SupportsDecimation => FeatureAvailable(F_DECIM_H);
 
+        /// <summary>
+        /// Decimation factors the pane combo offers. This sits on the channel, not on
+        /// MainViewModel, because the pane bound ItemsSource through
+        /// {RelativeSource AncestorType=Window} and that resolved later than SelectedItem,
+        /// which is a plain DataContext binding. SelectedItem was therefore applied against
+        /// an empty list and dropped to null, and the combo read blank for good: the only
+        /// notification for Decimation fires inside AllocateCamera, which MainWindow runs
+        /// *before* InitializeComponent, so no pane exists to hear it. Binding to the
+        /// channel own DataContext removes the ancestor walk and the ordering with it.
+        /// </summary>
+        public IReadOnlyList<int> DecimationOptions => ChannelRoi.AllowedDecimation;
+
         /// <summary>Effective frame size the digitizer reports, for the pane hint.</summary>
         public string DecimationHint
         {
@@ -388,6 +405,34 @@ namespace MatroxFrameGrabber.Mil
                 catch (MILException) { return "?"; }
             }
         }
+
+        // ----- Analysis ROI (which pixels the anomaly metrics are computed over) -----
+
+        /// <summary>
+        /// The region the anomaly metrics are computed over, in coordinates of the acquired
+        /// (already decimated) frame. Full frame by default.
+        ///
+        /// This is a software value, not a camera setting: nothing in hardware can refuse it and
+        /// changing it needs no reallocation. That is the whole reason it exists — this camera
+        /// ignores writes to Width/Height/OffsetX/OffsetY (see CLAUDE.md), so the rectangle moved
+        /// here, where it says which pixels we look at rather than which pixels we ask for.
+        /// </summary>
+        public ChannelRoi AnalysisRoi => _analysisRoi;
+
+        /// <summary>Frame size the ROI is clamped against, for the input hint.</summary>
+        public string AnalysisRoiHint
+        {
+            get
+            {
+                if (!TryGetFrameSize(out int w, out int h)) return "no camera";
+                return _analysisRoi.IsFullFrame ? $"full {w}×{h}" : $"of {w}×{h}";
+            }
+        }
+
+        public string RoiInX { get => _roiInX; set { _roiInX = value; RaisePropertyChanged(nameof(RoiInX)); } }
+        public string RoiInY { get => _roiInY; set { _roiInY = value; RaisePropertyChanged(nameof(RoiInY)); } }
+        public string RoiInW { get => _roiInW; set { _roiInW = value; RaisePropertyChanged(nameof(RoiInW)); } }
+        public string RoiInH { get => _roiInH; set { _roiInH = value; RaisePropertyChanged(nameof(RoiInH)); } }
 
         public bool TriggerOn
         {
@@ -591,6 +636,9 @@ namespace MatroxFrameGrabber.Mil
             try { MIL.MdispControl(_dispId, MIL.M_BACKGROUND_COLOR, MIL.M_COLOR_BLACK); }
             catch (MILException e) { MilErrorLog.Write($"{Name}: set display background colour", e); }
             ApplyDisplayUpdateCap();
+
+            _analysisRoi = Output?.GetRoi(_index) ?? ChannelRoi.FullFrame;
+            SyncRoiInputs();
 
             if (CameraPresent)
             {
@@ -1420,6 +1468,9 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(SupportsDecimation));
             RaisePropertyChanged(nameof(Decimation));
             RaisePropertyChanged(nameof(DecimationHint));
+
+            RaisePropertyChanged(nameof(AnalysisRoi));
+            RaisePropertyChanged(nameof(AnalysisRoiHint));
         }
 
         private void UpdateCameraInfo()
@@ -1679,6 +1730,97 @@ namespace MatroxFrameGrabber.Mil
             _decimation = (actualH == wanted && actualV == wanted)
                 ? wanted
                 : ChannelRoi.ClampDecimation((int)actualH);
+        }
+
+        /// <summary>Size of the frames actually arriving, which is what the ROI is clamped to.</summary>
+        private bool TryGetFrameSize(out int width, out int height)
+        {
+            width = 0; height = 0;
+            if (_dispBufId == MIL.M_NULL) return false;
+            try
+            {
+                width = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                height = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+                return width > 0 && height > 0;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read frame size for the analysis ROI", e);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Current view geometry, for drawing over the live image. False when it cannot be read.
+        /// </summary>
+        public bool TryGetViewGeometry(out int frameWidth, out int frameHeight,
+                                      out double zoom, out double offsetX, out double offsetY)
+        {
+            zoom = 0; offsetX = 0; offsetY = 0;
+            if (!TryGetFrameSize(out frameWidth, out frameHeight))
+                return false;
+            try
+            {
+                MIL.MdispInquire(_dispId, MIL.M_REAL_ZOOM_FACTOR_X, ref zoom);
+                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_X, ref offsetX);
+                MIL.MdispInquire(_dispId, MIL.M_REAL_OFFSET_Y, ref offsetY);
+                return zoom > 0;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read view geometry for the ROI overlay", e);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Applies the four input boxes as the analysis region. No reallocation: this only changes
+        /// which pixels we measure. Returns false only if a box is not an integer.
+        /// </summary>
+        public bool ApplyAnalysisRoiFromInputs()
+        {
+            if (!int.TryParse(_roiInX, out int x) || !int.TryParse(_roiInY, out int y) ||
+                !int.TryParse(_roiInW, out int w) || !int.TryParse(_roiInH, out int h))
+                return false;
+            SetAnalysisRoi(new ChannelRoi(x, y, w, h));
+            return true;
+        }
+
+        /// <summary>Back to measuring the whole frame.</summary>
+        public void ClearAnalysisRoi() => SetAnalysisRoi(ChannelRoi.FullFrame);
+
+        /// <summary>
+        /// Sets the analysis region from a mouse drag, in image pixels. Values are snapped to the
+        /// even grid and clamped inside the frame, exactly as typed input is — a drag that ran off
+        /// the edge of the image is normal, not an error.
+        /// </summary>
+        public void SetAnalysisRoiFromDrag(int offsetX, int offsetY, int width, int height)
+        {
+            if (width <= 0 || height <= 0)
+                return;
+            SetAnalysisRoi(new ChannelRoi(Math.Max(0, offsetX), Math.Max(0, offsetY), width, height));
+        }
+
+        private void SetAnalysisRoi(ChannelRoi requested)
+        {
+            ChannelRoi snapped = requested;
+            if (!requested.IsFullFrame && TryGetFrameSize(out int fw, out int fh))
+                snapped = requested.Snap(fw, fh);
+
+            _analysisRoi = snapped;
+            Output?.SetRoi(_index, snapped);
+            SyncRoiInputs();
+            RaisePropertyChanged(nameof(AnalysisRoi));
+            RaisePropertyChanged(nameof(AnalysisRoiHint));
+        }
+
+        /// <summary>Writes the applied (snapped) values back, so the operator sees what was taken.</summary>
+        private void SyncRoiInputs()
+        {
+            RoiInX = _analysisRoi.OffsetX.ToString(CultureInfo.InvariantCulture);
+            RoiInY = _analysisRoi.OffsetY.ToString(CultureInfo.InvariantCulture);
+            RoiInW = (_analysisRoi.IsFullFrame ? 0 : _analysisRoi.Width).ToString(CultureInfo.InvariantCulture);
+            RoiInH = (_analysisRoi.IsFullFrame ? 0 : _analysisRoi.Height).ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>

@@ -62,7 +62,22 @@ namespace MatroxFrameGrabber.Views
             InitializeComponent();
 
             if (_viewModel != null)
-                ((MainViewModel)DataContext).StatsRefreshed += RedrawBrightness;
+                ((MainViewModel)DataContext).StatsRefreshed += OnStatsRefreshed;
+        }
+
+        /// <summary>
+        /// Runs on every 500 ms stats tick: redraws the brightness strip and repositions each
+        /// pane's analysis-ROI rectangle. The ROI rectangle piggybacks on this tick rather than
+        /// getting a timer of its own, because MIL's zoom/pan is native and raises no event we
+        /// could hook — polling here is the only way to follow the operator's view changes.
+        /// </summary>
+        private void OnStatsRefreshed()
+        {
+            RedrawBrightness();
+            Pane0?.RefreshRoiOverlay();
+            Pane1?.RefreshRoiOverlay();
+            Pane2?.RefreshRoiOverlay();
+            Pane3?.RefreshRoiOverlay();
         }
 
         private void OnRecordingFailed(CameraChannel channel, string error)
@@ -101,7 +116,7 @@ namespace MatroxFrameGrabber.Views
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             if (_viewModel != null)
-                _viewModel.StatsRefreshed -= RedrawBrightness;
+                _viewModel.StatsRefreshed -= OnStatsRefreshed;
             ExitFullscreen();
             RemoveEscHook();
             _viewModel?.Shutdown();

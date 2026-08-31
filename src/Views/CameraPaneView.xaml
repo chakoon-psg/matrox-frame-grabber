@@ -54,6 +54,9 @@
                 <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" Margin="10,0,3,0" />
                 <Button Content="Fit" Command="{Binding FitCommand}" />
                 <Button Content="1:1" Command="{Binding OneToOneCommand}" />
+                <ToggleButton x:Name="RoiSelectToggle" Content="⬚" Padding="6,3"
+                              IsEnabled="{Binding CameraPresent}"
+                              ToolTip="영역 지정 모드: 화면에서 드래그해 분석 ROI를 지정합니다 (켜져 있는 동안 줌·팬은 잠깁니다)" />
                 <Button Content="⤢" Click="Fullscreen_Click" ToolTip="Fullscreen (double-click view; ESC to return)" />
             </StackPanel>
         </Grid>
@@ -157,13 +160,41 @@
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
                         <Label Content="Decim" Width="42" />
                         <ComboBox Width="52" FontSize="11"
-                                  ItemsSource="{Binding DataContext.DecimationOptions,
-                                               RelativeSource={RelativeSource AncestorType=Window}}"
+                                  ItemsSource="{Binding DecimationOptions}"
                                   SelectedItem="{Binding Decimation, Mode=OneWay}"
                                   SelectionChanged="Decimation_Changed"
                                   IsEnabled="{Binding SupportsDecimation}" />
                         <TextBlock Text="{Binding DecimationHint}" Margin="6,0,0,0"
                                    VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                    </StackPanel>
+
+                    <!-- Analysis ROI: which pixels the anomaly metrics are computed over. Software
+                         only — no reallocation, and the camera cannot refuse it. 0 width or height
+                         means the whole frame. The green overlay rectangle shows the result. -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                        <Label Content="ROI" Width="42" />
+                        <TextBox Width="44" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInX, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="OffsetX in frame coordinates" />
+                        <TextBox Width="44" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInY, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="OffsetY in frame coordinates" />
+                        <TextBlock Text="+" Margin="3,0" VerticalAlignment="Center" Foreground="#9A9A9A" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInW, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Width (0 = whole frame)" />
+                        <TextBox Width="50" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="roi" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding RoiInH, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Height (0 = whole frame)" />
+                        <TextBlock Text="{Binding AnalysisRoiHint}" Margin="4,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                        <Button Content="Apply" Click="ApplyRoi_Click" />
+                        <Button Content="Full" Margin="2,0,0,0" Click="ClearRoi_Click"
+                                ToolTip="Measure the whole frame" />
                     </StackPanel>
 
                     <!-- DCF / feature browser -->
@@ -186,7 +217,21 @@
         <Grid>
             <Border x:Name="ViewBorder" Background="Black" BorderBrush="#404040" BorderThickness="1"
                     SizeChanged="ViewBorder_SizeChanged"
-                    PreviewMouseLeftButtonDown="ViewBorder_PreviewMouseLeftButtonDown" />
+                    PreviewMouseLeftButtonDown="ViewBorder_PreviewMouseLeftButtonDown"
+                    PreviewMouseMove="ViewBorder_PreviewMouseMove"
+                    PreviewMouseLeftButtonUp="ViewBorder_PreviewMouseLeftButtonUp">
+                <Grid x:Name="ViewContentGrid">
+                    <Rectangle x:Name="RoiRect" Visibility="Collapsed"
+                               Stroke="{StaticResource Ch1Brush}" StrokeThickness="1.5"
+                               HorizontalAlignment="Left" VerticalAlignment="Top"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="DragRect" Visibility="Collapsed"
+                               Stroke="{StaticResource AccentBrush}" StrokeThickness="1.5"
+                               StrokeDashArray="3 2"
+                               HorizontalAlignment="Left" VerticalAlignment="Top"
+                               IsHitTestVisible="False" />
+                </Grid>
+            </Border>
 
             <!-- Persistent recording banner: red = live H.264, orange = RAW lossless -->
             <Border VerticalAlignment="Top" Padding="8,4"
