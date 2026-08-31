@@ -23,8 +23,10 @@ Imaging Library) API로 다루며 화면에 표시하고 처리하는 C# **WPF**
   (`C:\Program Files\Matrox Imaging\MIL\MIL.NET\NuGet`).
 - 라이브 grab에는 카메라가 연결된 **Rapixo CXP** 보드가 필요하다(하드웨어가 없으면 기본 MIL
   시스템으로 폴백하고 "No camera" pane을 보여준다).
-- **x64** 전용(MIL NuGet이 x64/arm64만 지원). 대상 프레임워크는 **net6.0-windows**
-  (설치된 WindowsDesktop 런타임 기준이며, MIL이 배포한 WPF 예제와 맞춘 것).
+- **x64** 전용(MIL NuGet이 x64/arm64만 지원). 대상 프레임워크는 **net10.0-windows**
+  (net6.0이 지원 종료되어 올렸다. MIL NuGet은 `net6.0` / `net6.0-windows7.0` 자산을 담고 있어
+  상위 TFM에서 그대로 참조된다 — MIL이 배포한 WPF 예제가 net6.0인 것과는 무관하다.
+  대신 현장 PC에는 **WindowsDesktop 10.0** 런타임이 있어야 한다).
 - 녹화에는 **ffmpeg.exe**가 필요하다. NuGet 의존성이 아니라 런타임에 탐색한다(설정된 경로 →
   앱 폴더 → `PATH` → WinGet → `C:\ffmpeg\bin`). 찾지 못하면 `CanRecord`가 false가 되어 녹화 버튼
   **두 개 모두** 비활성화된다. 모든 인코딩은 ffmpeg를 거치며 MIL 압축 라이선스는 쓰지 않는다
@@ -39,7 +41,7 @@ dotnet build MatroxFrameGrabber.slnx -c Release
 출력 exe (`x64` 경로 조각에 주의 — `Platforms=x64`라 출력이 `bin\x64\` 아래로 들어간다):
 
 ```
-src\bin\x64\Release\net6.0-windows\MatroxFrameGrabber.exe
+src\bin\x64\Release\net10.0-windows\MatroxFrameGrabber.exe
 ```
 
 ## 구조
@@ -56,10 +58,11 @@ src/
   ViewModels/                  MatroxFrameGrabber.ViewModels (MainViewModel)
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
-                                 GenICamFeatures, RecordingSession
+                                 GenICamFeatures, RecordingSession, BrightnessMeter
   Infrastructure/              MatroxFrameGrabber.Infrastructure
                                  OutputSettings, FfmpegRecorder, RawFrameWriter,
-                                 RawSegmentSession, RelayCommand, NativeMethods
+                                 RawSegmentSession, RelayCommand, NativeMethods,
+                                 BrightnessHistory
 docs/
 LICENSES/                       동봉 서드파티 라이선스 고지
 tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
@@ -126,7 +129,27 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `M_PROCESS_FRAME_MISSED`로 드러난다.
 - UI 상태는 **500ms짜리 `DispatcherTimer` 하나**가 모든 채널의 `RefreshStats()`를 호출해
   갱신한다. 새 값을 노출하려면 거기서 올릴 것. 이벤트로 밀어내는 것은 세 가지뿐이다
-  (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`).
+  (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`). 밝기 측정도 이 틱 위에서 돈다 —
+  취득 훅이 아니라 여기다. `MdigProcess` 훅에 넣은 작업은 취득 예산 안에서 돌기 때문이다.
+- **`Mim*` 함수는 하나의 라이선싱 그룹이 아니다.** `MimResize`와 `MimShift`는 MIL-Lite에
+  포함되지만 `MimStat`은 Image Processing(IM) 모듈이 필요하고 이 장비에는 없다 — 호출하면
+  `Licensing error. A module was used without a valid license`가 난다. 통계·히스토그램류를
+  MIL로 처리하려다 이 벽에 부딪히므로, 호스트에서 직접 계산할 것을 전제로 설계한다.
+- **`MbufBayer`는 이 장비에서 예외도 오류도 없이 블록한다.** 취득 훅에서 호출하면 훅이 첫
+  프레임에서 멈추고(`M_PROCESS_FRAME_COUNT`가 1에 고정), UI 스레드에서 호출하면 앱 전체가
+  정지한다. 대상 버퍼를 바꿔도(중간 `M_PROC` 버퍼 경유) 마찬가지다. `MbufGetColor` 함정과 같은
+  계열이다. **호스트 디베이어를 MIL로 할 수 없다** — 컬러가 필요하면 보드의
+  `M_BAYER_CONVERSION`을 쓰면서 ROI/decimation으로 페이로드를 줄이는 것이 유일한 길이다.
+- **취득 대역폭에는 공유 천장이 있다(호스트 DMA 약 1.7 GB/s).** 채널 수와 무관하게 합계가 여기서
+  고정되고, 초과분은 `M_PROCESS_FRAME_MISSED`로 조용히 사라진다. 성능 작업을 하기 전에
+  [research.md](research.md) 8절의 실측표를 볼 것 — **표시 경로를 최적화해도 취득 fps는 늘지
+  않는다**(측정으로 확인). 프레임당 페이로드만이 레버다.
+- **카메라 GenICam 설정 일부는 보드가 아니라 카메라에 영속된다.** `AcquisitionFrameRate` /
+  `AcquisitionFrameRateEnable`, `DecimationHorizontal` / `Vertical`이 그렇다. 앱을 닫아도 남으니
+  `M_BAYER_CONVERSION`과 같은 복구 규율을 적용할 것. 그리고 이들은 **정수형 피처라
+  `M_TYPE_MIL_INT`로 써야 한다** — `M_TYPE_DOUBLE`로 쓰면 조용히 무시된다.
+- **한 채널만 느리면 케이블·링크보다 노출을 먼저 보라.** `AcquisitionFrameRate`의 최대값은
+  `ExposureTime`에 종속된다. 노출 100 ms면 그 채널의 상한은 10 fps다.
 
 ## 에이전트 스킬
 

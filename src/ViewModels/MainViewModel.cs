@@ -28,6 +28,13 @@ namespace MatroxFrameGrabber.ViewModels
             StartAllCommand = new RelayCommand(StartAll);
             StopAllCommand = new RelayCommand(StopAll);
 
+            // The brightness strip is always on screen, so measurement is enabled for the whole
+            // session — set once here rather than pushed every tick, since nothing turns it off.
+            // A channel that is not grabbing still costs nothing: CameraChannel.RefreshStats
+            // only samples while it has a live display buffer.
+            foreach (var channel in _manager.Channels)
+                channel.BrightnessEnabled = true;
+
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += (s, e) =>
@@ -36,6 +43,7 @@ namespace MatroxFrameGrabber.ViewModels
                     channel.RefreshStats();
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(AnyRawRecording));
+                StatsRefreshed?.Invoke();
             };
             _statsTimer.Start();
         }
@@ -92,6 +100,9 @@ namespace MatroxFrameGrabber.ViewModels
                     : path;
             }
         }
+
+        /// <summary>Raised on the UI thread after every stats tick, so the view can redraw.</summary>
+        public event Action StatsRefreshed;
 
         public RelayCommand StartAllCommand { get; }
         public RelayCommand StopAllCommand { get; }
