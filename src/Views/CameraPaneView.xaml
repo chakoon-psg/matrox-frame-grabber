@@ -55,8 +55,9 @@
                 <Button Content="Fit" Command="{Binding FitCommand}" />
                 <Button Content="1:1" Command="{Binding OneToOneCommand}" />
                 <ToggleButton x:Name="RoiSelectToggle" Content="⬚" Padding="6,3"
+                              Checked="RoiSelectToggle_Changed" Unchecked="RoiSelectToggle_Changed"
                               IsEnabled="{Binding CameraPresent}"
-                              ToolTip="영역 지정 모드: 화면에서 드래그해 분석 ROI를 지정합니다 (켜져 있는 동안 줌·팬은 잠깁니다)" />
+                              ToolTip="ROI 편집 모드: 모서리·변을 끌어 크기 변경, 안쪽을 끌어 이동, 바깥을 끌어 새로 지정 (켜져 있는 동안 줌·팬은 잠깁니다)" />
                 <Button Content="⤢" Click="Fullscreen_Click" ToolTip="Fullscreen (double-click view; ESC to return)" />
             </StackPanel>
         </Grid>
@@ -221,15 +222,7 @@
                     PreviewMouseMove="ViewBorder_PreviewMouseMove"
                     PreviewMouseLeftButtonUp="ViewBorder_PreviewMouseLeftButtonUp">
                 <Grid x:Name="ViewContentGrid">
-                    <Rectangle x:Name="RoiRect" Visibility="Collapsed"
-                               Stroke="{StaticResource Ch1Brush}" StrokeThickness="1.5"
-                               HorizontalAlignment="Left" VerticalAlignment="Top"
-                               IsHitTestVisible="False" />
-                    <Rectangle x:Name="DragRect" Visibility="Collapsed"
-                               Stroke="{StaticResource AccentBrush}" StrokeThickness="1.5"
-                               StrokeDashArray="3 2"
-                               HorizontalAlignment="Left" VerticalAlignment="Top"
-                               IsHitTestVisible="False" />
+                    <!-- The ROI rectangle and its eight handles are added here by RoiEditSurface. -->
                 </Grid>
             </Border>
 

@@ -191,17 +191,27 @@
 
         <!-- Fullscreen overlay: single display bound to the selected camera -->
         <Grid x:Name="FullscreenOverlay" Visibility="Collapsed" Background="Black">
-            <!-- The MILWPFDisplay is created lazily in code-behind (only with a valid DisplayId). -->
+            <!-- The MILWPFDisplay is created lazily in code-behind (only with a valid DisplayId),
+                 and RoiEditSurface adds the ROI rectangle and its handles to this grid. -->
             <Border x:Name="FullscreenBorder" Background="Black"
                     SizeChanged="FullscreenBorder_SizeChanged"
-                    PreviewMouseLeftButtonDown="FullscreenBorder_PreviewMouseLeftButtonDown" />
+                    PreviewMouseLeftButtonDown="FullscreenBorder_PreviewMouseLeftButtonDown"
+                    PreviewMouseMove="FullscreenBorder_PreviewMouseMove"
+                    PreviewMouseLeftButtonUp="FullscreenBorder_PreviewMouseLeftButtonUp">
+                <Grid x:Name="FullscreenContentGrid" />
+            </Border>
             <Border Background="#99000000" HorizontalAlignment="Center" VerticalAlignment="Top"
                     CornerRadius="0,0,6,6" Padding="12,4">
                 <TextBlock x:Name="FullscreenTitle" Foreground="White" FontSize="13"
                            Text="Double-click or press ESC to exit fullscreen" />
             </Border>
-            <Button Content="✕ Exit" Click="ExitFullscreen_Click" Padding="10,4"
-                    HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                        VerticalAlignment="Top" Margin="8">
+                <ToggleButton x:Name="FullscreenRoiToggle" Content="⬚" Padding="10,4" Margin="0,0,6,0"
+                              Checked="FullscreenRoiToggle_Changed" Unchecked="FullscreenRoiToggle_Changed"
+                              ToolTip="ROI 편집 모드: 모서리·변을 끌어 크기 변경, 안쪽을 끌어 이동, 바깥을 끌어 새로 지정" />
+                <Button Content="✕ Exit" Click="ExitFullscreen_Click" Padding="10,4" />
+            </StackPanel>
         </Grid>
     </Grid>
 </Window>

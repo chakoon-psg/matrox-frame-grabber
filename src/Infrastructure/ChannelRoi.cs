@@ -23,11 +23,34 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Bayer CFA phase floor: an odd offset or size swaps the colours.</summary>
         private const int CfaIncrement = 2;
 
-        /// <summary>Measured host DMA ceiling shared across channels (research.md section 8).</summary>
-        public const double HostDmaCeilingBytesPerSecond = 1.7e9;
+        /// <summary>
+        /// Smallest rectangle editing will produce, in image pixels.
+        ///
+        /// This is a limit of the editing surface, not of the measurement. Below roughly this size
+        /// the rectangle is smaller than one of its own drag handles, so the corners stop being
+        /// distinguishable and it cannot be grabbed again — and an unattended rescale can walk it
+        /// down to nothing without anyone asking.
+        ///
+        /// It was 64, on the grounds that an 8x8 tile grid wants eight pixels per tile. That is a
+        /// statement about the metrics, which do not exist yet and can say so themselves; it had no
+        /// business overruling the operator about which pixels to measure. How small a region is
+        /// worth analysing belongs to whatever analyses it.
+        /// </summary>
+        public const int MinEditableSize = 16;
+
+        /// <summary>
+        /// Measured host DMA ceiling, shared across channels (research.md section 8).
+        ///
+        /// 2026-08-27: 1.7 → 3.68 GB/s, after moving the board out of the chipset's x4 slot into
+        /// the CPU-attached x16 one. The link was the ceiling all along — Gen2 x4 carries 2.0 GB/s
+        /// in theory and the board measured 1.7; at x8 it measured 3.68 against a theoretical 4.0.
+        /// Both are now at the board's maximum: MaxLinkSpeed is Gen2 and MaxLinkWidth is 8, so
+        /// this number cannot be raised again without a different board.
+        /// </summary>
+        public const double HostDmaCeilingBytesPerSecond = 3.68e9;
 
         /// <summary>80% of the ceiling — above this the UI warns rather than silently dropping frames.</summary>
-        public const double WarnBytesPerSecond = 1.36e9;
+        public const double WarnBytesPerSecond = 2.94e9;
 
         public ChannelRoi(int offsetX, int offsetY, int width, int height)
         {
@@ -72,6 +95,41 @@ namespace MatroxFrameGrabber.Infrastructure
             if (h < eh) { h = eh; y = RoundDown(Math.Max(0, maxHeight - eh), ey); }
 
             return new ChannelRoi(x, y, w, h);
+        }
+
+        /// <summary>
+        /// Re-expresses this region for a different decimation factor.
+        ///
+        /// The region is stored in coordinates of the decimated frame, so the same four numbers
+        /// point at a different part of the scene once the factor changes: a rectangle drawn at
+        /// decimation 1 lands outside the frame entirely at decimation 2, which is how two
+        /// channels ended up with their rectangle off the image. The operator picked a part of the
+        /// panel, not a part of a buffer, so the rectangle has to move when the frame does.
+        ///
+        /// A region valid at the old factor is always valid at the new one — offset+size scales by
+        /// the same ratio as the frame — so this needs no clamp of its own.
+        ///
+        /// Factors this app does not offer are ignored rather than applied. A settings file can
+        /// hold anything, and scaling by a garbage ratio is worse than leaving the rectangle put.
+        /// </summary>
+        public ChannelRoi Rescale(int fromDecimation, int toDecimation)
+        {
+            if (IsFullFrame)
+                return FullFrame;
+            if (fromDecimation == toDecimation)
+                return this;
+            if (ClampDecimation(fromDecimation) != fromDecimation ||
+                ClampDecimation(toDecimation) != toDecimation)
+                return this;
+
+            // Floored, because halving has no natural stop: toggling decimation a few times drove a
+            // field rectangle from 504x308 to 46x26, and nothing said so. Below the minimum the
+            // region means nothing anyway, so keeping the size costs nothing and keeps it visible.
+            return new ChannelRoi(
+                RoundDown(OffsetX * fromDecimation / toDecimation, CfaIncrement),
+                RoundDown(OffsetY * fromDecimation / toDecimation, CfaIncrement),
+                Math.Max(MinEditableSize, RoundDown(Width * fromDecimation / toDecimation, CfaIncrement)),
+                Math.Max(MinEditableSize, RoundDown(Height * fromDecimation / toDecimation, CfaIncrement)));
         }
 
         /// <summary>

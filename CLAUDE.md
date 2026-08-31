@@ -140,16 +140,20 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   정지한다. 대상 버퍼를 바꿔도(중간 `M_PROC` 버퍼 경유) 마찬가지다. `MbufGetColor` 함정과 같은
   계열이다. **호스트 디베이어를 MIL로 할 수 없다** — 컬러가 필요하면 보드의
   `M_BAYER_CONVERSION`을 쓰면서 ROI/decimation으로 페이로드를 줄이는 것이 유일한 길이다.
-- **취득 대역폭에는 공유 천장이 있다(호스트 DMA 약 1.7 GB/s).** 채널 수와 무관하게 합계가 여기서
-  고정되고, 초과분은 `M_PROCESS_FRAME_MISSED`로 조용히 사라진다. 성능 작업을 하기 전에
-  [research.md](research.md) 8절의 실측표를 볼 것 — **표시 경로를 최적화해도 취득 fps는 늘지
-  않는다**(측정으로 확인). 프레임당 페이로드만이 레버다.
-  **그 천장은 PCIe 링크 폭이다.** 2026-08-24에 확인: 보드가 Gen2 **x4**로 붙어 있고(실효
-  1.6~1.8 GB/s = 실측값과 일치) 보드 자체는 **x8을 지원한다**(`MaxLinkWidth = 8`). x8 슬롯으로
-  옮기면 천장이 대략 두 배가 되어 이 제약 자체가 사라질 수 있다.
-  **그리고 지금 카드는 칩셋 뒤의 x4 슬롯에 있고, CPU 직결 x16 슬롯(`PCIE1`)은 비어 있다**
-  (외장 GPU 없음). 즉 카드를 옮기는 것만으로 x8이 될 수 있다 — 소프트웨어로 페이로드를 깎기
-  전에 **슬롯을 먼저 확인할 것**. 확인 명령과 옮긴 뒤의 검증 순서는 research.md 8절에 있다.
+- **취득 대역폭에는 공유 천장이 있다(호스트 DMA **3.68 GB/s**, 2026-08-27 실측).** 채널 수와
+  무관하게 합계가 여기서 고정되고, 초과분은 `M_PROCESS_FRAME_MISSED`로 조용히 사라진다.
+  성능 작업을 하기 전에 [research.md](research.md) 8절의 실측표를 볼 것 — **표시 경로를
+  최적화해도 취득 fps는 늘지 않는다**(측정으로 확인). 프레임당 페이로드만이 레버다.
+  **그 천장은 PCIe 링크 폭이었다.** 보드가 칩셋 뒤의 x4 슬롯에 있을 때 1.70 GB/s였고, CPU 직결
+  x16 슬롯으로 옮겨 x8로 붙자 **3.68 GB/s**가 됐다(Gen2 x8 이론치 4.0의 92%).
+  **이제 더 올릴 수 없다** — `MaxLinkSpeed`도 `MaxLinkWidth`도 현재값과 같아 보드가 자기 최대에
+  있다. 카드를 다시 옮기거나 BIOS를 만지기 전에 `CurrentLinkWidth`부터 읽을 것(명령은 8절에 있다).
+  **100 fps에서는 원본 해상도 컬러 3채널이 들어온다**(2.87 GB/s, 천장의 78%) — 그 지점에서는
+  디시메이션도 1밴드도 필요 없다.
+- **전원을 내리면 카메라 설정이 초기화된다 — 앱 종료와 다르다.** 카드 교체로 PC 전원을 내린 뒤
+  노출이 5388 µs로, `AcquisitionFrameRateEnable`이 Off로 돌아와 있었다. 아래 항목의 "앱을 닫아도
+  남는다"는 앱 재시작에 대한 것이고, 전원 재인가는 그것과 다르다. 하드웨어를 만진 뒤에는 노출과
+  레이트 캡을 다시 확인할 것.
 - **카메라 GenICam 설정 일부는 보드가 아니라 카메라에 영속된다.** `AcquisitionFrameRate` /
   `AcquisitionFrameRateEnable`, `DecimationHorizontal` / `Vertical`이 그렇다. 앱을 닫아도 남으니
   `M_BAYER_CONVERSION`과 같은 복구 규율을 적용할 것. 그리고 이들은 **정수형 피처라
@@ -165,11 +169,15 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `DecimationHorizontal` / `Vertical`이며, 이쪽은 같은 할당된 digitizer에서 정상 동작한다
   (실측: decimation 2 → 1024×772 컬러 184.1 fps, 유실 0).
   **지오메트리 피처를 쓴 뒤에는 반드시 다시 읽어 확인할 것.** 반환값만 믿으면 안 된다.
-  2026-08-21에 이유가 확인됐다: `M_FEATURE_ACCESS_MODE`가 네 노드 모두 **`M_FEATURE_READ_ONLY`**
-  (4)로 답한다. 같은 조회에서 decimation은 `M_FEATURE_READ_WRITE`(5)다. 즉 추측이 아니라
-  카메라가 스스로 못 쓴다고 말한다 — 이 값은 앱 시작 때마다 `mil-errors.log`에 찍힌다.
-  주의: 이 확인은 **decimation 2가 걸린 상태**에서 한 것이다. 일부 카메라는 decimation이
-  영역을 지배하면 `Width`를 read-only로 바꾼다 — decimation 1에서도 RO인지는 아직 확인되지 않았다.
+  **access mode는 이 실패를 설명하지 못한다 — 2026-08-27에 그 추론을 철회했다.**
+  `M_FEATURE_ACCESS_MODE`는 **decimation에 따라 답이 바뀐다**: decimation 2에서 네 노드가
+  `M_FEATURE_READ_ONLY`(4)이고, decimation 1에서는 `M_FEATURE_READ_WRITE`(5)다. 그런데 크롭이
+  무시된 그 측정은 `Width`가 2064였을 때, 즉 **decimation 1에서** 한 것이다 — 노드가 RW라고
+  답하는 바로 그 조건이다. 08-21에 "카메라가 스스로 못 쓴다고 말한다"고 적은 것은 decimation 2에서
+  읽은 값을 다른 조건의 실패에 갖다 붙인 것이었다.
+  남는 사실은 처음 그대로다 — **RW라고 답하는 상태에서도 쓰기가 무시된다.** 그래서 read-back
+  규칙이 오히려 더 중요해진다: 반환값도, access mode도 믿을 수 없다. 값은 앱 시작 때마다
+  `mil-errors.log`에 찍히니 지금 어느 상태인지는 거기서 볼 것.
 - **실제 하드웨어 증분은 2가 아니다.** 이 카메라는 `Width` 증분 **16**, `Height` 증분 **4**를
   보고한다. 짝수 가정만으로 계산하면 격자에서 벗어난다 — `M_FEATURE_INCREMENT`를 조회할 것.
 - **앱을 강제 종료하면 카메라의 지오메트리 노드가 잠긴다.** 작업 관리자 종료, 디버거 중단,

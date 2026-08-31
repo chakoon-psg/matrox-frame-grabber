@@ -29,6 +29,8 @@ namespace MatroxFrameGrabber.Views
         private MainViewModel _viewModel;
         private CameraChannel _fullscreenChannel;
         private MILWPFDisplay _fullscreenDisplay;
+        private CameraPaneView _fullscreenPane;
+        private RoiEditSurface _fullscreenRoi;
         private bool _escHookInstalled;
         private string _initError;
 
@@ -78,6 +80,9 @@ namespace MatroxFrameGrabber.Views
             Pane1?.RefreshRoiOverlay();
             Pane2?.RefreshRoiOverlay();
             Pane3?.RefreshRoiOverlay();
+            // The overlay follows the same tick: it shows the same rectangle over the same
+            // display, and MIL raises no event when the operator zooms.
+            _fullscreenRoi?.Refresh();
         }
 
         /// <summary>
@@ -246,29 +251,47 @@ namespace MatroxFrameGrabber.Views
 
         // ----- Fullscreen -----
 
-        private void Pane_FullscreenRequested(object sender, CameraChannel channel)
-        {
-            EnterFullscreen(channel);
-        }
-
-        // A pane's "apply to all" button: copy that camera's capture settings to every other camera.
         private void Pane_ApplyToAllRequested(object sender, EventArgs e)
         {
             if ((sender as CameraPaneView)?.DataContext is CameraChannel source)
                 _viewModel?.ApplyAllSettings(source);
         }
 
-        private void EnterFullscreen(CameraChannel channel)
+        private void Pane_FullscreenRequested(object sender, CameraChannel channel)
         {
-            if (channel == null || !channel.CameraPresent || _fullscreenChannel != null)
+            EnterFullscreen(sender as CameraPaneView, channel);
+        }
+
+        /// <summary>
+        /// Moves the pane's display control into the overlay. Creating a second control for the
+        /// same DisplayId is what left the pane scaled to the overlay after returning — MIL has one
+        /// zoom per display, and "fit to window" cannot choose between two windows.
+        /// </summary>
+        private void EnterFullscreen(CameraPaneView pane, CameraChannel channel)
+        {
+            if (pane == null || channel == null || !channel.CameraPresent || _fullscreenChannel != null)
+                return;
+
+            MILWPFDisplay display = pane.DetachDisplay();
+            if (display == null)
                 return;
 
             _fullscreenChannel = channel;
+            _fullscreenPane = pane;
+            _fullscreenDisplay = display;
             FullscreenTitle.Text = $"{channel.Name} — double-click or press ESC to exit";
+            // The overlay must be empty on entry. It has now been left holding visuals twice, and
+            // the symptom both times was a rectangle that looked untracked rather than an error.
+            if (FullscreenContentGrid.Children.Count != 0)
+                MilErrorLog.Note($"fullscreen overlay entered holding "
+                               + $"{FullscreenContentGrid.Children.Count} leftover element(s)");
+            FullscreenContentGrid.Children.Insert(0, display);
 
-            // Create the display control on demand, bound to the selected camera's display.
-            _fullscreenDisplay = new MILWPFDisplay { DisplayId = channel.DisplayId };
-            FullscreenBorder.Child = _fullscreenDisplay;
+            // Edit mode starts off every time. Carrying the pane toggle's state across would leave
+            // the operator wondering why the handles are showing on a screen they just opened.
+            FullscreenRoiToggle.IsChecked = false;
+            _fullscreenRoi = new RoiEditSurface(FullscreenBorder, FullscreenContentGrid,
+                                                () => _fullscreenChannel, "fullscreen");
 
             MainContent.Visibility = Visibility.Collapsed;
             FullscreenOverlay.Visibility = Visibility.Visible;
@@ -285,15 +308,37 @@ namespace MatroxFrameGrabber.Views
 
             RemoveEscHook();
             FullscreenOverlay.Visibility = Visibility.Collapsed;
-            FullscreenBorder.Child = null;           // drop the overlay display control
+            // The visuals belong to the surface, not to the grid: the grid keeps the display
+            // control, which is handed back to the pane.
+            _fullscreenRoi?.RemoveVisuals();
+            _fullscreenRoi = null;
+
+            if (_fullscreenDisplay != null)
+                FullscreenContentGrid.Children.Remove(_fullscreenDisplay);
             _fullscreenDisplay = null;
+
             MainContent.Visibility = Visibility.Visible;
 
-            var channel = _fullscreenChannel;
+            CameraPaneView pane = _fullscreenPane;
+            CameraChannel channel = _fullscreenChannel;
+            _fullscreenPane = null;
             _fullscreenChannel = null;
 
-            Dispatcher.BeginInvoke(new Action(() => channel.FitToWindow()),
-                System.Windows.Threading.DispatcherPriority.Loaded);
+            // Synchronously: the control needs its parent back before the layout pass, or the fit
+            // below is computed against a pane that has no size yet.
+            pane?.ReattachDisplay();
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                channel.FitToWindow();
+                // The zoom the pane will map its ROI rectangle with. Recorded once per exit,
+                // because the whole failure was this number staying at the overlay's fit.
+                if (channel.TryGetViewGeometry(out int fw, out int fh, out double zoom, out double ox, out double oy))
+                    MilErrorLog.Note($"{channel.Name}: back from fullscreen - frame {fw}x{fh}, "
+                                   + $"zoom {zoom:F3}, offset {ox:F0},{oy:F0}");
+                else
+                    MilErrorLog.Note($"{channel.Name}: back from fullscreen - view geometry unreadable");
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
         private void ExitFullscreen_Click(object sender, RoutedEventArgs e) => ExitFullscreen();
@@ -306,10 +351,48 @@ namespace MatroxFrameGrabber.Views
 
         private void FullscreenBorder_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
+            // Edit mode takes the press first, so a drag near the rectangle cannot be read as the
+            // double-click that leaves fullscreen.
+            if (_fullscreenRoi != null && _fullscreenRoi.TryBeginDrag(e))
+            {
+                e.Handled = true;
+                return;
+            }
+
             if (e.ClickCount == 2)
             {
                 ExitFullscreen();
                 e.Handled = true;
+            }
+        }
+
+        private void FullscreenBorder_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (_fullscreenRoi == null) return;
+            bool wasDragging = _fullscreenRoi.IsDragging;
+            _fullscreenRoi.ContinueDrag(e);
+            if (wasDragging)
+                e.Handled = true;
+        }
+
+        private void FullscreenBorder_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (_fullscreenRoi == null || !_fullscreenRoi.IsDragging) return;
+            _fullscreenRoi.EndDrag(e);
+            e.Handled = true;
+        }
+
+        private void FullscreenRoiToggle_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_fullscreenRoi == null) return;
+            if (FullscreenRoiToggle.IsChecked == true)
+            {
+                _fullscreenRoi.EditMode = true;
+                _fullscreenRoi.Refresh();
+            }
+            else
+            {
+                _fullscreenRoi.ExitEditMode();
             }
         }
 
@@ -339,8 +422,14 @@ namespace MatroxFrameGrabber.Views
                 && msg.wParam.ToInt32() == VK_ESCAPE
                 && FullscreenOverlay.Visibility == Visibility.Visible)
             {
-                ExitFullscreen();   // also removes this hook
-                handled = true;     // swallow ESC so MIL doesn't act on it
+                // Mid-drag, ESC belongs to the drag: abandoning the rectangle you are dragging is
+                // what the key means there, and leaving fullscreen as well would take away the
+                // screen you were working on.
+                if (_fullscreenRoi != null && _fullscreenRoi.IsDragging)
+                    _fullscreenRoi.CancelDrag();
+                else
+                    ExitFullscreen();   // also removes this hook
+                handled = true;         // swallow ESC so MIL doesn't act on it
             }
         }
 

@@ -592,6 +592,17 @@ namespace MatroxFrameGrabber.Mil
             _cameraLost = false; _lostPolls = 0;
             RefreshFeatureState();
 
+            // The analysis rectangle as actually applied, after the load-time snap. Logged because
+            // a stale one is invisible until somebody notices the overlay sitting off the image.
+            if (CameraPresent)
+            {
+                // Frame size formatted here rather than reused from DecimationHint: that one is
+                // UI text and carries a multiplication sign, which the log should not (see the
+                // ASCII note on MilErrorLog).
+                TryGetFrameSize(out int frameW, out int frameH);
+                MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {frameW}x{frameH} (decim {_decimation})");
+            }
+
             RaisePropertyChanged(nameof(CameraPresent));
             RaisePropertyChanged(nameof(StatusText));
             RaiseCommandStates();
@@ -654,7 +665,14 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException e) { MilErrorLog.Write($"{Name}: set display background colour", e); }
             ApplyDisplayUpdateCap();
 
-            _analysisRoi = Output?.GetRoi(_index) ?? ChannelRoi.FullFrame;
+            // Snap on load, not only on operator input. A settings file can hold a rectangle that
+            // no longer fits — one written at a different decimation factor, or edited by hand —
+            // and the interactive path is the only one that used to clamp. Drawing an out-of-range
+            // rectangle verbatim puts the overlay off the image, which is how the operator sees it.
+            ChannelRoi stored = Output?.GetRoi(_index) ?? ChannelRoi.FullFrame;
+            _analysisRoi = !stored.IsFullFrame && TryGetFrameSize(out int roiW, out int roiH)
+                ? stored.Snap(roiW, roiH)
+                : stored;
             SyncRoiInputs();
 
             if (CameraPresent)
@@ -1924,7 +1942,15 @@ namespace MatroxFrameGrabber.Mil
             if (wasGrabbing)
                 StopGrab();
 
-            Output?.SetDecimation(_index, wanted);
+            OutputSettings settings = Output;
+            settings?.SetDecimation(_index, wanted);
+
+            // Move the analysis rectangle with the frame. It is stored in coordinates of the
+            // decimated frame, so halving the factor doubles the frame under a rectangle that does
+            // not move — and one drawn at decimation 1 lands outside a decimation-2 frame
+            // altogether. This has to happen before AllocateCamera, which reloads the value.
+            if (settings != null && _decimation != wanted)
+                settings.SetRoi(_index, settings.GetRoi(_index).Rescale(_decimation, wanted));
 
             FreeCamera();
             _cameraAvailable = true;
