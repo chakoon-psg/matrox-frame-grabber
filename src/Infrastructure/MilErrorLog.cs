@@ -20,9 +20,45 @@ namespace MatroxFrameGrabber.Infrastructure
     {
         private static readonly object Gate = new object();
 
-        private static readonly string LogPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MatroxFrameGrabber", "mil-errors.log");
+        /// <summary>
+        /// Added to the log's file name, so processes sharing one board do not share one file.
+        ///
+        /// The lock above is process-local: it orders writes within a process and does nothing
+        /// between them. Two processes appending to the same file interleave and lose lines — which
+        /// is not a theoretical worry, it silently corrupted the first split-process measurement
+        /// taken here, making a channel that had run fine look like it never started.
+        ///
+        /// Set this before the first write. A cross-process mutex would be the other answer, but a
+        /// separate file per process is simpler and gives per-camera logs, which is what anyone
+        /// running a split would want to read anyway.
+        /// </summary>
+        public static string FileSuffix
+        {
+            get => _fileSuffix;
+            set
+            {
+                lock (Gate)
+                {
+                    _fileSuffix = string.IsNullOrWhiteSpace(value) ? "" : value;
+                    _logPath = null;
+                }
+            }
+        }
+
+        private static string _fileSuffix = "";
+        private static string _logPath;
+
+        private static string LogPath
+        {
+            get
+            {
+                if (_logPath == null)
+                    _logPath = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "MatroxFrameGrabber", $"mil-errors{_fileSuffix}.log");
+                return _logPath;
+            }
+        }
 
         /// <summary>Trim the file once it passes this, so a repeating fault cannot fill the disk.</summary>
         private const long MaxBytes = 2 * 1024 * 1024;

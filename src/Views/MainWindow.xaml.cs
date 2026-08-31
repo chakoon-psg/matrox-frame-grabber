@@ -44,7 +44,7 @@ namespace MatroxFrameGrabber.Views
             // display id makes MIL raise an error dialog).
             try
             {
-                _manager = new MilApplicationManager();
+                _manager = new MilApplicationManager { OwnedChannels = App.OwnedChannels };
                 _manager.Allocate();
 
                 // Surface unexpected recording stops (e.g. ffmpeg died) and camera loss.

@@ -58,6 +58,18 @@ namespace MatroxFrameGrabber
         /// </summary>
         public static bool PwmSweepScan { get; private set; }
 
+        private const string ChannelsSwitch = "--channels";
+
+        /// <summary>
+        /// Channel indices this process should take a digitizer for, from <c>--channels 0,1</c>.
+        /// Null — the default — means all of them.
+        ///
+        /// This is here to answer whether the board can be split one process per camera. Two full
+        /// instances always collide on the same four ports, so without a way to hand each process a
+        /// different subset the question cannot be asked at all.
+        /// </summary>
+        public static System.Collections.Generic.HashSet<int> OwnedChannels { get; private set; }
+
         /// <summary>True while a PWM sweep is driving the app.</summary>
         public static bool PwmSweeping => !string.IsNullOrEmpty(PwmSweepChannel);
 
@@ -70,7 +82,29 @@ namespace MatroxFrameGrabber
             PwmSweepChannel = ParseSwitchValue(e.Args, PwmSweepSwitch);
             PwmSweepRoom = HasSwitch(e.Args, PwmRoomSwitch);
             PwmSweepScan = HasSwitch(e.Args, PwmScanSwitch);
+            OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
+
+            // Processes sharing a board must not share a log file — the log's lock is process-local,
+            // so they would interleave and drop each other's lines. Only a split run gets a suffix,
+            // so the ordinary single-process log keeps its name.
+            if (OwnedChannels != null)
+                MilErrorLog.FileSuffix = "-ch" + string.Join("", OwnedChannels);
+
             base.OnStartup(e);
+        }
+
+        /// <summary>Reads "0,2" into a set. Null for absent or unparseable, meaning all channels.</summary>
+        private static System.Collections.Generic.HashSet<int> ParseChannels(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            var set = new System.Collections.Generic.HashSet<int>();
+            foreach (string part in value.Split(','))
+                if (int.TryParse(part.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture,
+                                 out int index))
+                    set.Add(index);
+
+            return set.Count > 0 ? set : null;
         }
 
         /// <summary>Reads <c>--switch value</c> or <c>--switch=value</c>. Null when absent.</summary>
