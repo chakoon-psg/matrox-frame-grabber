@@ -59,10 +59,15 @@ src/
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
                                  GenICamFeatures, RecordingSession, BrightnessMeter
-  Infrastructure/              MatroxFrameGrabber.Infrastructure
+  Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
                                  OutputSettings, FfmpegRecorder, RawFrameWriter,
                                  RawSegmentSession, RelayCommand, NativeMethods,
-                                 BrightnessHistory
+                                 BrightnessHistory, ChannelRoi, RoiGesture,
+                                 DisplayMapping, BrightnessSamplePlan, PwmSweep,
+                                 TileGrid, FrameMetrics, AnomalyDetector
+tests/                         MatroxFrameGrabber.Tests (153개). csproj가 위 파일들을
+                               ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
+                               MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다.
 docs/
 LICENSES/                       동봉 서드파티 라이선스 고지
 tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
