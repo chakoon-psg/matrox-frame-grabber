@@ -28,6 +28,7 @@ namespace MatroxFrameGrabber
 
         private const string PwmSweepSwitch = "--pwm-sweep";
         private const string PwmRoomSwitch = "--pwm-room";
+        private const string PwmScanSwitch = "--pwm-scan";
 
         /// <summary>
         /// Channel to run the backlight PWM exposure sweep on, from <c>--pwm-sweep CAM0</c>.
@@ -46,6 +47,17 @@ namespace MatroxFrameGrabber
         /// </summary>
         public static bool PwmSweepRoom { get; private set; }
 
+        /// <summary>
+        /// Measure the whole ripple-vs-exposure curve instead of testing two hypotheses, from
+        /// <c>--pwm-scan</c>. 29 points at 20 s each, so about ten minutes.
+        ///
+        /// The four-point sweep can only answer "100 Hz family, 120 Hz family, or neither", and
+        /// "neither" leaves the operator to go and find the minimum by hand. Scanning reads the
+        /// nulls straight off the curve and works for any frequency; it only costs time, and the
+        /// time is no longer a person's.
+        /// </summary>
+        public static bool PwmSweepScan { get; private set; }
+
         /// <summary>True while a PWM sweep is driving the app.</summary>
         public static bool PwmSweeping => !string.IsNullOrEmpty(PwmSweepChannel);
 
@@ -57,6 +69,7 @@ namespace MatroxFrameGrabber
             AutoRunSeconds = ParseAutoRunSeconds(e.Args);
             PwmSweepChannel = ParseSwitchValue(e.Args, PwmSweepSwitch);
             PwmSweepRoom = HasSwitch(e.Args, PwmRoomSwitch);
+            PwmSweepScan = HasSwitch(e.Args, PwmScanSwitch);
             base.OnStartup(e);
         }
 

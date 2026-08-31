@@ -163,7 +163,9 @@ namespace MatroxFrameGrabber.Views
                 return;
             }
 
-            int[] exposures = room ? PwmSweep.RoomExposuresUs : PwmSweep.PanelExposuresUs;
+            int[] exposures = room ? PwmSweep.RoomExposuresUs
+                            : App.PwmSweepScan ? PwmSweep.ScanExposuresUs
+                            : PwmSweep.PanelExposuresUs;
             string label = room ? "room" : "panel";
 
             MilErrorLog.Note($"pwm-sweep: {channel.Name}, {label}, {exposures.Length} points, " +
@@ -186,6 +188,7 @@ namespace MatroxFrameGrabber.Views
             bool settling = false;
             float min = 0, max = 0, clip = 0;
             double sum = 0;
+            double resultingFps = 0;
             int taken = 0;
 
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PwmSampleIntervalMs) };
@@ -203,8 +206,9 @@ namespace MatroxFrameGrabber.Views
 
                 int us = exposures[index];
                 bool ok = channel.SetExposureUs(us);
+                channel.TryGetResultingFps(out resultingFps);
                 MilErrorLog.Note($"pwm-sweep: exposure {us} us -> {(ok ? "applied" : "REJECTED")}, " +
-                                 $"readback {channel.ExposureInput}");
+                                 $"readback {channel.ExposureInput}, camera fps {resultingFps:0.#}");
 
                 // Settle before counting anything. The camera finishes the frame it is on, the
                 // rate changes with the exposure, and the display buffer still holds a frame taken
@@ -227,7 +231,7 @@ namespace MatroxFrameGrabber.Views
 
                     results.Add(new PwmPoint(label, exposures[index],
                         taken > 0 ? min : 0, taken > 0 ? max : 0,
-                        taken > 0 ? (float)(sum / taken) : 0, clip, taken));
+                        taken > 0 ? (float)(sum / taken) : 0, clip, taken, resultingFps));
                     MilErrorLog.Note(
                         $"pwm-sweep: {exposures[index]} us - min {min:0.##} max {max:0.##} " +
                         $"ripple {results[results.Count - 1].RipplePercent:0.0}% " +

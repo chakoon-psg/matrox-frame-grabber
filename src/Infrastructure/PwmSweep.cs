@@ -31,8 +31,16 @@ namespace MatroxFrameGrabber.Infrastructure
         public readonly float MaxClippedPct;
         public readonly int Samples;
 
+        /// <summary>
+        /// The camera's own <c>ResultingFrameRate</c> at this exposure, or 0 when it does not have
+        /// the feature. Two jobs: it confirms the exposure actually took (the rate moves with it),
+        /// and it is the only direct answer to what this camera's rate ceiling really is at the
+        /// current decimation — the 184 in the model name is the full-resolution figure.
+        /// </summary>
+        public readonly double ResultingFps;
+
         public PwmPoint(string label, int exposureUs, float minLuma, float maxLuma,
-                        float meanLuma, float maxClippedPct, int samples)
+                        float meanLuma, float maxClippedPct, int samples, double resultingFps = 0)
         {
             Label = label;
             ExposureUs = exposureUs;
@@ -41,6 +49,7 @@ namespace MatroxFrameGrabber.Infrastructure
             MeanLuma = meanLuma;
             MaxClippedPct = maxClippedPct;
             Samples = samples;
+            ResultingFps = resultingFps;
         }
 
         /// <summary>Ripple as a percentage of the mean — the figure the whole procedure turns on.</summary>
@@ -53,7 +62,8 @@ namespace MatroxFrameGrabber.Infrastructure
             MaxLuma.ToString("0.###", CultureInfo.InvariantCulture),
             MeanLuma.ToString("0.###", CultureInfo.InvariantCulture),
             MaxClippedPct.ToString("0.###", CultureInfo.InvariantCulture),
-            Samples.ToString(CultureInfo.InvariantCulture));
+            Samples.ToString(CultureInfo.InvariantCulture),
+            ResultingFps.ToString("0.###", CultureInfo.InvariantCulture));
 
         public static bool TryParseCsvLine(string line, out PwmPoint point)
         {
@@ -61,7 +71,7 @@ namespace MatroxFrameGrabber.Infrastructure
             if (string.IsNullOrWhiteSpace(line)) return false;
 
             string[] f = line.Split(',');
-            if (f.Length < 7) return false;
+            if (f.Length < 7) return false;   // the 8th (resulting fps) is optional: files predate it
 
             if (!int.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int us)) return false;
             if (!float.TryParse(f[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float min)) return false;
@@ -70,7 +80,11 @@ namespace MatroxFrameGrabber.Infrastructure
             if (!float.TryParse(f[5], NumberStyles.Float, CultureInfo.InvariantCulture, out float clip)) return false;
             if (!int.TryParse(f[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)) return false;
 
-            point = new PwmPoint(f[0], us, min, max, mean, clip, n);
+            double fps = 0;
+            if (f.Length >= 8)
+                double.TryParse(f[7], NumberStyles.Float, CultureInfo.InvariantCulture, out fps);
+
+            point = new PwmPoint(f[0], us, min, max, mean, clip, n, fps);
             return true;
         }
     }
@@ -124,6 +138,31 @@ namespace MatroxFrameGrabber.Infrastructure
         /// gone at 8333, that identifies it and no blackout curtain is needed.
         /// </summary>
         public static readonly int[] RoomExposuresUs = { 6500, 8333 };
+
+        /// <summary>
+        /// The scan: every exposure from 4000 to 11000 us in 250 us steps, 29 points.
+        ///
+        /// The four-point sweep tests two hypotheses — is this a 100 Hz family or a 120 Hz one —
+        /// and has nothing to say about any other answer. That design came from a person reading a
+        /// number off the screen for fifteen seconds at a time, where six points was already
+        /// tedious. Automated it is 20 s a point, so measuring the curve and reading the nulls off
+        /// it costs about ten minutes and answers for any frequency instead of two.
+        ///
+        /// 250 us resolves nulls down to a period of about 2000 us, which is 500 Hz. Above that the
+        /// nulls crowd together faster than the scan can separate them — but they stop mattering
+        /// at the same time: |sinc(pi*f*T)| falls as 1/(pi*f*T), so by 2 kHz any exposure in this
+        /// range already suppresses the ripple to under 3% of its raw amplitude. The resolution
+        /// runs out exactly where the problem does.
+        /// </summary>
+        public static int[] ScanExposuresUs
+        {
+            get
+            {
+                var list = new List<int>();
+                for (int us = 4000; us <= 11000; us += 250) list.Add(us);
+                return list.ToArray();
+            }
+        }
 
         /// <summary>A point is a null when its ripple is under a third of the reference's.</summary>
         public const double NullFraction = 1.0 / 3.0;
@@ -224,7 +263,311 @@ namespace MatroxFrameGrabber.Infrastructure
             return "실내 조명 리플이 있고 8333 µs에서도 남습니다 — 120 Hz가 아닙니다. 차광이 필요합니다.";
         }
 
-        public const string CsvHeader = "label,exposure_us,min_luma,max_luma,mean_luma,max_clipped_pct,samples";
+        // ----- Reading the scan curve -----
+
+        /// <summary>An exposure where the ripple collapsed — a whole multiple of the PWM period.</summary>
+        public readonly struct PwmNull
+        {
+            /// <summary>The scan point that came out lowest — a multiple of the 250 us step.</summary>
+            public readonly int ExposureUs;
+            public readonly double RipplePercent;
+
+            /// <summary>
+            /// Where the null really sits, interpolated between the grid points around it.
+            ///
+            /// This matters more than it looks. Taking the grid point alone reads a 240 Hz backlight
+            /// as 250 Hz, and the exposure computed from 250 Hz misses the real null by 333 us —
+            /// so the ripple would not cancel at the very exposure the procedure recommends.
+            ///
+            /// |sinc| approaches a zero linearly from both sides, so the curve near a null is a V,
+            /// not a parabola. For a symmetric V the offset from the middle sample is
+            /// <c>h * (left - right) / (left + right)</c>, which is exact when the two slopes match.
+            /// </summary>
+            public readonly double RefinedExposureUs;
+
+            public PwmNull(int exposureUs, double ripplePercent, double refinedExposureUs)
+            {
+                ExposureUs = exposureUs;
+                RipplePercent = ripplePercent;
+                RefinedExposureUs = refinedExposureUs;
+            }
+        }
+
+        /// <summary>
+        /// The exposures where the ripple fell away, in ascending order. A point qualifies when it
+        /// is no higher than both neighbours and under <see cref="NullFraction"/> of the scan's
+        /// worst ripple — the worst point stands in for "PWM fully visible", the way the 6500 us
+        /// reference does in the four-point sweep.
+        /// </summary>
+        public static List<PwmNull> FindNulls(IReadOnlyList<PwmPoint> points, string label = "panel")
+        {
+            var scan = new List<PwmPoint>();
+            for (int i = 0; i < (points?.Count ?? 0); i++)
+                if (string.Equals(points[i].Label, label, StringComparison.OrdinalIgnoreCase))
+                    scan.Add(points[i]);
+
+            var found = new List<PwmNull>();
+            scan.Sort((a, b) => a.ExposureUs.CompareTo(b.ExposureUs));
+
+            // Only a real scan. The four-point sweep also has a lowest point, and calling that a
+            // null would let the report announce a frequency read off four unevenly spaced samples
+            // — which is exactly the over-reach the scan mode exists to replace. Both the
+            // interpolation and the "which multiples would the scan have caught" argument assume an
+            // even grid, so neither is available here.
+            if (!IsEvenGrid(scan)) return found;
+
+            double worst = 0;
+            foreach (PwmPoint p in scan)
+                if (p.RipplePercent > worst) worst = p.RipplePercent;
+
+            // A flat curve has no nulls to find — there was no ripple to null in the first place.
+            if (worst < NoRippleThresholdPercent) return found;
+
+            double limit = worst * NullFraction;
+
+            for (int i = 1; i < scan.Count - 1; i++)
+            {
+                double r = scan[i].RipplePercent;
+                if (r > limit) continue;
+                if (r > scan[i - 1].RipplePercent || r > scan[i + 1].RipplePercent) continue;
+
+                // A flat-bottomed valley qualifies once, at its first sample, rather than reporting
+                // every point across the bottom as its own null and halving the inferred period.
+                if (found.Count > 0 && scan[i].ExposureUs - found[found.Count - 1].ExposureUs <= 250)
+                    continue;
+
+                double left = scan[i - 1].RipplePercent;
+                double right = scan[i + 1].RipplePercent;
+                double h = (scan[i + 1].ExposureUs - scan[i - 1].ExposureUs) / 2.0;
+                double sum = left + right;
+                double refined = sum > 0
+                    ? scan[i].ExposureUs + h * (left - right) / sum
+                    : scan[i].ExposureUs;
+
+                found.Add(new PwmNull(scan[i].ExposureUs, r, refined));
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// The PWM frequency the nulls imply, or 0 when the scan cannot say.
+        ///
+        /// Nulls sit at whole multiples of the period, so the spacing between neighbouring nulls is
+        /// the period itself and needs no guess about which multiple each one is.
+        ///
+        /// A single null can often still be resolved. It looks ambiguous — T is consistent with
+        /// k/f for every k — but a larger k implies neighbouring nulls at T*(k-1)/k and T*(k+1)/k,
+        /// and if either of those would have fallen inside the scanned range, the scan would have
+        /// found it. Every k whose neighbours should have been visible is therefore ruled out. For a
+        /// lone null at 8333 us in a 4000-11000 scan, k=2 would put one at 4167 — inside the range,
+        /// and absent — so k=1 stands and the answer is 120 Hz. Only when no k can be excluded does
+        /// this return 0 and leave the caller to report candidates.
+        /// </summary>
+        public static double InferFrequencyHz(IReadOnlyList<PwmPoint> points, string label = "panel")
+        {
+            List<PwmNull> nulls = FindNulls(points, label);
+            if (nulls.Count == 0) return 0;
+
+            if (nulls.Count == 1)
+                return SingleNullFrequency(nulls[0].RefinedExposureUs);
+
+            // Least squares through (index, exposure), not the median gap. The nulls are only known
+            // to the scan's 250 us grid, so each one carries up to 125 us of quantisation — and a
+            // single gap inherits the error of both its ends. Fitting the whole line averages that
+            // down: at 480 Hz the median gap reads 500 Hz, the fit reads 482.
+            int n = nulls.Count;
+            double meanIndex = (n - 1) / 2.0;
+            double meanUs = 0;
+            for (int i = 0; i < n; i++) meanUs += nulls[i].RefinedExposureUs;
+            meanUs /= n;
+
+            double cov = 0, varIndex = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double di = i - meanIndex;
+                cov += di * (nulls[i].RefinedExposureUs - meanUs);
+                varIndex += di * di;
+            }
+
+            double periodUs = varIndex > 0 ? cov / varIndex : 0;
+            return periodUs > 0 ? 1e6 / periodUs : 0;
+        }
+
+        /// <summary>
+        /// The frequency a lone null implies, or 0 when more than one multiple survives. See
+        /// <see cref="InferFrequencyHz"/> for why a single null is usually not ambiguous.
+        /// </summary>
+        private static double SingleNullFrequency(double nullUs)
+        {
+            if (nullUs <= 0) return 0;
+
+            int[] scan = ScanExposuresUs;
+            int n = scan.Length;
+            if (n < 3) return 0;
+
+            double step = scan[1] - scan[0];
+
+            // What the scan can actually catch. FindNulls needs a sample on either side, so the two
+            // end points can never be nulls — the usable grid runs from scan[1] to scan[n-2]. A true
+            // null lands on the nearest grid point, up to half a step away, so anything within half
+            // a step of that usable span would have been found.
+            double detectLo = scan[1] - step / 2;
+            double detectHi = scan[n - 2] + step / 2;
+
+            double onlyK = 0;
+            for (int k = 1; k <= 8; k++)
+            {
+                double period = nullUs / k;
+                bool neighbourWouldHaveShown =
+                    Detectable(nullUs - period, detectLo, detectHi) ||
+                    Detectable(nullUs + period, detectLo, detectHi);
+                if (neighbourWouldHaveShown)
+                    continue;           // the scan would have caught it, and did not — rule k out
+
+                if (onlyK > 0) return 0;   // more than one k survives: genuinely ambiguous
+                onlyK = k;
+            }
+
+            return onlyK > 0 ? 1e6 * onlyK / nullUs : 0;
+        }
+
+        private static bool Detectable(double us, double lo, double hi) => us >= lo && us <= hi;
+
+        /// <summary>Fewest points that can carry a curve rather than a handful of probes.</summary>
+        private const int MinScanPoints = 10;
+
+        /// <summary>
+        /// Whether these points are an evenly spaced scan. Sorted input assumed.
+        /// </summary>
+        private static bool IsEvenGrid(List<PwmPoint> sorted)
+        {
+            if (sorted.Count < MinScanPoints) return false;
+
+            int step = sorted[1].ExposureUs - sorted[0].ExposureUs;
+            if (step <= 0) return false;
+
+            for (int i = 2; i < sorted.Count; i++)
+                if (sorted[i].ExposureUs - sorted[i - 1].ExposureUs != step)
+                    return false;
+
+            return true;
+        }
+
+        // ----- Choosing the operating point -----
+
+        /// <summary>One usable exposure, and what it costs.</summary>
+        public readonly struct OperatingPoint
+        {
+            /// <summary>Which multiple of the PWM period this is.</summary>
+            public readonly int K;
+            public readonly int ExposureUs;
+            public readonly double Fps;
+            /// <summary>Shortest detectable event at this rate, at a depth threshold of 0.10.</summary>
+            public readonly double BMinMs;
+            /// <summary>Light gathered, relative to the longest candidate offered.</summary>
+            public readonly double RelativeLight;
+            /// <summary>Fraction of time the sensor is blind, if the rate has to be capped.</summary>
+            public readonly double DeadFraction;
+            public readonly bool InWindow;
+
+            public OperatingPoint(int k, int exposureUs, double fps, double bMinMs,
+                                  double relativeLight, double deadFraction, bool inWindow)
+            {
+                K = k;
+                ExposureUs = exposureUs;
+                Fps = fps;
+                BMinMs = bMinMs;
+                RelativeLight = relativeLight;
+                DeadFraction = deadFraction;
+                InWindow = inWindow;
+            }
+        }
+
+        /// <summary>Depth a dip has to reach to be called an anomaly. Sets the shortest event seen.</summary>
+        public const double DepthThreshold = 0.10;
+
+        /// <summary>
+        /// Every exposure that nulls <paramref name="freqHz"/> and could actually be run, longest
+        /// first — the longest gathers the most light, and light is what makes the reading precise.
+        ///
+        /// The window is bounded at both ends. <paramref name="fpsCap"/> is what the camera can
+        /// deliver, so an exposure shorter than that allows cannot be run at full duty: the rate
+        /// has to be capped and the gap between exposures becomes dead time, reported here rather
+        /// than hidden. <paramref name="fpsFloor"/> is where detection stops being trustworthy —
+        /// below about 120 fps a single-refresh blank no longer contains a whole exposure, so its
+        /// depth starts depending on where the phase happened to fall.
+        ///
+        /// Candidates outside the window are still returned, marked, because for some frequencies
+        /// there is nothing inside it — 200 Hz is the awkward case, where k=1 overruns the camera
+        /// and k=2 falls under the floor. Hiding that would present a forced trade as a free choice.
+        ///
+        /// The floor defaults to 119 rather than 120 on purpose. What the floor actually protects is
+        /// that a 16.67 ms blank contains a whole exposure whatever the phase, and that needs
+        /// <c>2T + 45 &lt;= 16667</c>, i.e. T no longer than 8311 us. The exposure that nulls 120 Hz
+        /// is 8333 us — over by 22 us, worth 0.3% of depth in the worst phase. A floor of exactly
+        /// 120 would throw away the single most useful exposure this whole procedure can find, over
+        /// a rounding error.
+        /// </summary>
+        public static List<OperatingPoint> OperatingPoints(double freqHz, double fpsCap = 184,
+                                                           double fpsFloor = 119)
+        {
+            var candidates = new List<OperatingPoint>();
+            if (freqHz <= 0 || fpsCap <= 0 || fpsFloor <= 0) return candidates;
+
+            double periodUs = 1e6 / freqHz;
+            double tMin = 1e6 / fpsCap - InterFrameOverheadUs;      // shorter than this overruns the camera
+            double tMax = 1e6 / fpsFloor - InterFrameOverheadUs;    // longer than this drops under the floor
+
+            // One step past the window at each end, so the nearest fallback is on the table when
+            // nothing lands inside it.
+            double searchMax = tMax + periodUs;
+
+            double longest = 0;
+            var raw = new List<KeyValuePair<int, int>>();
+            for (int k = 1; k <= 64; k++)
+            {
+                double t = k * periodUs;
+                if (t < tMin - periodUs) continue;
+                if (t > searchMax) break;
+
+                int us = (int)Math.Round(t);
+                raw.Add(new KeyValuePair<int, int>(k, us));
+                if (us > longest) longest = us;
+            }
+
+            foreach (KeyValuePair<int, int> c in raw)
+            {
+                int us = c.Value;
+                bool inWindow = us >= tMin && us <= tMax;
+
+                // Below tMin the exposure allows more frames than the camera will give, so the rate
+                // gets capped and the difference is time the sensor is not looking at anything.
+                double naturalFps = FpsForExposure(us);
+                double dead = 0;
+                double fps = naturalFps;
+                if (naturalFps > fpsCap)
+                {
+                    fps = fpsCap;
+                    dead = 1.0 - us / (1e6 / fpsCap);
+                }
+
+                candidates.Add(new OperatingPoint(
+                    c.Key, us, fps,
+                    DepthThreshold * us / 1000.0,
+                    longest > 0 ? us / longest : 0,
+                    dead, inWindow));
+            }
+
+            // Usable ones first, then the fallbacks. Within each group the longest exposure leads,
+            // because it gathers the most light. Sorting purely by length would put an unusable
+            // candidate at the top of the table, where it reads as the recommendation.
+            candidates.Sort((a, b) =>
+                a.InWindow != b.InWindow ? (a.InWindow ? -1 : 1)
+                                         : b.ExposureUs.CompareTo(a.ExposureUs));
+            return candidates;
+        }
+
+        public const string CsvHeader = "label,exposure_us,min_luma,max_luma,mean_luma,max_clipped_pct,samples,resulting_fps";
 
         /// <summary>Parses a whole CSV, skipping the header and anything malformed.</summary>
         public static List<PwmPoint> ParseCsv(IEnumerable<string> lines)
@@ -259,6 +602,7 @@ namespace MatroxFrameGrabber.Infrastructure
 
             AppendTable(sb, points, "panel", "## 패널 (정지 화면)");
             AppendTable(sb, points, "room", "## 실내 조명 단독 (패널 OFF)");
+            AppendScanFindings(sb, points);
 
             sb.AppendLine("## 판정");
             sb.AppendLine();
@@ -314,6 +658,75 @@ namespace MatroxFrameGrabber.Infrastructure
             return sb.ToString();
         }
 
+        /// <summary>
+        /// What the scan curve says, when there is one: where the nulls fell, what frequency their
+        /// spacing implies, and which exposures could actually be run at it.
+        /// </summary>
+        private static void AppendScanFindings(StringBuilder sb, IReadOnlyList<PwmPoint> points)
+        {
+            List<PwmNull> nulls = FindNulls(points);
+            if (nulls.Count == 0)
+                return;
+
+            sb.AppendLine("## 곡선에서 읽은 것");
+            sb.AppendLine();
+            sb.Append("리플이 떨어진 노출: ");
+            for (int i = 0; i < nulls.Count; i++)
+                sb.Append(i > 0 ? ", " : "").Append(nulls[i].ExposureUs).Append(" µs");
+            sb.AppendLine();
+            sb.AppendLine();
+
+            double f = InferFrequencyHz(points);
+            if (f <= 0)
+            {
+                sb.AppendLine($"null이 하나뿐이라 주파수가 하나로 정해지지 않는다 — `f = k / {nulls[0].ExposureUs} µs`의");
+                sb.AppendLine("어느 k인지 알 수 없다. 후보:");
+                sb.AppendLine();
+                for (int k = 1; k <= 4; k++)
+                    sb.AppendLine($"- k={k} → **{1e6 * k / nulls[0].ExposureUs:0.#} Hz**");
+                sb.AppendLine();
+                sb.AppendLine("스캔 범위를 넓히거나 더 촘촘히 훑어 두 번째 null을 찾으면 간격이 곧 주기다.");
+                sb.AppendLine();
+                return;
+            }
+
+            sb.AppendLine($"**PWM 주파수 ≈ {f:0.#} Hz**");
+            sb.AppendLine();
+            if (nulls.Count >= 2)
+                sb.AppendLine("null 사이의 간격이 곧 주기다 — 어느 null이 몇 번째 배수인지는 몰라도 된다.");
+            else
+                sb.AppendLine($"null이 하나뿐이지만 답은 정해진다. 이것이 k번째 배수라면 {nulls[0].ExposureUs} µs의 " +
+                              "k분의 1 간격으로 이웃 null이 있어야 하고, 그 위치가 스캔 범위 안이면 스캔이 찾았을 " +
+                              "것이다. 찾지 못했으므로 그런 k는 전부 배제된다 — 하나만 남았다.");
+            sb.AppendLine();
+
+            // The camera's own answer beats the model number: 184 is the full-resolution figure and
+            // this may be running decimated.
+            double cap = 0;
+            for (int i = 0; i < points.Count; i++)
+                if (points[i].ResultingFps > cap) cap = points[i].ResultingFps;
+            if (cap <= 0) cap = 184;
+
+            sb.AppendLine($"### 쓸 수 있는 노출 (상한 {cap:0.#} fps, 하한 120 fps 기준)");
+            sb.AppendLine();
+            sb.AppendLine("| k | 노출 | fps | 빛 | b_min | 사각 | 판정 |");
+            sb.AppendLine("|---|---|---|---|---|---|---|");
+            foreach (OperatingPoint p in OperatingPoints(f, cap))
+            {
+                string verdict = p.InWindow ? "**창 안**"
+                               : p.DeadFraction > 0 ? "카메라 상한 초과 — 캡 필요"
+                               : "하한 미만 — 감도 손해";
+                sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
+                    "| {0} | {1} µs | {2:0.#} | {3:0%} | {4:0.00} ms | {5:0.0%} | {6} |",
+                    p.K, p.ExposureUs, p.Fps, p.RelativeLight, p.BMinMs, p.DeadFraction, verdict));
+            }
+            sb.AppendLine();
+            sb.AppendLine("**창 안이 여럿이면 가장 긴 노출을 권한다** — 빛이 많을수록 측정이 정밀하다.");
+            sb.AppendLine("고장이 프레임 미만(백라이트 경로)으로 밝혀지면 그때는 b_min이 작은 쪽으로 바꾼다.");
+            sb.AppendLine("**창 안이 없으면** 사각지대를 사거나 감도를 파는 것 중 하나다 — 위 표가 값을 보여준다.");
+            sb.AppendLine();
+        }
+
         private static void AppendTable(StringBuilder sb, IReadOnlyList<PwmPoint> points,
                                         string label, string heading)
         {
@@ -327,16 +740,17 @@ namespace MatroxFrameGrabber.Infrastructure
                 {
                     sb.AppendLine(heading);
                     sb.AppendLine();
-                    sb.AppendLine("| 노출 | 소거 대상 | 최소 | 최대 | 평균 | 리플 | clip | 표본 |");
-                    sb.AppendLine("|---|---|---|---|---|---|---|---|");
+                    sb.AppendLine("| 노출 | 소거 대상 | 최소 | 최대 | 평균 | 리플 | clip | 표본 | 카메라 fps |");
+                    sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
                     any = true;
                 }
 
                 PwmPoint p = points[i];
                 sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                    "| {0} µs | {1} | {2:0.##} | {3:0.##} | {4:0.##} | {5:0.0}% | {6:0.##}% | {7} |",
+                    "| {0} µs | {1} | {2:0.##} | {3:0.##} | {4:0.##} | {5:0.0}% | {6:0.##}% | {7} | {8} |",
                     p.ExposureUs, NullTargetOf(p.ExposureUs),
-                    p.MinLuma, p.MaxLuma, p.MeanLuma, p.RipplePercent, p.MaxClippedPct, p.Samples));
+                    p.MinLuma, p.MaxLuma, p.MeanLuma, p.RipplePercent, p.MaxClippedPct, p.Samples,
+                    p.ResultingFps > 0 ? p.ResultingFps.ToString("0.#", CultureInfo.InvariantCulture) : "-"));
             }
 
             if (any) sb.AppendLine();

@@ -43,6 +43,8 @@ namespace MatroxFrameGrabber.Mil
         private const string F_TRIGGER_SOURCE = "TriggerSource";
         private const string F_TRIGGER_SOFTWARE = "TriggerSoftware";
         private const string F_ACQ_RATE = "AcquisitionFrameRate";
+        /// <summary>Read-only: the rate the camera says the current settings allow.</summary>
+        private const string F_RESULTING_RATE = "ResultingFrameRate";
         private const string F_ACQ_RATE_ENABLE = "AcquisitionFrameRateEnable";
         private const string F_BALANCE_WHITE_AUTO = "BalanceWhiteAuto";
         private const string F_BALANCE_RATIO_SELECTOR = "BalanceRatioSelector";
@@ -269,6 +271,17 @@ namespace MatroxFrameGrabber.Mil
             sample = _brightness.History.Latest;
             return true;
         }
+
+        /// <summary>
+        /// The camera's own <c>ResultingFrameRate</c> — what it says it can deliver at the current
+        /// settings. Worth more than our own 1/(exposure + 45 us) estimate for two reasons: it
+        /// confirms an exposure write actually took (the rate moves with it, and this camera has
+        /// form for accepting writes it then ignores), and it is the only direct answer to the rate
+        /// ceiling at the current decimation — the 184 in the model name is a full-resolution
+        /// figure and says nothing about decimated readout.
+        /// </summary>
+        public bool TryGetResultingFps(out double fps) =>
+            TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_RESULTING_RATE, out fps);
 
         /// <summary>Sets the exposure directly, for the unattended sweep. Reads back afterwards.</summary>
         public bool SetExposureUs(double us)
