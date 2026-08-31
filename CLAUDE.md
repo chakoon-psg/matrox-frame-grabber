@@ -144,6 +144,12 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   고정되고, 초과분은 `M_PROCESS_FRAME_MISSED`로 조용히 사라진다. 성능 작업을 하기 전에
   [research.md](research.md) 8절의 실측표를 볼 것 — **표시 경로를 최적화해도 취득 fps는 늘지
   않는다**(측정으로 확인). 프레임당 페이로드만이 레버다.
+  **그 천장은 PCIe 링크 폭이다.** 2026-08-24에 확인: 보드가 Gen2 **x4**로 붙어 있고(실효
+  1.6~1.8 GB/s = 실측값과 일치) 보드 자체는 **x8을 지원한다**(`MaxLinkWidth = 8`). x8 슬롯으로
+  옮기면 천장이 대략 두 배가 되어 이 제약 자체가 사라질 수 있다.
+  **그리고 지금 카드는 칩셋 뒤의 x4 슬롯에 있고, CPU 직결 x16 슬롯(`PCIE1`)은 비어 있다**
+  (외장 GPU 없음). 즉 카드를 옮기는 것만으로 x8이 될 수 있다 — 소프트웨어로 페이로드를 깎기
+  전에 **슬롯을 먼저 확인할 것**. 확인 명령과 옮긴 뒤의 검증 순서는 research.md 8절에 있다.
 - **카메라 GenICam 설정 일부는 보드가 아니라 카메라에 영속된다.** `AcquisitionFrameRate` /
   `AcquisitionFrameRateEnable`, `DecimationHorizontal` / `Vertical`이 그렇다. 앱을 닫아도 남으니
   `M_BAYER_CONVERSION`과 같은 복구 규율을 적용할 것. 그리고 이들은 **정수형 피처라
@@ -155,10 +161,15 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `MdigControlFeature`가 예외를 던지지 않고, `M_PRINT_DISABLE` 상태에서는 출력도 없어서
   `MdigControlFeature`를 감싼 헬퍼가 **true를 반환한다** — 그런데 값은 그대로다.
   `TLParamsLocked = 0`으로 풀어도, `MdigControl(M_SOURCE_SIZE_X / M_SOURCE_OFFSET_X)`로 우회해도
-  마찬가지다. **즉 이 카메라는 ROI 크롭을 지원하지 않는다.** 페이로드를 줄이는 유일한 수단은
+  마찬가지다. **즉 이 카메라는 취득 ROI를 지원하지 않는다.** 페이로드를 줄이는 유일한 수단은
   `DecimationHorizontal` / `Vertical`이며, 이쪽은 같은 할당된 digitizer에서 정상 동작한다
   (실측: decimation 2 → 1024×772 컬러 184.1 fps, 유실 0).
   **지오메트리 피처를 쓴 뒤에는 반드시 다시 읽어 확인할 것.** 반환값만 믿으면 안 된다.
+  2026-08-21에 이유가 확인됐다: `M_FEATURE_ACCESS_MODE`가 네 노드 모두 **`M_FEATURE_READ_ONLY`**
+  (4)로 답한다. 같은 조회에서 decimation은 `M_FEATURE_READ_WRITE`(5)다. 즉 추측이 아니라
+  카메라가 스스로 못 쓴다고 말한다 — 이 값은 앱 시작 때마다 `mil-errors.log`에 찍힌다.
+  주의: 이 확인은 **decimation 2가 걸린 상태**에서 한 것이다. 일부 카메라는 decimation이
+  영역을 지배하면 `Width`를 read-only로 바꾼다 — decimation 1에서도 RO인지는 아직 확인되지 않았다.
 - **실제 하드웨어 증분은 2가 아니다.** 이 카메라는 `Width` 증분 **16**, `Height` 증분 **4**를
   보고한다. 짝수 가정만으로 계산하면 격자에서 벗어난다 — `M_FEATURE_INCREMENT`를 조회할 것.
 - **앱을 강제 종료하면 카메라의 지오메트리 노드가 잠긴다.** 작업 관리자 종료, 디버거 중단,

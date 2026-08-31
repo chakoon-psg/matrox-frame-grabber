@@ -50,6 +50,13 @@ namespace MatroxFrameGrabber.Mil
         private const string F_DECIM_H = "DecimationHorizontal";
         private const string F_DECIM_V = "DecimationVertical";
 
+        // Geometry nodes. This camera accepts writes to these and ignores them (see CLAUDE.md), so
+        // they are named here only for the access-mode probe below — nothing writes them.
+        private const string F_WIDTH = "Width";
+        private const string F_HEIGHT = "Height";
+        private const string F_OFFSET_X = "OffsetX";
+        private const string F_OFFSET_Y = "OffsetY";
+
         #endregion
 
         #region Hook data
@@ -123,6 +130,7 @@ namespace MatroxFrameGrabber.Mil
         private long _rawMissed;
         private DateTime _rawStartTime;
         private long _framesMissed;
+        private long _missedAtGrabStart;   // cumulative counter when this grab started
 
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
@@ -549,6 +557,15 @@ namespace MatroxFrameGrabber.Mil
                     // stays, because the no-camera path must still clear a stale id.
                     _features.Digitizer = _digId;
 
+                    // Ask the camera about the geometry nodes BEFORE anything below writes to it,
+                    // so the log shows the state as found.
+                    LogGeometryAccess();
+
+                    // And the acquisition-limiting settings, so "why is this one channel slow" is
+                    // answered in the log instead of being re-derived. CLAUDE.md warns that the
+                    // first suspect is exposure, not the cable — this line names it.
+                    MilErrorLog.Note(DumpDiagnostics());
+
                     // Force hardware Bayer→RGB conversion ON (color). M_BAYER_CONVERSION is a
                     // PERSISTENT board setting: once disabled (e.g. to grab raw band-1 Bayer) it
                     // stays off across grabs and app restarts, and the color pipeline then misreads
@@ -773,6 +790,21 @@ namespace MatroxFrameGrabber.Mil
                 throw;
             }
 
+            // Baseline the missed-frame counter. MIL keeps it cumulative — there is a separate
+            // M_PROCESS_FRAME_MISSED_RESET constant, which is why — so a second grab in the same
+            // session would otherwise inherit the first one's losses and read as a regression that
+            // never happened. Subtracting a baseline is correct whether or not MIL also clears the
+            // counter on M_START: if it does, this is zero and the subtraction is a no-op.
+            _missedAtGrabStart = 0;
+            try
+            {
+                MIL_INT m = 0;
+                MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref m);
+                _missedAtGrabStart = m;
+            }
+            catch (MILException e) { MilErrorLog.Write($"{Name}: baseline the missed-frame counter", e); }
+            _framesMissed = 0;
+
             _isGrabbing = true;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
@@ -809,6 +841,11 @@ namespace MatroxFrameGrabber.Mil
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
+
+            // Leave the run its own evidence. The acceptance criterion for the whole payload
+            // change is that frames missed does not increase, and until now reading it meant
+            // transcribing the status line by hand while the run was still going.
+            LogGrabSummary();
 
             // A stopped channel is no longer measuring anything; keeping the old readings would
             // have the strip assert a value nobody is watching anymore.
@@ -854,9 +891,10 @@ namespace MatroxFrameGrabber.Mil
                 MIL_INT missed = 0;
                 try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
                 catch (MILException e) { MilErrorLog.Write($"{Name}: read missed-frame counter", e); }
-                _framesMissed = missed;
+                // This run's losses, not the digitizer's lifetime total (see StartGrab).
+                _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
                 if (_rawRecording)
-                    _rawMissed = missed;
+                    _rawMissed = _framesMissed;   // same number the status line shows
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -1505,7 +1543,7 @@ namespace MatroxFrameGrabber.Mil
             MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
             sb.Append($"{OutputName}: {sx}x{sy}");
 
-            // Reading a feature name the camera does not expose raises a MIL error.
+            // Absent features are skipped silently — GenICamFeatures gates every read on presence.
             if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, "ExposureTime", out double exp))
                 sb.Append($"  Exposure={exp:F0}us(=>{(exp > 0 ? 1e6 / exp : 0):F0}fps max)");
             if (TryGetFeatureString("ExposureAuto", out string expAuto) && !string.IsNullOrEmpty(expAuto))
@@ -1527,8 +1565,11 @@ namespace MatroxFrameGrabber.Mil
 
             try
             {
+                // This camera answers -1 here. A nonsense number in a diagnostic line is worse than
+                // no number, so only print it when it is one.
                 MIL_INT payload = MIL.MdigInquire(_digId, MIL.M_GC_PAYLOAD_SIZE, MIL.M_NULL);
-                sb.Append($"  payload={(long)payload}B");
+                if ((long)payload > 0)
+                    sb.Append($"  payload={(long)payload}B");
             }
             catch (MILException e) { MilErrorLog.Write($"{Name}: read GenICam payload size", e); }
 
@@ -1597,11 +1638,11 @@ namespace MatroxFrameGrabber.Mil
             BlueRatioInput = ReadBalanceRatio("Blue");
         }
 
-        private string ReadBalanceRatio(string channel)
+        private string ReadBalanceRatio(string band)
         {
             if (!FeatureAvailable(F_BALANCE_RATIO))
                 return "";
-            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, channel))
+            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, band))
                 return "";
             if (TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_BALANCE_RATIO, out double v))
                 return v.ToString("0.###", CultureInfo.InvariantCulture);
@@ -1633,11 +1674,11 @@ namespace MatroxFrameGrabber.Mil
             return ok;
         }
 
-        private bool SetBalanceRatio(string channel, string text)
+        private bool SetBalanceRatio(string band, string text)
         {
             if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
                 return false;
-            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, channel))
+            if (!TrySetFeatureString(F_BALANCE_RATIO_SELECTOR, band))
                 return false;
             return SetFeatureDouble(F_BALANCE_RATIO, v);
         }
@@ -1698,6 +1739,51 @@ namespace MatroxFrameGrabber.Mil
             if (_features.TryGetInt(MIL.M_FEATURE_VALUE, feature, out long current) && current == value)
                 return true;
             return _features.SetInt(feature, value);
+        }
+
+        /// <summary>
+        /// Records how the run that just ended actually went: frames, rate, frames missed, and the
+        /// payload that produced them. Missed frames are re-inquired rather than taken from the
+        /// last stats tick, so the number is the run.s final count and not one up to half a second
+        /// stale.
+        /// </summary>
+        private void LogGrabSummary()
+        {
+            long missed = _framesMissed;
+            try
+            {
+                MIL_INT m = 0;
+                MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref m);
+                missed = Math.Max(0, (long)m - _missedAtGrabStart);   // this run only
+            }
+            catch (MILException) { /* keep the last polled value */ }
+
+            MilErrorLog.Note($"{Name}: grab stopped - {FrameCount} frames, {_frameRate:F1} fps, "
+                           + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
+        }
+
+        /// <summary>
+        /// Logs the camera's own access mode for the geometry nodes, once per allocation.
+        ///
+        /// This app concluded that cropping is unsupported by writing `Width` / `OffsetX` and
+        /// reading the value back unchanged. That evidence cannot separate two very different
+        /// causes: a node this camera implements as read-only, and a node temporarily locked
+        /// because the app was killed last run (CLAUDE.md — the symptom is an identical silent
+        /// refusal). `M_FEATURE_ACCESS_MODE` is the camera answering directly, so the log says
+        /// which one it is instead of leaving the next person to re-derive it.
+        /// </summary>
+        private void LogGeometryAccess()
+        {
+            if (_digId == MIL.M_NULL)
+                return;
+            var sb = new StringBuilder();
+            foreach (string f in new[] { F_WIDTH, F_HEIGHT, F_OFFSET_X, F_OFFSET_Y, F_DECIM_H, F_DECIM_V })
+            {
+                if (!_features.Available(f)) { sb.Append($" {f}=absent"); continue; }
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, f, out long v);
+                sb.Append($" {f}={v}/{_features.AccessMode(f)}");
+            }
+            MilErrorLog.Note($"{Name}: geometry nodes (value/access):{sb}");
         }
 
         /// <summary>

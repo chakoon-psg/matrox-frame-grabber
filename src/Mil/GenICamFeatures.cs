@@ -15,6 +15,10 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>The digitizer these features operate on (M_NULL when no camera).</summary>
         public MIL_ID Digitizer { get; set; } = MIL.M_NULL;
 
+        // Every accessor gates on Available(name) first — readers as well as writers. Reading a
+        // feature this camera does not expose raises a MIL error, and the catch blocks below would
+        // then log one line per probe; DumpDiagnostics alone probes a dozen names, so absent
+        // features used to bury the log they share with real failures.
         private bool HasDigitizer => Digitizer != MIL.M_NULL;
 
         /// <summary>True if the camera exposes the named feature.</summary>
@@ -95,7 +99,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetInt(long inquireType, string name, out long value)
         {
             value = 0;
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 MIL_INT v = 0;
@@ -110,11 +114,31 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
+        /// <summary>
+        /// The camera's own answer to "can I write this?" — `M_FEATURE_ACCESS_MODE`, as a short tag
+        /// ("RW" / "RO" / raw hex / "?" when the node is not implemented).
+        ///
+        /// This is the only direct evidence available for a node this camera refuses. A write
+        /// followed by a read-back can show that a value did not change, but never why — and
+        /// "implemented read-only" and "temporarily locked" look identical through that lens.
+        /// </summary>
+        public string AccessMode(string name)
+        {
+            if (!TryGetInt(MIL.M_FEATURE_ACCESS_MODE, name, out long mode))
+                return "?";
+            if (mode == (long)MIL.M_FEATURE_READ_WRITE) return "RW";
+            if (mode == (long)MIL.M_FEATURE_READ_ONLY) return "RO";
+            if (mode == (long)MIL.M_FEATURE_WRITE_ONLY) return "WO";
+            if (mode == (long)MIL.M_FEATURE_NOT_AVAILABLE) return "NA";
+            if (mode == (long)MIL.M_FEATURE_NOT_IMPLEMENTED) return "NI";
+            return "0x" + mode.ToString("X");
+        }
+
         /// <summary>Reads a double feature property (M_FEATURE_VALUE / _MIN / _MAX / ...).</summary>
         public bool TryGetDouble(long inquireType, string name, out double value)
         {
             value = 0;
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 double v = 0;
@@ -133,7 +157,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetString(string name, out string value)
         {
             value = "";
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 var sb = new StringBuilder(256);
@@ -192,7 +216,7 @@ namespace MatroxFrameGrabber.Mil
         public bool TryGetBool(string name, out bool value)
         {
             value = false;
-            if (!HasDigitizer) return false;
+            if (!HasDigitizer || !Available(name)) return false;
             try
             {
                 bool v = false;
