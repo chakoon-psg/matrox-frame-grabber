@@ -3,6 +3,9 @@
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
     <Platforms>x64</Platforms>
+    <!-- See the app csproj: Platforms alone leaves the default at AnyCPU, so a direct build of this
+         project writes to a second output folder. -->
+    <Platform>x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
