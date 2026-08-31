@@ -1,4 +1,7 @@
 using System;
+using System.Globalization;
+using System.Linq;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -8,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using Matrox.MatroxImagingLibrary.WPF;
 using MatroxFrameGrabber.Infrastructure;
 using MatroxFrameGrabber.Mil;
@@ -41,7 +45,7 @@ namespace MatroxFrameGrabber.Views
             // display id makes MIL raise an error dialog).
             try
             {
-                _manager = new MilApplicationManager();
+                _manager = new MilApplicationManager { OwnedChannels = App.OwnedChannels };
                 _manager.Allocate();
 
                 // Surface unexpected recording stops (e.g. ffmpeg died) and camera loss.
@@ -132,9 +136,285 @@ namespace MatroxFrameGrabber.Views
                 return;
             }
 
-            if (App.Unattended)
+            // Decimation before anything grabs: it reallocates buffers, and the point of setting it
+            // from the command line is to measure a payload the operator would otherwise have to
+            // dial in by hand on every process of a split run.
+            if (App.StartupDecimation > 0 && _viewModel != null)
+            {
+                foreach (CameraChannel c in _viewModel.Channels)
+                    if (c.CameraPresent)
+                        c.ApplyDecimation(App.StartupDecimation);
+                MilErrorLog.Note($"startup decimation {App.StartupDecimation} applied");
+            }
+
+            if (App.BayerScopeTest)
+                RunBayerScopeTest();
+            else if (App.PwmSweeping)
+                BeginPwmSweep(App.PwmSweepChannel, App.PwmSweepRoom);
+            else if (App.Unattended)
                 BeginAutoRun(App.AutoRunSeconds);
         }
+
+        /// <summary>
+        /// Answers whether M_BAYER_CONVERSION is per-digitizer or board-wide, by disabling it on one
+        /// channel and reading every channel back.
+        ///
+        /// The answer decides whether the channels can be split across processes. Per-digitizer, each
+        /// process owns its own and nothing is shared. Board-wide, it becomes mutable state with no
+        /// owner, and one process starting a RAW recording would corrupt the others' colour — which
+        /// is the single strongest argument against splitting.
+        ///
+        /// It puts the setting back before exiting. The value persists on the board across restarts,
+        /// so leaving it off would quietly change what every later run sees.
+        /// </summary>
+        private void RunBayerScopeTest()
+        {
+            if (_viewModel == null) { Close(); return; }
+
+            void Report(string when) =>
+                MilErrorLog.Note("bayer-scope " + when + ": " + string.Join("  ",
+                    _viewModel.Channels.Select(c => $"{c.Name}={c.BayerConversionState()}")));
+
+            Report("before      ");
+
+            CameraChannel target = _viewModel.Channels.FirstOrDefault(c => c.CameraPresent);
+            if (target == null)
+            {
+                MilErrorLog.Note("bayer-scope: no camera present - nothing to test");
+                Close();
+                return;
+            }
+
+            MilErrorLog.Note($"bayer-scope: disabling on {target.Name} only");
+            target.SetBayerConversionForDiagnostic(false);
+            Report("after disable");
+
+            target.SetBayerConversionForDiagnostic(true);
+            Report("after restore");
+
+            Close();
+        }
+
+        #region Backlight PWM exposure sweep (--pwm-sweep)
+
+        /// <summary>
+        /// Holds each exposure in turn and records the spread of brightness readings it produces.
+        /// The exposure whose ripple collapses is a whole multiple of the backlight's PWM period,
+        /// which is what the whole procedure is after — see <see cref="PwmSweep"/> for the maths.
+        ///
+        /// Everything physical still belongs to a person: a still picture on the panel, the camera
+        /// framed on it, an analysis ROI drawn inside the screen, and an aperture set so nothing
+        /// clips. This only removes the part a person does worst — watching a number for fifteen
+        /// seconds and writing down its extremes.
+        /// </summary>
+        private void BeginPwmSweep(string channelName, bool room)
+        {
+            CameraChannel channel = FindChannel(channelName);
+            if (channel == null || !channel.CameraPresent)
+            {
+                MilErrorLog.Note($"pwm-sweep: no camera named '{channelName}' - nothing to measure");
+                Close();
+                return;
+            }
+
+            int[] exposures = room ? PwmSweep.RoomExposuresUs
+                            : App.PwmSweepScan ? PwmSweep.ScanExposuresUs
+                            : PwmSweep.PanelExposuresUs;
+            string label = room ? "room" : "panel";
+
+            MilErrorLog.Note($"pwm-sweep: {channel.Name}, {label}, {exposures.Length} points, " +
+                             $"ROI {channel.AnalysisRoi}");
+
+            // ExposureTime persists in the camera, not the app — the same discipline
+            // M_BAYER_CONVERSION needs. Leaving the last exposure tried would silently change what
+            // every later run measures, so remember what was there and put it back.
+            double originalExposureUs = 0;
+            double.TryParse(channel.ExposureInput, NumberStyles.Float,
+                            CultureInfo.InvariantCulture, out originalExposureUs);
+            _pwmOriginalExposureUs = originalExposureUs;
+            MilErrorLog.Note($"pwm-sweep: exposure on entry {originalExposureUs} us (restored on exit)");
+
+            channel.BrightnessEnabled = true;
+            channel.StartCommand.Execute(null);
+
+            var results = new List<PwmPoint>();
+            int index = -1;                       // stepped to 0 by the first Advance
+            bool settling = false;
+            float min = 0, max = 0, clip = 0;
+            double sum = 0;
+            double resultingFps = 0;
+            int taken = 0;
+
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PwmSampleIntervalMs) };
+            DateTime phaseEnd = DateTime.MinValue;
+
+            void Advance()
+            {
+                index++;
+                if (index >= exposures.Length)
+                {
+                    timer.Stop();
+                    FinishPwmSweep(channel, label, results);
+                    return;
+                }
+
+                int us = exposures[index];
+                bool ok = channel.SetExposureUs(us);
+                channel.TryGetResultingFps(out resultingFps);
+                MilErrorLog.Note($"pwm-sweep: exposure {us} us -> {(ok ? "applied" : "REJECTED")}, " +
+                                 $"readback {channel.ExposureInput}, camera fps {resultingFps:0.#}");
+
+                // Settle before counting anything. The camera finishes the frame it is on, the
+                // rate changes with the exposure, and the display buffer still holds a frame taken
+                // at the previous setting.
+                settling = true;
+                min = float.MaxValue; max = float.MinValue; clip = 0; sum = 0; taken = 0;
+                phaseEnd = DateTime.UtcNow.AddSeconds(PwmSettleSeconds);
+            }
+
+            timer.Tick += (s, args) =>
+            {
+                if (DateTime.UtcNow >= phaseEnd)
+                {
+                    if (settling)
+                    {
+                        settling = false;
+                        phaseEnd = DateTime.UtcNow.AddSeconds(PwmDwellSeconds);
+                        return;
+                    }
+
+                    results.Add(new PwmPoint(label, exposures[index],
+                        taken > 0 ? min : 0, taken > 0 ? max : 0,
+                        taken > 0 ? (float)(sum / taken) : 0, clip, taken, resultingFps));
+                    MilErrorLog.Note(
+                        $"pwm-sweep: {exposures[index]} us - min {min:0.##} max {max:0.##} " +
+                        $"ripple {results[results.Count - 1].RipplePercent:0.0}% " +
+                        $"clip {clip:0.##}% over {taken} samples");
+                    Advance();
+                    return;
+                }
+
+                if (settling || !channel.TrySampleBrightnessNow(out BrightnessSample sample))
+                    return;
+
+                if (sample.Luma < min) min = sample.Luma;
+                if (sample.Luma > max) max = sample.Luma;
+                if (sample.ClippedPct > clip) clip = sample.ClippedPct;
+                sum += sample.Luma;
+                taken++;
+            };
+
+            Advance();
+            timer.Start();
+        }
+
+        /// <summary>
+        /// Sampling faster than this reads the same frame twice: the acquisition hook only copies
+        /// into the display buffer at OutputSettings.DisplayUpdateFps, 30 by default.
+        /// </summary>
+        private const int PwmSampleIntervalMs = 33;
+
+        /// <summary>Seconds to let the camera settle after an exposure change before counting.</summary>
+        private const double PwmSettleSeconds = 5.0;
+
+        /// <summary>Seconds of readings per exposure. At 30 Hz this is a few hundred samples.</summary>
+        private const double PwmDwellSeconds = 15.0;
+
+        /// <summary>
+        /// The channel a person means by "CAM1", "Camera 1", or just "1". The pane header says one
+        /// thing and <see cref="CameraChannel.Name"/> says another, so matching only the property
+        /// would reject the name the operator can actually see on screen.
+        /// </summary>
+        private CameraChannel FindChannel(string name)
+        {
+            if (_viewModel == null || string.IsNullOrWhiteSpace(name))
+                return null;
+
+            string wanted = name.Trim();
+
+            foreach (CameraChannel c in _viewModel.Channels)
+                if (string.Equals(c.Name, wanted, StringComparison.OrdinalIgnoreCase))
+                    return c;
+
+            // Fall back to the trailing digits, which is what "CAM1" and "1" have in common with
+            // "Camera 1".
+            int i = wanted.Length;
+            while (i > 0 && char.IsDigit(wanted[i - 1])) i--;
+            if (i == wanted.Length)
+                return null;
+
+            if (!int.TryParse(wanted.Substring(i), NumberStyles.Integer,
+                              CultureInfo.InvariantCulture, out int index))
+                return null;
+
+            return index >= 0 && index < _viewModel.Channels.Count
+                 ? _viewModel.Channels[index]
+                 : null;
+        }
+
+        /// <summary>
+        /// Appends this run's points to the CSV, renders the report when both halves are present,
+        /// and closes. Closing through <see cref="Window.Close"/> matters — see BeginAutoRun.
+        /// </summary>
+        /// <summary>Exposure the camera had before the sweep started, in microseconds.</summary>
+        private double _pwmOriginalExposureUs;
+
+        private void FinishPwmSweep(CameraChannel channel, string label, List<PwmPoint> results)
+        {
+            // Before anything that can fail, exactly as RestoreColorAfterRaw does: a persistent
+            // camera setting must not be left changed because writing a report threw.
+            if (_pwmOriginalExposureUs > 0)
+            {
+                channel.SetExposureUs(_pwmOriginalExposureUs);
+                MilErrorLog.Note($"pwm-sweep: exposure restored to {_pwmOriginalExposureUs} us, " +
+                                 $"readback {channel.ExposureInput}");
+            }
+
+            try
+            {
+                string dir = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location) ?? ".",
+                    "measurements");
+                Directory.CreateDirectory(dir);
+
+                string csv = System.IO.Path.Combine(dir, "pwm-sweep.csv");
+
+                // The panel run starts a measurement session; the room run adds to it. Appending
+                // in both would let a re-run after fixing the optics sit next to the readings that
+                // made the fix necessary, and the verdict would be read off a mixture of the two.
+                bool append = string.Equals(label, "room", StringComparison.OrdinalIgnoreCase)
+                              && File.Exists(csv);
+                if (!append)
+                    File.WriteAllText(csv, PwmSweep.CsvHeader + Environment.NewLine);
+
+                var lines = new List<string>();
+                foreach (PwmPoint p in results)
+                    lines.Add(p.ToCsvLine());
+                File.AppendAllLines(csv, lines);
+
+                List<PwmPoint> all = PwmSweep.ParseCsv(File.ReadAllLines(csv));
+                string report = System.IO.Path.Combine(dir,
+                    "pwm-sweep-" + DateTime.Now.ToString("yyyy-MM-dd") + ".md");
+                File.WriteAllText(report, PwmSweep.RenderReport(
+                    all, channel.Name, channel.AnalysisRoi.ToString(),
+                    DateTime.Now.ToString("yyyy-MM-dd")));
+
+                PwmVerdict v = PwmSweep.Judge(all);
+                MilErrorLog.Note($"pwm-sweep: {label} done, {results.Count} points -> {csv}");
+                MilErrorLog.Note($"pwm-sweep: verdict {v.Family}, exposure {v.ExposureUs} us, " +
+                                 $"fps {v.TargetFps:0.#}{(v.Clipped ? " (CLIPPED - untrustworthy)" : "")}");
+            }
+            catch (Exception e)
+            {
+                // Writing the report must not lose the readings: they are in the log line above.
+                MilErrorLog.Write("pwm-sweep: writing results", e);
+            }
+
+            _viewModel?.StopAllCommand.Execute(null);
+            Close();
+        }
+
+        #endregion
 
         /// <summary>
         /// Unattended run: grab on every present camera for a fixed number of seconds, then stop

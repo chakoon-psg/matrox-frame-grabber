@@ -43,6 +43,8 @@ namespace MatroxFrameGrabber.Mil
         private const string F_TRIGGER_SOURCE = "TriggerSource";
         private const string F_TRIGGER_SOFTWARE = "TriggerSoftware";
         private const string F_ACQ_RATE = "AcquisitionFrameRate";
+        /// <summary>Read-only: the rate the camera says the current settings allow.</summary>
+        private const string F_RESULTING_RATE = "ResultingFrameRate";
         private const string F_ACQ_RATE_ENABLE = "AcquisitionFrameRateEnable";
         private const string F_BALANCE_WHITE_AUTO = "BalanceWhiteAuto";
         private const string F_BALANCE_RATIO_SELECTOR = "BalanceRatioSelector";
@@ -66,6 +68,10 @@ namespace MatroxFrameGrabber.Mil
             public CameraChannel Owner;
             public MIL_ID DisplayBuffer;
             public long FrameCount;
+
+            /// <summary>Board timestamp of the first and most recent frame of this grab, in seconds.</summary>
+            public double FirstTimeStampSec;
+            public double LastTimeStampSec;
         }
 
         #endregion
@@ -245,6 +251,52 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>This channel's brightness readings, appended on each stats tick.</summary>
         public BrightnessHistory Brightness => _brightness.History;
+
+        /// <summary>
+        /// Takes one brightness reading right now and returns it, instead of waiting for the stats
+        /// tick. Only the PWM sweep uses this: the sweep needs the spread of readings at each
+        /// exposure, and thirty samples in fifteen seconds understates a spread that hundreds
+        /// would show. Returns false when there is nothing to read.
+        ///
+        /// This appends to the same history the graph draws, which is why it is not on the normal
+        /// path — during an unattended sweep there is no graph to disturb.
+        /// </summary>
+        public bool TrySampleBrightnessNow(out BrightnessSample sample)
+        {
+            // The return value, not the history count: once the ring buffer is full the count stops
+            // moving, and Latest would hand back the previous reading — the sweep would then
+            // average a value it never measured.
+            if (!_brightness.Sample(_dispBufId, _analysisRoi))
+            {
+                sample = default;
+                return false;
+            }
+
+            sample = _brightness.History.Latest;
+            return true;
+        }
+
+        /// <summary>
+        /// The camera's own <c>ResultingFrameRate</c> — what it says it can deliver at the current
+        /// settings. Worth more than our own 1/(exposure + 45 us) estimate for two reasons: it
+        /// confirms an exposure write actually took (the rate moves with it, and this camera has
+        /// form for accepting writes it then ignores), and it is the only direct answer to the rate
+        /// ceiling at the current decimation — the 184 in the model name is a full-resolution
+        /// figure and says nothing about decimated readout.
+        /// </summary>
+        public bool TryGetResultingFps(out double fps) =>
+            TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_RESULTING_RATE, out fps);
+
+        /// <summary>Sets the exposure directly, for the unattended sweep. Reads back afterwards.</summary>
+        public bool SetExposureUs(double us)
+        {
+            if (!_supportsExposure)
+                return false;
+
+            bool ok = SetFeatureDouble(F_EXPOSURE_TIME, us);
+            RefreshExposureReadback();
+            return ok;
+        }
 
         /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
         public double LastBrightnessSampleMs => _brightness.LastSampleMs;
@@ -899,8 +951,11 @@ namespace MatroxFrameGrabber.Mil
                 // Brightness is measured here, on the stats tick, and never in the grab hook:
                 // anything added to MdigProcess runs inside the acquisition budget. Still gated by
                 // BrightnessEnabled so the cost can be switched off when measuring frames missed.
+                // Measured inside the analysis ROI, or over the whole frame when none is drawn.
+                // _analysisRoi and the display buffer are in the same space — both are in pixels of
+                // the acquired, already-decimated frame — so no conversion belongs here.
                 if (BrightnessEnabled)
-                    _brightness.Sample(_dispBufId);
+                    _brightness.Sample(_dispBufId, _analysisRoi);
 
                 // Frames the board dropped because the host could not take them fast enough.
                 // Read on every tick, not only while RAW-recording: this is the acceptance
@@ -982,6 +1037,18 @@ namespace MatroxFrameGrabber.Mil
 
             MIL_ID grabbedBuffer = MIL.M_NULL;
             MIL.MdigGetHookInfo(hookId, MIL.M_MODIFIED_BUFFER + MIL.M_BUFFER_ID, ref grabbedBuffer);
+
+            // The board's own stamp for this frame. Kept because it is the only clock every channel
+            // shares — the cameras are free-running, so nothing else lines their frames up, and
+            // where the channels are split across processes there is no shared timer at all. Two
+            // reads per grab, first and last, so this costs nothing per frame.
+            // M_MODIFIED_BUFFER + M_GRAB_TIME_STAMP, the same shape as the buffer id above.
+            // M_GRAB_TIME_STAMP_NS is a different constant for a different call and reads back zero
+            // here — which is how this was got wrong the first time.
+            double timeStampSec = 0;
+            MIL.MdigGetHookInfo(hookId, MIL.M_MODIFIED_BUFFER + MIL.M_GRAB_TIME_STAMP, ref timeStampSec);
+            if (data.FrameCount == 0) data.FirstTimeStampSec = timeStampSec;
+            data.LastTimeStampSec = timeStampSec;
 
             data.FrameCount++;
             data.Owner?.OnGrabbedFrame(grabbedBuffer, data.DisplayBuffer);
@@ -1227,6 +1294,31 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Raised (on the UI thread, via RefreshStats) when a raw recording's MP4 conversion
         /// finishes; ok=false carries an error message.</summary>
         public event Action<CameraChannel, bool, string> RawRecordingFinished;
+
+        /// <summary>
+        /// Reads back the board's Bayer conversion state for this channel, as "on"/"off", or "?"
+        /// when it cannot be read.
+        ///
+        /// This exists to settle whether the setting is per-digitizer or board-wide. The API takes
+        /// a digitizer, which suggests per-channel, and the app's own RAW recording turns it off for
+        /// one channel while the others keep their colour — but nobody has ever read one channel
+        /// after writing another, and an architecture that splits the channels across processes
+        /// stands or falls on the answer.
+        /// </summary>
+        public string BayerConversionState()
+        {
+            if (_digId == MIL.M_NULL) return "-";
+            try
+            {
+                MIL_INT v = 0;
+                MIL.MdigInquire(_digId, MIL.M_BAYER_CONVERSION, ref v);
+                return v == MIL.M_DISABLE ? "off" : v == MIL.M_ENABLE ? "on" : $"?({v})";
+            }
+            catch (MILException) { return "?"; }
+        }
+
+        /// <summary>Sets Bayer conversion from outside, for the scope diagnostic.</summary>
+        public bool SetBayerConversionForDiagnostic(bool enable) => SetBayerConversion(enable);
 
         /// <summary>Enables/disables the board's hardware Bayer→RGB conversion (disabled = raw band=1).</summary>
         private bool SetBayerConversion(bool enable)
@@ -1778,6 +1870,16 @@ namespace MatroxFrameGrabber.Mil
 
             MilErrorLog.Note($"{Name}: grab stopped - {FrameCount} frames, {_frameRate:F1} fps, "
                            + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
+
+            // The board's stamps for this run, in milliseconds. Whether these share one clock across
+            // channels is the whole of cross-channel correlation: the cameras free-run, so nothing
+            // else lines their frames up, and split across processes there is no shared timer to
+            // fall back on. Comparable numbers here mean correlation needs no IPC at all.
+            ChannelHookData d = _hookData;
+            if (d != null)
+                MilErrorLog.Note($"{Name}: board timestamps - first {d.FirstTimeStampSec:F6} s, "
+                               + $"last {d.LastTimeStampSec:F6} s, "
+                               + $"span {(d.LastTimeStampSec - d.FirstTimeStampSec) * 1000:F1} ms");
         }
 
         /// <summary>

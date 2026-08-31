@@ -13,3 +13,6 @@ artifacts/
 
 # ffmpeg 실행 파일은 약 212MB다. 저장소에 넣지 않고 tools/fetch-ffmpeg.ps1로 채운다.
 tools/ffmpeg/
+
+# Validation clips — regenerate with scripts/make-test-clips.sh
+docs/measurements/test-clips/*.mp4

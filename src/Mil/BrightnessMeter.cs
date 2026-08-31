@@ -9,22 +9,28 @@ namespace MatroxFrameGrabber.Mil
     /// Measures one channel's brightness off the acquisition path: the stats tick calls
     /// <see cref="Sample"/>, which reads a scatter of strips out of the display buffer.
     ///
+    /// It measures the channel's analysis ROI, or the whole frame when no rectangle has been
+    /// drawn. Restricting it matters for what this app is for: the reading has to describe the AVN
+    /// panel, and background around the panel dilutes a dropout — a panel filling half the frame
+    /// halves the dip that reaches the graph.
+    ///
     /// It deliberately point-samples at full resolution rather than measuring a downscaled copy.
     /// Bilinear downscaling averages a clipped pixel together with its neighbours — 255 beside 200
     /// becomes 227 — which erases exactly the failure the clipping figures exist to catch.
     ///
-    /// The strips are spread down the frame rather than taken as one contiguous band, so a light
-    /// source in the top of the frame cannot hide from the sample.
+    /// The strips are spread down the region rather than taken as one contiguous band, so a light
+    /// source in the top of it cannot hide from the sample.
     /// </summary>
     public sealed class BrightnessMeter
     {
-        /// <summary>Strips spread evenly down the frame.</summary>
-        private const int Strips = 16;
-        /// <summary>Rows read per strip. 16 x 4 = 64 rows of a 1544-row frame, about 4%.</summary>
-        private const int RowsPerStrip = 4;
+        /// <summary>Rows read per strip. See <see cref="BrightnessSamplePlan"/> for the layout.</summary>
+        private const int RowsPerStrip = BrightnessSamplePlan.RowsPerStrip;
 
         private byte[] _r, _g, _b;
         private int _stripBytes;
+
+        /// <summary>Whether the current <see cref="Sample"/> call got as far as appending.</summary>
+        private bool _appended;
 
         public BrightnessHistory History { get; } = new BrightnessHistory();
 
@@ -35,14 +41,22 @@ namespace MatroxFrameGrabber.Mil
         public int ConsecutiveFailures { get; private set; }
 
         /// <summary>
-        /// Reads one brightness reading from <paramref name="displayBuffer"/> and appends it.
+        /// Reads one brightness reading from <paramref name="displayBuffer"/> and appends it,
+        /// looking only inside <paramref name="roi"/> — or at the whole buffer when that is
+        /// <see cref="ChannelRoi.FullFrame"/>, which is what "no region chosen" is stored as.
+        ///
         /// Does nothing when the buffer is unbound. Never throws: a MIL failure here must not cost
         /// the caller its stats tick.
+        ///
+        /// Returns whether a reading was actually appended. The stats tick ignores that, but the
+        /// PWM sweep must not mistake a skipped reading for a repeated one.
         /// </summary>
-        public void Sample(MIL_ID displayBuffer)
+        public bool Sample(MIL_ID displayBuffer, ChannelRoi roi)
         {
             if (displayBuffer == MIL.M_NULL)
-                return;
+                return false;
+
+            _appended = false;
 
             var watch = Stopwatch.StartNew();
             try
@@ -50,8 +64,11 @@ namespace MatroxFrameGrabber.Mil
                 MIL_INT width = MIL.MbufInquire(displayBuffer, MIL.M_SIZE_X, MIL.M_NULL);
                 MIL_INT height = MIL.MbufInquire(displayBuffer, MIL.M_SIZE_Y, MIL.M_NULL);
                 MIL_INT bands = MIL.MbufInquire(displayBuffer, MIL.M_SIZE_BAND, MIL.M_NULL);
-                if (width <= 0 || height < RowsPerStrip)
-                    return;
+
+                BrightnessSampleRegion region =
+                    BrightnessSamplePlan.For(roi, (int)width, (int)height);
+                if (region.IsEmpty)
+                    return false;
 
                 // The display buffer's bit depth follows the camera (CameraChannel applies
                 // M_BIT_SHIFT for anything over 8 bits). Sampling raw bytes from a >8-bit buffer
@@ -59,14 +76,14 @@ namespace MatroxFrameGrabber.Mil
                 // a permanent false-saturation warning. A blank graph is more honest than that.
                 MIL_INT sizeBit = MIL.MbufInquire(displayBuffer, MIL.M_SIZE_BIT, MIL.M_NULL);
                 if (sizeBit > 8)
-                    return;   // deeper buffers would need a ushort path; a blank graph beats a fabricated one
+                    return false;  // deeper buffers would need a ushort path; a blank graph beats a fabricated one
 
-                EnsureBuffers((int)width);
+                EnsureBuffers(region.Width);
 
                 if (bands >= 3)
-                    SampleColor(displayBuffer, (int)width, (int)height);
+                    SampleColor(displayBuffer, region);
                 else
-                    SampleMono(displayBuffer, (int)width, (int)height);
+                    SampleMono(displayBuffer, region);
             }
             catch (MILException)
             {
@@ -81,6 +98,8 @@ namespace MatroxFrameGrabber.Mil
             {
                 LastSampleMs = watch.Elapsed.TotalMilliseconds;
             }
+
+            return _appended;
         }
 
         public void Reset() => History.Clear();
@@ -96,7 +115,7 @@ namespace MatroxFrameGrabber.Mil
             _b = new byte[needed];
         }
 
-        private void SampleColor(MIL_ID buffer, int width, int height)
+        private void SampleColor(MIL_ID buffer, BrightnessSampleRegion region)
         {
             // Band children are created and freed inside this call rather than cached. Caching them
             // would tie their lifetime to the display buffer's, and a child outliving its parent is
@@ -115,21 +134,17 @@ namespace MatroxFrameGrabber.Mil
 
                 double lumaSum = 0;
                 long clipped = 0, black = 0, counted = 0;
-                // height/Strips leaves the last strip short of the bottom edge (96 for a 1544-row
-                // frame covers only rows 1440-1443, leaving the bottom 100 rows/6.5% never sampled —
-                // exactly the corner a stray light source could hide in). Spacing strips so the last
-                // one still ends on the last row closes that gap; Strips is never 1, so no /0.
-                int step = (height - RowsPerStrip) / (Strips - 1);
 
-                for (int s = 0; s < Strips; s++)
+                for (int s = 0; s < region.Strips; s++)
                 {
-                    int y = s * step;
-                    if (y + RowsPerStrip > height)
-                        break;
+                    int y = region.StripTop(s);
 
-                    MIL.MbufGet2d(red, 0, y, width, RowsPerStrip, _r);
-                    MIL.MbufGet2d(green, 0, y, width, RowsPerStrip, _g);
-                    MIL.MbufGet2d(blue, 0, y, width, RowsPerStrip, _b);
+                    // MbufGet2d, not MbufGet: these buffers carry row padding (pitch 2112 for a
+                    // 2064-wide frame), and a padded read into a tight array shears the rows. It is
+                    // also the only form that takes an X offset, which the ROI now needs.
+                    MIL.MbufGet2d(red, region.OffsetX, y, region.Width, RowsPerStrip, _r);
+                    MIL.MbufGet2d(green, region.OffsetX, y, region.Width, RowsPerStrip, _g);
+                    MIL.MbufGet2d(blue, region.OffsetX, y, region.Width, RowsPerStrip, _b);
 
                     for (int i = 0; i < _stripBytes; i++)
                     {
@@ -151,7 +166,7 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
-        private void SampleMono(MIL_ID buffer, int width, int height)
+        private void SampleMono(MIL_ID buffer, BrightnessSampleRegion region)
         {
             // RAW recording turns M_BAYER_CONVERSION off, so the display buffer becomes the
             // single-band Bayer mosaic. Its plain mean is 0.25R + 0.50G + 0.25B by the CFA's own
@@ -159,17 +174,12 @@ namespace MatroxFrameGrabber.Mil
             // when a RAW recording starts.
             double lumaSum = 0;
             long clipped = 0, black = 0, counted = 0;
-            // See SampleColor: spacing strips so the last one still ends on the last row avoids
-            // leaving the bottom ~6.5% of the frame (100 of 1544 rows) unsampled.
-            int step = (height - RowsPerStrip) / (Strips - 1);
 
-            for (int s = 0; s < Strips; s++)
+            for (int s = 0; s < region.Strips; s++)
             {
-                int y = s * step;
-                if (y + RowsPerStrip > height)
-                    break;
+                int y = region.StripTop(s);
 
-                MIL.MbufGet2d(buffer, 0, y, width, RowsPerStrip, _r);
+                MIL.MbufGet2d(buffer, region.OffsetX, y, region.Width, RowsPerStrip, _r);
 
                 for (int i = 0; i < _stripBytes; i++)
                 {
@@ -193,6 +203,7 @@ namespace MatroxFrameGrabber.Mil
                 (float)(100.0 * clipped / counted),
                 (float)(100.0 * black / counted)));
             ConsecutiveFailures = 0;
+            _appended = true;
         }
     }
 }

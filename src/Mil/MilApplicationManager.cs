@@ -40,6 +40,16 @@ namespace MatroxFrameGrabber.Mil
         public long DigitizerCount { get; private set; }
 
         /// <summary>
+        /// Channel indices this process should take a digitizer for. Null — the default — means all
+        /// of them, which is the ordinary single-process arrangement.
+        ///
+        /// This exists to test whether the board can be split across processes: one per camera,
+        /// each holding a different digitizer. Without it the question cannot be asked, because two
+        /// full instances always collide on the same four ports and prove nothing beyond that.
+        /// </summary>
+        public HashSet<int> OwnedChannels { get; set; }
+
+        /// <summary>
         /// Allocates the MIL application and system and builds the camera channels.
         /// Throws <see cref="MILException"/> if no system can be allocated.
         /// </summary>
@@ -59,11 +69,22 @@ namespace MatroxFrameGrabber.Mil
 
             DigitizerCount = MIL.MsysInquire(_sysId, MIL.M_DIGITIZER_NUM, MIL.M_NULL);
 
+            // Stamped with the process id because several instances can share one log file, and a
+            // split-process run is unreadable without knowing which line came from which.
+            MilErrorLog.Note($"pid {System.Diagnostics.Process.GetCurrentProcess().Id}: " +
+                             $"system {AllocatedSystemDescriptor}, {DigitizerCount} digitizers, " +
+                             $"channels {(OwnedChannels == null ? "all" : string.Join(",", OwnedChannels))}");
+
             for (int i = 0; i < ChannelCount; i++)
             {
                 var channel = new CameraChannel(i);
                 channel.Output = Output;
-                channel.Allocate(_sysId, cameraAvailable: i < DigitizerCount, dcfName: "M_DEFAULT");
+                // A channel outside OwnedChannels gets a pane but no digitizer, exactly like an
+                // empty port. That is what lets one process hold a subset of the board's channels,
+                // which is the only way to answer whether several processes can share it.
+                bool owned = OwnedChannels == null || OwnedChannels.Contains(i);
+                channel.Allocate(_sysId, cameraAvailable: owned && i < DigitizerCount,
+                                 dcfName: "M_DEFAULT");
                 _channels.Add(channel);
             }
         }

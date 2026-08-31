@@ -26,13 +26,134 @@ namespace MatroxFrameGrabber
         /// </summary>
         public static int AutoRunSeconds { get; private set; }
 
+        private const string PwmSweepSwitch = "--pwm-sweep";
+        private const string PwmRoomSwitch = "--pwm-room";
+        private const string PwmScanSwitch = "--pwm-scan";
+
+        /// <summary>
+        /// Channel to run the backlight PWM exposure sweep on, from <c>--pwm-sweep CAM0</c>.
+        /// Null — the default — is an ordinary start.
+        ///
+        /// The sweep exists because the manual procedure asked a person to watch a number update
+        /// twice a second for fifteen seconds and write down the smallest and largest they saw.
+        /// That is the least reliable part of the measurement and the easiest to remove: the app
+        /// can take hundreds of readings instead of thirty, and never mis-read one.
+        /// </summary>
+        public static string PwmSweepChannel { get; private set; }
+
+        /// <summary>
+        /// True for the second half of the sweep, taken with the panel switched off to see whether
+        /// room lighting reaches the camera and at what frequency. Passed as <c>--pwm-room</c>.
+        /// </summary>
+        public static bool PwmSweepRoom { get; private set; }
+
+        /// <summary>
+        /// Measure the whole ripple-vs-exposure curve instead of testing two hypotheses, from
+        /// <c>--pwm-scan</c>. 29 points at 20 s each, so about ten minutes.
+        ///
+        /// The four-point sweep can only answer "100 Hz family, 120 Hz family, or neither", and
+        /// "neither" leaves the operator to go and find the minimum by hand. Scanning reads the
+        /// nulls straight off the curve and works for any frequency; it only costs time, and the
+        /// time is no longer a person's.
+        /// </summary>
+        public static bool PwmSweepScan { get; private set; }
+
+        private const string ChannelsSwitch = "--channels";
+        private const string BayerScopeSwitch = "--bayer-scope";
+        private const string DecimSwitch = "--decim";
+
+        /// <summary>
+        /// Channel indices this process should take a digitizer for, from <c>--channels 0,1</c>.
+        /// Null — the default — means all of them.
+        ///
+        /// This is here to answer whether the board can be split one process per camera. Two full
+        /// instances always collide on the same four ports, so without a way to hand each process a
+        /// different subset the question cannot be asked at all.
+        /// </summary>
+        public static System.Collections.Generic.HashSet<int> OwnedChannels { get; private set; }
+
+        /// <summary>
+        /// Run the M_BAYER_CONVERSION scope diagnostic and exit, from <c>--bayer-scope</c>.
+        /// Answers whether the setting is per-digitizer or board-wide, which decides whether the
+        /// channels can be split across processes.
+        /// </summary>
+        public static bool BayerScopeTest { get; private set; }
+
+        /// <summary>Decimation to apply to owned channels at startup, from <c>--decim 1</c>. 0 = leave alone.</summary>
+        public static int StartupDecimation { get; private set; }
+
+        /// <summary>True while a PWM sweep is driving the app.</summary>
+        public static bool PwmSweeping => !string.IsNullOrEmpty(PwmSweepChannel);
+
         /// <summary>True while running unattended, so nothing waits for a person who isn't there.</summary>
-        public static bool Unattended => AutoRunSeconds > 0;
+        public static bool Unattended => AutoRunSeconds > 0 || PwmSweeping || BayerScopeTest;
 
         protected override void OnStartup(StartupEventArgs e)
         {
             AutoRunSeconds = ParseAutoRunSeconds(e.Args);
+            PwmSweepChannel = ParseSwitchValue(e.Args, PwmSweepSwitch);
+            PwmSweepRoom = HasSwitch(e.Args, PwmRoomSwitch);
+            PwmSweepScan = HasSwitch(e.Args, PwmScanSwitch);
+            OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
+            BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
+            int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,
+                         CultureInfo.InvariantCulture, out int decim);
+            StartupDecimation = decim;
+
+            // Processes sharing a board must not share a log file — the log's lock is process-local,
+            // so they would interleave and drop each other's lines. Only a split run gets a suffix,
+            // so the ordinary single-process log keeps its name.
+            if (OwnedChannels != null)
+                MilErrorLog.FileSuffix = "-ch" + string.Join("", OwnedChannels);
+
             base.OnStartup(e);
+        }
+
+        /// <summary>Reads "0,2" into a set. Null for absent or unparseable, meaning all channels.</summary>
+        private static System.Collections.Generic.HashSet<int> ParseChannels(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            var set = new System.Collections.Generic.HashSet<int>();
+            foreach (string part in value.Split(','))
+                if (int.TryParse(part.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture,
+                                 out int index))
+                    set.Add(index);
+
+            return set.Count > 0 ? set : null;
+        }
+
+        /// <summary>Reads <c>--switch value</c> or <c>--switch=value</c>. Null when absent.</summary>
+        private static string ParseSwitchValue(string[] args, string name)
+        {
+            if (args == null) return null;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i];
+                if (a == null) continue;
+
+                if (a.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string v = a.Substring(name.Length + 1).Trim();
+                    return v.Length == 0 ? null : v;
+                }
+                if (string.Equals(a, name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    string v = (args[i + 1] ?? "").Trim();
+                    return v.Length == 0 || v.StartsWith("--", StringComparison.Ordinal) ? null : v;
+                }
+            }
+            return null;
+        }
+
+        private static bool HasSwitch(string[] args, string name)
+        {
+            if (args == null) return false;
+            for (int i = 0; i < args.Length; i++)
+                if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
         }
 
         /// <summary>
