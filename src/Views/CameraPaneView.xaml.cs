@@ -124,6 +124,29 @@ namespace MatroxFrameGrabber.Views
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
+        private void Decimation_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!(sender is ComboBox combo) || !(combo.SelectedItem is int factor)) return;
+            if (factor == channel.Decimation) return;   // echo of our own OneWay binding
+            // ApplyDecimation returns false when the camera did not take the value. Say so rather
+            // than leaving the combo asserting a factor the hardware refused — this camera returns
+            // success for geometry writes it ignores, which is why the check exists at all.
+            if (!channel.ApplyDecimation(factor))
+            {
+                // Put the combo back to what the camera actually has. A user selection writes a
+                // local value, which detaches the OneWay binding — so without this the combo would
+                // keep asserting a factor the hardware refused, which is the exact silent lie this
+                // handler exists to prevent. The echo guard above makes the re-entrant
+                // SelectionChanged a no-op, so this cannot loop.
+                combo.SelectedItem = channel.Decimation;
+                MessageBox.Show(
+                    "디시메이션을 적용하지 못했습니다. 카메라가 값을 받아들이지 않았습니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
         // Copy this camera's capture settings (exposure / acq rate / trigger / WB) to every other camera.
         private void ApplyAll_Click(object sender, RoutedEventArgs e) =>
             ApplyToAllRequested?.Invoke(this, EventArgs.Empty);

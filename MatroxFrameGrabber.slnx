@@ -5,4 +5,7 @@
   <Project Path="src/MatroxFrameGrabber.csproj">
     <Platform Project="x64" />
   </Project>
+  <Project Path="tests/MatroxFrameGrabber.Tests.csproj">
+    <Platform Project="x64" />
+  </Project>
 </Solution>

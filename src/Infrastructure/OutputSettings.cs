@@ -31,6 +31,12 @@ namespace MatroxFrameGrabber.Infrastructure
         private static readonly string DefaultScratch =
             Path.Combine(SettingsDir, "rawscratch");
 
+        /// <summary>Acquisition slots on the board — always 4, camera present or not.</summary>
+        public const int ChannelCount = 4;
+
+        private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
+        private int _displayUpdateFps = 30;
+
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
         private string _ffmpegPath = "";
@@ -94,6 +100,61 @@ namespace MatroxFrameGrabber.Infrastructure
             set { if (_resolution != value) { _resolution = value; RaiseChanged(nameof(Resolution)); Save(); } }
         }
 
+        /// <summary>
+        /// Per-channel analysis ROI — which pixels the anomaly metrics are computed over. Index is
+        /// the channel's board slot (0-3). Defaults to <see cref="ChannelRoi.FullFrame"/>.
+        /// </summary>
+        public ChannelRoi GetRoi(int channelIndex) =>
+            channelIndex < 0 || channelIndex >= ChannelCount
+                ? ChannelRoi.FullFrame
+                : _channelRois[channelIndex];
+
+        // No RaiseChanged here: nothing binds the ROI through OutputSettings.
+        public void SetRoi(int channelIndex, ChannelRoi roi)
+        {
+            if (channelIndex < 0 || channelIndex >= ChannelCount) return;
+            _channelRois[channelIndex] = roi;
+            Save();
+        }
+
+        private readonly int[] _channelDecimation = new int[ChannelCount];
+
+        /// <summary>
+        /// Per-channel on-board decimation factor (1, 2 or 4). The only lever that reduces host DMA
+        /// traffic on this camera — see research.md section 8 and CLAUDE.md. Zero-initialised, so
+        /// ClampDecimation turns an untouched slot into 1.
+        /// </summary>
+        public int GetDecimation(int channelIndex) =>
+            channelIndex < 0 || channelIndex >= ChannelCount
+                ? 1
+                : ChannelRoi.ClampDecimation(_channelDecimation[channelIndex]);
+
+        public void SetDecimation(int channelIndex, int factor)
+        {
+            if (channelIndex < 0 || channelIndex >= ChannelCount) return;
+            int v = ChannelRoi.ClampDecimation(factor);
+            if (_channelDecimation[channelIndex] == v) return;
+            _channelDecimation[channelIndex] = v;
+            Save();
+        }
+
+        /// <summary>
+        /// Cap for the MIL display's update rate, in frames per second. 0 = uncapped.
+        ///
+        /// This does NOT recover acquisition frame rate — measured, see research.md section 8 —
+        /// it buys back CPU. Clamped to 5..120 when non-zero so a typo cannot make the preview
+        /// look frozen or remove the cap entirely.
+        /// </summary>
+        public int DisplayUpdateFps
+        {
+            get => _displayUpdateFps;
+            set
+            {
+                int v = value <= 0 ? 0 : (value < 5 ? 5 : (value > 120 ? 120 : value));
+                if (_displayUpdateFps != v) { _displayUpdateFps = v; RaiseChanged(nameof(DisplayUpdateFps)); Save(); }
+            }
+        }
+
         /// <summary>Target height in pixels for the preset (0 = keep original).</summary>
         [JsonIgnore]
         public int TargetHeight => _resolution switch
@@ -134,6 +195,19 @@ namespace MatroxFrameGrabber.Infrastructure
             public int RawDurationSeconds { get; set; } = 10;
             public int RawSegmentSeconds { get; set; } = 60;
             public string RawScratchFolder { get; set; }
+            public RoiDto[] ChannelRois { get; set; }
+            public int DisplayUpdateFps { get; set; } = 30;
+            public int[] ChannelDecimation { get; set; }
+        }
+
+        // ChannelRoi is a readonly struct with no parameterless constructor, so it cannot be
+        // deserialized directly. This mirror type exists only for the settings file.
+        private class RoiDto
+        {
+            public int OffsetX { get; set; }
+            public int OffsetY { get; set; }
+            public int Width { get; set; }
+            public int Height { get; set; }
         }
 
         private static readonly JsonSerializerOptions JsonOpts =
@@ -155,6 +229,28 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._rawDurationSeconds = dto.RawDurationSeconds < 0 ? 0 : dto.RawDurationSeconds;
                         s._rawSegmentSeconds = dto.RawSegmentSeconds < 5 ? 5 : dto.RawSegmentSeconds;
                         s._rawScratchFolder = string.IsNullOrWhiteSpace(dto.RawScratchFolder) ? DefaultScratch : dto.RawScratchFolder;
+                        s._displayUpdateFps = dto.DisplayUpdateFps <= 0
+                            ? 0
+                            : (dto.DisplayUpdateFps < 5 ? 5 : (dto.DisplayUpdateFps > 120 ? 120 : dto.DisplayUpdateFps));
+
+                        // A settings file written by an older build has no ROI array, and one
+                        // written by hand may have the wrong length. Both degrade to full frame
+                        // per channel rather than throwing.
+                        if (dto.ChannelRois != null)
+                        {
+                            for (int i = 0; i < ChannelCount && i < dto.ChannelRois.Length; i++)
+                            {
+                                RoiDto r = dto.ChannelRois[i];
+                                if (r == null) continue;
+                                s._channelRois[i] = new ChannelRoi(r.OffsetX, r.OffsetY, r.Width, r.Height);
+                            }
+                        }
+
+                        if (dto.ChannelDecimation != null)
+                        {
+                            for (int i = 0; i < ChannelCount && i < dto.ChannelDecimation.Length; i++)
+                                s._channelDecimation[i] = ChannelRoi.ClampDecimation(dto.ChannelDecimation[i]);
+                        }
                     }
                 }
             }
@@ -172,7 +268,29 @@ namespace MatroxFrameGrabber.Infrastructure
             try
             {
                 Directory.CreateDirectory(SettingsDir);
-                var dto = new Dto { OutputFolder = _outputFolder, Resolution = _resolution, FfmpegPath = _ffmpegPath, RawDurationSeconds = _rawDurationSeconds, RawSegmentSeconds = _rawSegmentSeconds, RawScratchFolder = _rawScratchFolder };
+                var rois = new RoiDto[ChannelCount];
+                for (int i = 0; i < ChannelCount; i++)
+                {
+                    rois[i] = new RoiDto
+                    {
+                        OffsetX = _channelRois[i].OffsetX,
+                        OffsetY = _channelRois[i].OffsetY,
+                        Width = _channelRois[i].Width,
+                        Height = _channelRois[i].Height
+                    };
+                }
+                var dto = new Dto
+                {
+                    OutputFolder = _outputFolder,
+                    Resolution = _resolution,
+                    FfmpegPath = _ffmpegPath,
+                    RawDurationSeconds = _rawDurationSeconds,
+                    RawSegmentSeconds = _rawSegmentSeconds,
+                    RawScratchFolder = _rawScratchFolder,
+                    ChannelRois = rois,
+                    DisplayUpdateFps = _displayUpdateFps,
+                    ChannelDecimation = (int[])_channelDecimation.Clone()
+                };
                 File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }
             catch

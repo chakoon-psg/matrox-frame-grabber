@@ -54,6 +54,41 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException) { return false; }
         }
 
+        /// <summary>
+        /// Writes an integer feature (e.g. Width, OffsetX). Returns false if unavailable.
+        ///
+        /// Integer features MUST go through M_TYPE_MIL_INT. Writing one with M_TYPE_DOUBLE is
+        /// silently ignored — no exception, no error, the value simply does not change.
+        /// </summary>
+        public bool SetInt(string name, long value)
+        {
+            if (!Available(name)) return false;
+            try
+            {
+                MIL_INT v = value;
+                MIL.MdigControlFeature(Digitizer, MIL.M_FEATURE_VALUE, name, MIL.M_TYPE_MIL_INT, ref v);
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
+
+        /// <summary>
+        /// Reads an integer feature property (M_FEATURE_VALUE / _MIN / _MAX / _INCREMENT).
+        /// </summary>
+        public bool TryGetInt(long inquireType, string name, out long value)
+        {
+            value = 0;
+            if (!HasDigitizer) return false;
+            try
+            {
+                MIL_INT v = 0;
+                MIL.MdigInquireFeature(Digitizer, inquireType, name, MIL.M_TYPE_MIL_INT, ref v);
+                value = v;
+                return true;
+            }
+            catch (MILException) { return false; }
+        }
+
         /// <summary>Reads a double feature property (M_FEATURE_VALUE / _MIN / _MAX / ...).</summary>
         public bool TryGetDouble(long inquireType, string name, out double value)
         {

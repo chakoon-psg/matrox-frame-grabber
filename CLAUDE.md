@@ -82,7 +82,7 @@ research.md                    src/ 심층 분석
 | | `● Rec` (Live recording) | `◆ RAW` (RAW recording) |
 |---|---|---|
 | 클래스 | `RecordingSession` | `RawSegmentSession` + `RawFrameWriter` |
-| 소스 | 디스플레이 버퍼 (3밴드 컬러) | grab 버퍼 (1밴드 Bayer) |
+| 소스 | grab 버퍼 (3밴드 컬러) | grab 버퍼 (1밴드 Bayer) |
 | 경로 | MIL → 메모리 → ffmpeg **stdin 파이프** | MIL → 로컬 `.raw` segment → ffmpeg **배치** |
 | 픽셀 포맷 | `gbrp` / `gray` | 센서의 `bayer_*8` (`M_BAYER_PATTERN`에서 조회) |
 | 부하 시 | **프레임을 버린다** (라이브 뷰 우선) | **훅을 막는다** (프레임을 잃지 않는다) |
@@ -150,6 +150,17 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `M_TYPE_MIL_INT`로 써야 한다** — `M_TYPE_DOUBLE`로 쓰면 조용히 무시된다.
 - **한 채널만 느리면 케이블·링크보다 노출을 먼저 보라.** `AcquisitionFrameRate`의 최대값은
   `ExposureTime`에 종속된다. 노출 100 ms면 그 채널의 상한은 10 fps다.
+- **GenICam 피처 쓰기는 read-back 하기 전까지 검증되지 않았다.** 이 카메라(CREVIS
+  MX-A320K-184)는 `Width` / `Height` / `OffsetX` / `OffsetY` 쓰기를 **받아들이고 무시한다.**
+  `MdigControlFeature`가 예외를 던지지 않고, `M_PRINT_DISABLE` 상태에서는 출력도 없어서
+  `MdigControlFeature`를 감싼 헬퍼가 **true를 반환한다** — 그런데 값은 그대로다.
+  `TLParamsLocked = 0`으로 풀어도, `MdigControl(M_SOURCE_SIZE_X / M_SOURCE_OFFSET_X)`로 우회해도
+  마찬가지다. **즉 이 카메라는 ROI 크롭을 지원하지 않는다.** 페이로드를 줄이는 유일한 수단은
+  `DecimationHorizontal` / `Vertical`이며, 이쪽은 같은 할당된 digitizer에서 정상 동작한다
+  (실측: decimation 2 → 1024×772 컬러 184.1 fps, 유실 0).
+  **지오메트리 피처를 쓴 뒤에는 반드시 다시 읽어 확인할 것.** 반환값만 믿으면 안 된다.
+- **실제 하드웨어 증분은 2가 아니다.** 이 카메라는 `Width` 증분 **16**, `Height` 증분 **4**를
+  보고한다. 짝수 가정만으로 계산하면 격자에서 벗어난다 — `M_FEATURE_INCREMENT`를 조회할 것.
 
 ## 에이전트 스킬
 

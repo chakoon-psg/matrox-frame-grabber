@@ -20,6 +20,9 @@
                 <!-- System / digitizer summary pinned to the right -->
                 <TextBlock DockPanel.Dock="Right" Text="{Binding SystemStatus}" VerticalAlignment="Center"
                            Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="8,0,0,0" />
+                <TextBlock DockPanel.Dock="Right" Text="{Binding BandwidthText}" Margin="12,0,0,0"
+                           VerticalAlignment="Center" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" />
 
                 <WrapPanel Orientation="Horizontal">
                     <!-- Acquisition -->
@@ -65,6 +68,7 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <TextBlock Grid.Row="0" Grid.Column="0" Text="RAW auto-stop"
@@ -102,6 +106,16 @@
                                                TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"
                                                Foreground="{StaticResource MutedTextBrush}" />
+
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="표시 fps"
+                                               VerticalAlignment="Center" Margin="0,7,12,0" Foreground="#D0D0D0" />
+                                    <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,7,0,0">
+                                        <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                                                 Text="{Binding Output.DisplayUpdateFps, UpdateSourceTrigger=LostFocus}" />
+                                        <TextBlock Text="0 = 무제한 · 취득 fps와 무관"
+                                                   Margin="6,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                                    </StackPanel>
                                 </Grid>
                             </StackPanel>
                         </Border>

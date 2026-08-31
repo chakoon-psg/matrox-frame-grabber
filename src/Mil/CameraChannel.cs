@@ -47,6 +47,8 @@ namespace MatroxFrameGrabber.Mil
         private const string F_BALANCE_WHITE_AUTO = "BalanceWhiteAuto";
         private const string F_BALANCE_RATIO_SELECTOR = "BalanceRatioSelector";
         private const string F_BALANCE_RATIO = "BalanceRatio";
+        private const string F_DECIM_H = "DecimationHorizontal";
+        private const string F_DECIM_V = "DecimationVertical";
 
         #endregion
 
@@ -120,9 +122,20 @@ namespace MatroxFrameGrabber.Mil
         private int _rawW, _rawH, _rawDisplayCounter;
         private long _rawMissed;
         private DateTime _rawStartTime;
+        private long _framesMissed;
 
         // GenICam SFNC feature access (its Digitizer is updated on each (re)allocation).
         private readonly GenICamFeatures _features = new GenICamFeatures();
+
+        // On-board decimation (reduces host DMA traffic — research.md section 8). Cropping is
+        // refused by this camera; decimation is the lever instead (see CLAUDE.md).
+        private int _decimation = 1;
+
+        // Display-copy decimation. Time-based rather than every-Nth-frame: channels can grab at
+        // very different rates (a long exposure caps one camera at 10 fps while its neighbours
+        // run at 184), and a fixed divider would give each of them a different display rate.
+        private readonly Stopwatch _dispClock = Stopwatch.StartNew();
+        private long _lastDispCopyMs;
 
         // Camera-disconnect detection (polled in RefreshStats; 2 strikes to avoid false positives).
         private bool _cameraLost;
@@ -195,6 +208,26 @@ namespace MatroxFrameGrabber.Mil
         public long FrameCount => _hookData?.FrameCount ?? 0;
         public double FrameRate => _frameRate;
 
+        /// <summary>Frames the board dropped for want of host bandwidth. Non-zero means the
+        /// payload does not fit — see research.md section 8.</summary>
+        public long FramesMissed => _framesMissed;
+
+        /// <summary>Bytes one grabbed frame occupies (what actually crosses the bus). 0 when idle.</summary>
+        public long BytesPerFrame
+        {
+            get
+            {
+                if (_grabBuffers.Count == 0 || _grabBuffers[0] == MIL.M_NULL) return 0;
+                try
+                {
+                    return MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_X, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_Y, MIL.M_NULL)
+                         * MIL.MbufInquire(_grabBuffers[0], MIL.M_SIZE_BAND, MIL.M_NULL);
+                }
+                catch (MILException) { return 0; }
+            }
+        }
+
         /// <summary>This channel's brightness readings, appended on each stats tick.</summary>
         public BrightnessHistory Brightness => _brightness.History;
 
@@ -252,12 +285,16 @@ namespace MatroxFrameGrabber.Mil
                 if (_cameraLost)
                     return "⚠ Camera disconnected — press Stop";
                 if (_rawRecording)
-                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){RawStatusSuffix()}";
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
+                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
+                         + RawStatusSuffix();
                 if (_rawConverting)
                     return "Converting raw → MP4…";
                 string rec = _recording?.StatusSuffix() ?? "";
                 if (_isGrabbing)
-                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames){rec}";
+                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
+                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
+                         + rec;
                 if (_grabBuffers.Count < MIN_USABLE_GRAB_BUFFERS)
                     return $"Low memory: only {_grabBuffers.Count} grab buffer(s)";
                 return $"Ready  ({_grabBuffers.Count} buffers)";
@@ -325,6 +362,30 @@ namespace MatroxFrameGrabber.Mil
         public string AcqRateInput { get => _acqRateInput; set { _acqRateInput = value; RaisePropertyChanged(nameof(AcqRateInput)); } }
 
         public string AcqRateHint => _supportsAcqRate ? $"fps  · max {_acqRateMax:0}" : "fps";
+
+        // ----- Decimation (payload reduction) -----
+
+        /// <summary>The decimation factor confirmed applied by reading it back from the camera.</summary>
+        public int Decimation => _decimation;
+
+        /// <summary>True if the camera exposes decimation. This one does; cropping it does not.</summary>
+        public bool SupportsDecimation => FeatureAvailable(F_DECIM_H);
+
+        /// <summary>Effective frame size the digitizer reports, for the pane hint.</summary>
+        public string DecimationHint
+        {
+            get
+            {
+                if (_digId == MIL.M_NULL) return "no camera";
+                try
+                {
+                    MIL_INT sx = MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
+                    MIL_INT sy = MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
+                    return $"{sx}×{sy}";
+                }
+                catch (MILException) { return "?"; }
+            }
+        }
 
         public bool TriggerOn
         {
@@ -444,6 +505,12 @@ namespace MatroxFrameGrabber.Mil
 
                 if (_digId != MIL.M_NULL)
                 {
+                    // The feature wrapper needs the digitizer id before anything below asks it a
+                    // question: Available() returns false on a null id, so a ROI write placed
+                    // above this line silently does nothing. The assignment after AllocateBuffers
+                    // stays, because the no-camera path must still clear a stale id.
+                    _features.Digitizer = _digId;
+
                     // Force hardware Bayer→RGB conversion ON (color). M_BAYER_CONVERSION is a
                     // PERSISTENT board setting: once disabled (e.g. to grab raw band-1 Bayer) it
                     // stays off across grabs and app restarts, and the color pipeline then misreads
@@ -458,6 +525,11 @@ namespace MatroxFrameGrabber.Mil
                     // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
                     CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
                     RaisePropertyChanged(nameof(CanRecord));
+
+                    // Decimation before AllocateBuffers: the buffer sizes come from
+                    // M_SIZE_X/M_SIZE_Y, which only reflect it once it is written. This is the one
+                    // lever that reduces host DMA traffic on this camera — cropping is refused.
+                    WriteDecimationToCamera();
                 }
             }
 
@@ -521,6 +593,7 @@ namespace MatroxFrameGrabber.Mil
             // Fit the whole image to the control initially (aspect ratio preserved). M_ONCE
             // fits one time and then leaves manual zoom/pan usable (M_ENABLE would lock them).
             MIL.MdispControl(_dispId, MIL.M_SCALE_DISPLAY, MIL.M_ONCE);
+            ApplyDisplayUpdateCap();
 
             if (CameraPresent)
             {
@@ -735,15 +808,16 @@ namespace MatroxFrameGrabber.Mil
                 if (BrightnessEnabled)
                     _brightness.Sample(_dispBufId);
 
-                // While RAW-recording, track frames the board missed (queue back-pressure on a slow
-                // sink), so a "lossless" capture that actually lost frames is visible in the status.
+                // Frames the board dropped because the host could not take them fast enough.
+                // Read on every tick, not only while RAW-recording: this is the acceptance
+                // criterion for the whole payload change, and an over-budget configuration loses
+                // frames silently otherwise.
+                MIL_INT missed = 0;
+                try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
+                catch (MILException) { }
+                _framesMissed = missed;
                 if (_rawRecording)
-                {
-                    MIL_INT missed = 0;
-                    try { MIL.MdigInquire(_digId, MIL.M_PROCESS_FRAME_MISSED, ref missed); }
-                    catch (MILException) { }
                     _rawMissed = missed;
-                }
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -796,6 +870,7 @@ namespace MatroxFrameGrabber.Mil
 
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
+            RaisePropertyChanged(nameof(FramesMissed));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));
@@ -842,7 +917,22 @@ namespace MatroxFrameGrabber.Mil
             }
 
             // ---- Per-frame processing / display update ----
-            MIL.MbufCopy(grabbedBuffer, displayBuffer);
+            // The display copy is 2.3 MB (cropped colour) and triggers a UI-thread update, so it
+            // runs at DisplayUpdateFps rather than every frame. Recording is unaffected:
+            // RecordingSession.Feed works from the grab buffer, never the display buffer.
+            int dispFps = Output?.DisplayUpdateFps ?? 0;
+            bool copyToDisplay = true;
+            if (dispFps > 0)
+            {
+                long now = _dispClock.ElapsedMilliseconds;
+                long interval = 1000 / dispFps;
+                if (now - _lastDispCopyMs < interval)
+                    copyToDisplay = false;
+                else
+                    _lastDispCopyMs = now;
+            }
+            if (copyToDisplay)
+                MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
             // ---- Recording feed (RecordingSession guards start/stop vs feed internally) ----
             _recording?.Feed(grabbedBuffer);
@@ -851,6 +941,40 @@ namespace MatroxFrameGrabber.Mil
         #endregion
 
         #region View control (fit / zoom / snapshot)
+
+        /// <summary>
+        /// Caps the MIL display's update rate at OutputSettings.DisplayUpdateFps (0 = uncapped).
+        ///
+        /// This buys CPU, not frame rate: with the display switched off entirely the aggregate
+        /// acquisition rate did not move, because the ceiling is board/PCIe DMA rather than host
+        /// memory bandwidth (research.md section 8). Apply it only once the ROI has taken the
+        /// load off — under oversubscription the extra display threads starve a channel.
+        /// </summary>
+        public void ApplyDisplayUpdateCap()
+        {
+            if (_dispId == MIL.M_NULL)
+                return;
+            int fps = Output?.DisplayUpdateFps ?? 0;
+            // Catching MILException is not enough: MIL prints before it throws, and in this app a
+            // MIL error print is a MODAL dialog. AllocateBuffers runs during MainWindow
+            // construction, so an unsupported control here would open one dialog per channel
+            // before the window exists. Same guard the M_BAYER_PATTERN probe uses.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
+            {
+                MIL.MdispControl(_dispId, MIL.M_UPDATE_RATE_MAX,
+                    fps > 0 ? (double)fps : MIL.M_MAX_REFRESH_RATE);
+            }
+            catch (MILException)
+            {
+                // An uncapped display is a performance regression, not a failure — never take the
+                // app down for it.
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+            }
+        }
 
         /// <summary>Scales the whole image to fit the display control once (aspect preserved).</summary>
         public void FitToWindow()
@@ -1124,8 +1248,9 @@ namespace MatroxFrameGrabber.Mil
             if (_rawRecording && _rawSegments != null)
             {
                 var t = DateTime.Now - _rawStartTime;
-                string missed = _rawMissed > 0 ? $"  ⚠ missed {_rawMissed}" : "";
-                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}{missed}";
+                // Missed frames are reported by StatusText itself now, from the same inquiry that
+                // feeds _rawMissed — printing them here too put the same number on one line twice.
+                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}";
             }
             if (_rawConverting)
                 return "  (converting segments → MP4…)";
@@ -1257,6 +1382,10 @@ namespace MatroxFrameGrabber.Mil
             }
 
             UpdateCameraInfo();
+
+            RaisePropertyChanged(nameof(SupportsDecimation));
+            RaisePropertyChanged(nameof(Decimation));
+            RaisePropertyChanged(nameof(DecimationHint));
         }
 
         private void UpdateCameraInfo()
@@ -1477,6 +1606,94 @@ namespace MatroxFrameGrabber.Mil
                 TryStartGrab();   // a bad DCF must not crash the app from the click handler
             RaisePropertyChanged(nameof(DisplayId));
             return CameraPresent;
+        }
+
+        /// <summary>
+        /// Writes an integer feature only when it is not already at the target value.
+        ///
+        /// Some nodes are read-only in states where their current value is the only legal one —
+        /// this camera locks OffsetX while Width is at maximum, so writing the 0 it already holds
+        /// is rejected outright. Treating "already correct" as success keeps a harmless no-op from
+        /// looking like a hardware refusal.
+        /// </summary>
+        private bool SetIntIfDifferent(string feature, long value)
+        {
+            if (_features.TryGetInt(MIL.M_FEATURE_VALUE, feature, out long current) && current == value)
+                return true;
+            return _features.SetInt(feature, value);
+        }
+
+        /// <summary>
+        /// Writes the decimation factor and CONFIRMS IT BY READING IT BACK.
+        ///
+        /// The read-back is not belt-and-braces. This camera accepts writes to the geometry
+        /// features and silently ignores them: MdigControlFeature does not throw, nothing prints
+        /// under M_PRINT_DISABLE, and the wrapper therefore returns true while the value never
+        /// changes. That cost several rounds of debugging on the crop path before anyone read the
+        /// value back. Decimation does take effect here — but the only way to know is to look.
+        /// Called from AllocateCamera BEFORE AllocateBuffers, so M_SIZE_X/M_SIZE_Y reflect it.
+        /// </summary>
+        private void WriteDecimationToCamera()
+        {
+            if (_digId == MIL.M_NULL || !SupportsDecimation)
+            {
+                _decimation = 1;
+                return;
+            }
+
+            int wanted = ChannelRoi.ClampDecimation(Output?.GetDecimation(_index) ?? 1);
+
+            // A rejected feature write prints before it throws, and a print here is a MODAL dialog
+            // on this thread. The restore MUST be in the finally, or every later MIL error in the
+            // process disappears silently.
+            MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_DISABLE);
+            try
+            {
+                SetIntIfDifferent(F_DECIM_H, wanted);
+                SetIntIfDifferent(F_DECIM_V, wanted);
+
+                // Read back, and believe only this.
+                long actualH = 1, actualV = 1;
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_H, out actualH);
+                _features.TryGetInt(MIL.M_FEATURE_VALUE, F_DECIM_V, out actualV);
+                _decimation = (actualH == wanted && actualV == wanted)
+                    ? wanted
+                    : ChannelRoi.ClampDecimation((int)actualH);
+            }
+            finally
+            {
+                MIL.MappControl(MIL.M_DEFAULT, MIL.M_ERROR, MIL.M_PRINT_ENABLE);
+            }
+        }
+
+        /// <summary>
+        /// Applies a decimation factor: persists it and reallocates the digitizer and buffers.
+        /// Resumes grabbing if it was active. Mirrors <see cref="ReloadWithDcf"/>, which solves the
+        /// same reallocation problem for the DCF. Returns false if the camera did not take it.
+        /// </summary>
+        public bool ApplyDecimation(int factor)
+        {
+            if (!CameraPresent || !SupportsDecimation)
+                return false;
+
+            int wanted = ChannelRoi.ClampDecimation(factor);
+            bool wasGrabbing = _isGrabbing;
+            if (wasGrabbing)
+                StopGrab();
+
+            Output?.SetDecimation(_index, wanted);
+
+            FreeCamera();
+            _cameraAvailable = true;
+            AllocateCamera();
+
+            if (wasGrabbing)
+                TryStartGrab();
+
+            RaisePropertyChanged(nameof(DisplayId));
+            RaisePropertyChanged(nameof(Decimation));
+            RaisePropertyChanged(nameof(DecimationHint));
+            return CameraPresent && _decimation == wanted;
         }
 
         #endregion
