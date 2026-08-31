@@ -19,6 +19,8 @@
     <Compile Include="..\src\Infrastructure\RoiGesture.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\BrightnessSamplePlan.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\PwmSweep.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\TileGrid.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\FrameMetrics.cs" LinkBase="Included" />
   </ItemGroup>
 
   <ItemGroup>
