@@ -86,6 +86,7 @@ namespace MatroxFrameGrabber.Mil
         private MIL_ID _dispBufId = MIL.M_NULL;
         private MIL_ID _graId = MIL.M_NULL;
         private readonly BrightnessMeter _brightness = new BrightnessMeter();
+        private double _exposureUs;
         private readonly List<MIL_ID> _grabBuffers = new List<MIL_ID>();
 
         private bool _cameraAvailable;
@@ -293,10 +294,33 @@ namespace MatroxFrameGrabber.Mil
             if (!_supportsExposure)
                 return false;
 
+            return WriteExposureUs(us);
+        }
+
+        /// <summary>
+        /// Writes the exposure, reads it back, and logs both numbers. The single place either entry
+        /// point goes through, so a measurement can always be traced to the exposure it ran at:
+        /// the startup line alone left mid-session changes unrecorded, which meant working out
+        /// afterwards which exposure a snapshot belonged to from how bright it came out.
+        /// </summary>
+        private bool WriteExposureUs(double us)
+        {
             bool ok = SetFeatureDouble(F_EXPOSURE_TIME, us);
             RefreshExposureReadback();
+            // The read-back value, not the requested one, and logged even when the write was
+            // refused: a run whose exposure silently stayed put is what this has to reveal.
+            MilErrorLog.Note(
+                $"{Name}: exposure asked {us:0.##} us, camera reports {_exposureUs:0.##} us" +
+                (_exposureUs > 0 ? $" (=> {1e6 / (_exposureUs + InterFrameOverheadUs):0.#} fps max)" : string.Empty));
             return ok;
         }
+
+        /// <summary>
+        /// Readout overhead added to the exposure to get the camera's frame period. Measured at
+        /// 45 us against the camera's own ResultingFrameRate; see PwmSweep, which uses the same
+        /// figure.
+        /// </summary>
+        private const double InterFrameOverheadUs = 45.0;
 
         /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
         public double LastBrightnessSampleMs => _brightness.LastSampleMs;
@@ -381,6 +405,15 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Exposure time in microseconds, as text for the input box.</summary>
         public string ExposureInput { get => _exposureInput; set { _exposureInput = value; RaisePropertyChanged(nameof(ExposureInput)); } }
+
+        /// <summary>
+        /// The exposure the camera reports, in microseconds; 0 when the camera has no exposure
+        /// feature. Read back from the camera rather than parsed from <see cref="ExposureInput"/>:
+        /// the box holds what was asked for, and this camera has form for accepting a write and
+        /// then ignoring it. Recorded on every measurement row so a run's exposure never has to be
+        /// inferred from how bright the picture came out.
+        /// </summary>
+        public double ExposureUs => _exposureUs;
 
         public string ExposureRangeHint =>
             _supportsExposure ? $"µs  [{_exposureMin:0}–{_exposureMax:0}]" : "µs";
@@ -1215,6 +1248,18 @@ namespace MatroxFrameGrabber.Mil
             OutputSettings settings = Output;
             if (_dispBufId == MIL.M_NULL || settings == null)
                 return null;
+
+            // While stopped, the display buffer still holds the last frame of the previous run, so
+            // this would save that frame under the current timestamp - and would keep saving it,
+            // byte for byte, however the exposure was changed in between. Measured: four snapshots
+            // taken across three exposures produced two hashes, both from a run that had already
+            // ended. Refusing is the only honest answer.
+            if (!_isGrabbing)
+            {
+                MilErrorLog.Note($"{Name}: snapshot refused - not grabbing, the display buffer holds a stale frame");
+                return null;
+            }
+
             try
             {
                 string path = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.png");
@@ -1689,7 +1734,11 @@ namespace MatroxFrameGrabber.Mil
         private void RefreshExposureReadback()
         {
             if (_supportsExposure && TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_EXPOSURE_TIME, out double v))
+            {
                 ExposureInput = v.ToString("0.##", CultureInfo.InvariantCulture);
+                _exposureUs = v;
+                RaisePropertyChanged(nameof(ExposureUs));
+            }
         }
 
         /// <summary>Parses the exposure input box and applies it to the camera.</summary>
@@ -1700,9 +1749,7 @@ namespace MatroxFrameGrabber.Mil
             if (!double.TryParse(_exposureInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double us))
                 return false;
 
-            bool ok = SetFeatureDouble(F_EXPOSURE_TIME, us);
-            RefreshExposureReadback();
-            return ok;
+            return WriteExposureUs(us);
         }
 
         private bool SetExposureAuto(bool on)

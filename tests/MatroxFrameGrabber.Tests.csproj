@@ -25,6 +25,9 @@
     <Compile Include="..\src\Infrastructure\TileGrid.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\FrameMetrics.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\AnomalyDetector.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\BrightnessHistory.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\BrightnessLog.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\MilErrorLog.cs" LinkBase="Included" />
   </ItemGroup>
 
   <ItemGroup>

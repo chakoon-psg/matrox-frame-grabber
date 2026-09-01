@@ -23,6 +23,11 @@
                 <TextBlock DockPanel.Dock="Right" Text="{Binding BandwidthText}" Margin="12,0,0,0"
                            VerticalAlignment="Center" FontSize="11"
                            Foreground="{StaticResource MutedTextBrush}" />
+                <!-- Blank unless a run is being logged; the row count moving is the only proof
+                     from the UI that the measurement file is actually being written. -->
+                <TextBlock DockPanel.Dock="Right" Text="{Binding MeasurementLogText}" Margin="12,0,0,0"
+                           VerticalAlignment="Center" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" />
 
                 <WrapPanel Orientation="Horizontal">
                     <!-- Acquisition -->

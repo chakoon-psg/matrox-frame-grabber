@@ -51,7 +51,9 @@
                               Click="RawRecord_Click" IsChecked="{Binding IsRawRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
                               ToolTip="Lossless RAW recording: every frame at full fps → color MP4 (grayscale preview while recording)" />
-                <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" Margin="10,0,3,0" />
+                <!-- IsGrabbing, not CameraPresent: while stopped the display buffer still holds the
+                     previous run's last frame, so a snapshot of it looks fresh but is not. -->
+                <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding IsGrabbing}" Margin="10,0,3,0" />
                 <Button Content="Fit" Command="{Binding FitCommand}" />
                 <Button Content="1:1" Command="{Binding OneToOneCommand}" />
                 <ToggleButton x:Name="RoiSelectToggle" Content="⬚" Padding="6,3"
