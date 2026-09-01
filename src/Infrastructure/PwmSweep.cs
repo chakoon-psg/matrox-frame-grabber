@@ -462,7 +462,7 @@ namespace MatroxFrameGrabber.Infrastructure
             public readonly int K;
             public readonly int ExposureUs;
             public readonly double Fps;
-            /// <summary>Shortest detectable event at this rate, at a depth threshold of 0.10.</summary>
+            /// <summary>Shortest detectable event at this rate, at <see cref="DepthThreshold"/>.</summary>
             public readonly double BMinMs;
             /// <summary>Light gathered, relative to the longest candidate offered.</summary>
             public readonly double RelativeLight;
@@ -483,8 +483,13 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
-        /// <summary>Depth a dip has to reach to be called an anomaly. Sets the shortest event seen.</summary>
-        public const double DepthThreshold = 0.10;
+        /// <summary>
+        /// Depth a dip has to reach to be called an anomaly, which is what sets the shortest event
+        /// this rate can see. The detector's own default, not a second copy of it: these are the
+        /// same physical quantity, and a local constant here would keep reporting the old shortest
+        /// event after the threshold moved.
+        /// </summary>
+        public const double DepthThreshold = AnomalyThresholds.DefaultDepth;
 
         /// <summary>
         /// Every exposure that nulls <paramref name="freqHz"/> and could actually be run, longest

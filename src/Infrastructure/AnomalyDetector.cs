@@ -8,8 +8,40 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public sealed class AnomalyThresholds
     {
-        /// <summary>How far brightness must fall to count. 0.10 sits about 100x above sample noise.</summary>
-        public double Depth { get; set; } = 0.10;
+        /// <summary>
+        /// How far brightness must fall to count, as a fraction of the running baseline.
+        ///
+        /// Measured rather than guessed, and confirmed by running at it. On a healthy panel at
+        /// 8000 us and 124.3 fps, the deepest fall on a frame whose tiles agreed -- the only frames
+        /// the depth threshold has to turn away by itself -- came out as:
+        ///
+        ///     15 min, 111900 frames/channel:  0.0028  0.0109  0.0028
+        ///     10 min,  74601 frames/channel:  0.0089  0.0184  0.0081   0 false positives
+        ///
+        /// So the floor is not a fixed number: it nearly doubled on the dimmest channel between two
+        /// runs an hour apart. Take the worst seen, 0.0184, and 0.05 clears it by 2.7x -- thinner
+        /// than the 4.5x the first run alone suggested, which is why the second run matters. What
+        /// settles it is that 0.05 produced no false positive in 74601 frames on any channel.
+        ///
+        /// The channel setting the worst case is simply the dimmest: luma 53 against 65 and 66. The
+        /// cheapest way to buy margin back is light on that camera, not a higher threshold.
+        ///
+        /// Chosen at 0.05 rather than left at 0.10 for sensitivity: on the depth-staircase clip,
+        /// whose steps are 1 - code/128, a 0.10 threshold catches two of the eight and 0.05 catches
+        /// four. Lower is not supported -- 0.03 would sit under twice the worst floor measured.
+        ///
+        /// One caveat travels with the number: both runs were on a static panel, where coherence
+        /// turned away at most one frame in fifteen minutes, so the gate that is supposed to absorb
+        /// content movement has never been under load. Re-measure with content moving before
+        /// treating 0.05 as settled.
+        /// </summary>
+        public double Depth { get; set; } = DefaultDepth;
+
+        /// <summary>
+        /// The default <see cref="Depth"/>, as a constant, because PwmSweep derives the shortest
+        /// detectable event from the same quantity and two copies of it would drift apart silently.
+        /// </summary>
+        public const double DefaultDepth = 0.05;
 
         /// <summary>
         /// How much the tiles must agree before a fall is believed. This is the whole defence
