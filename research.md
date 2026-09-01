@@ -1,8 +1,9 @@
 # `src/` 심층 분석 리포트 — Matrox Rapixo CXP 멀티 카메라 뷰어
 
-> 대상: `C:\projects\matrox-frame-grabber\src` (소스 20개 파일, 4,048 LOC)
-> 기준 커밋: `07e9cbc` (branch `fix/color-rec-and-toolbar-ux`)
-> 작성일: 2026-08-18
+> 대상: `C:\projects\matrox-frame-grabber\src` (소스 28개 파일, 8,593 LOC)
+> 최초 작성: 2026-08-18, 커밋 `07e9cbc`
+> 갱신: 2026-09-01. §2 에 `Infrastructure` 10개 파일과 테스트 프로젝트를 추가하고,
+> View 절과 파일 크기를 현재 상태로 맞췄다.
 
 ---
 
@@ -12,6 +13,10 @@ Matrox **Rapixo CXP**(CoaXPress) 프레임그래버 1장에 물린 **최대 4대
 바인딩으로 라이브 그랩·표시하고, GenICam 피처로 제어하며, 스냅샷 / H.264 라이브 녹화 /
 **무손실 RAW-Bayer 세그먼트 녹화** 3가지 산출물을 만드는 단일 프로세스
 **WPF(net10.0-windows, x64)** 데스크톱 앱.
+
+용도가 정해진 뒤로 **AVN 화면 이상 검지** 쪽 코드가 붙었다. 분석 ROI, 밝기 측정, PWM 노출 스윕,
+타일 검지기의 순수 로직이 여기 속하며, 대부분 `Infrastructure`에 MIL 무의존으로 있다.
+검지의 MIL 접착부와 분석 스레드는 **아직 없다.**
 
 ---
 
@@ -40,11 +45,16 @@ App.xaml ──> Views/MainWindow.xaml
 | `Views/` | `MatroxFrameGrabber.Views` | XAML + 코드비하인드. 대화상자·파일 선택·MessageBox | `MILWPFDisplay`만 |
 | `ViewModels/` | `MatroxFrameGrabber.ViewModels` | 채널 목록 노출, 전역 명령, 통계 타이머 | 없음 |
 | `Mil/` | `MatroxFrameGrabber.Mil` | MIL 리소스 수명주기 · 그랩 루프 · GenICam | 전면 의존 |
-| `Infrastructure/` | `MatroxFrameGrabber.Infrastructure` | ffmpeg, 파일 I/O, 설정, Win32 interop | **MIL 무의존** |
+| `Infrastructure/` | `MatroxFrameGrabber.Infrastructure` | ffmpeg, 파일 I/O, 설정, Win32 interop, **판정 순수 로직** | **MIL 무의존** |
+
+> `Infrastructure`의 MIL 무의존은 컨벤션에서 **계약**으로 바뀌었다. 테스트 프로젝트가 이 파일들을
+> `ProjectReference`가 아니라 소스로 포함하므로(→ §2.19), 여기에 MIL 참조가 들어가면 **보드 없는
+> 머신에서 테스트가 돌지 않는다.** ROI 규칙, 밝기 표본 배치, PWM 계산, 타일 검지기가 전부
+> 이 계층에 있는 이유다.
 
 > 눈여겨볼 점: `CameraChannel`이 **모델이자 뷰모델**이다. `INotifyPropertyChanged`를 직접 구현하고
 > `RelayCommand`를 노출하며, XAML이 `Channels[0..3]`을 패널의 `DataContext`로 바로 바인딩한다.
-> 채널별 ViewModel 래퍼가 없는 "얇은 MVVM"이며, 이것이 1,394줄짜리 `CameraChannel`의 이유다.
+> 채널별 ViewModel 래퍼가 없는 "얇은 MVVM"이며, 이것이 2,096줄짜리 `CameraChannel`의 이유다.
 
 ---
 
@@ -52,11 +62,26 @@ App.xaml ──> Views/MainWindow.xaml
 
 ### 2.1 진입점 / 셸
 
-**`App.xaml(.cs)`** (12 + 11줄)
+**`App.xaml(.cs)`** (12 + 217줄)
 - `StartupUri="Views/MainWindow.xaml"`, `Views/Styles.xaml`을 머지 딕셔너리로 로드.
-- 코드비하인드는 사실상 비어 있음 — 전역 예외 핸들러 없음(→ §6-1 참조).
+- **명령행 인자 처리**가 여기 있다. 측정과 진단을 사람 없이 돌리기 위한 것이다.
 
-**`Views/Styles.xaml`** (191줄)
+| 인자 | 동작 |
+|---|---|
+| `--autostart <초>` | 지정 시간 취득 후 스스로 종료 |
+| `--channels <목록>` | 지정한 채널만 디지타이저를 잡는다 |
+| `--decim <값>` | 시작 시 디시메이션 적용 |
+| `--pwm-sweep <채널>` `--pwm-scan` `--pwm-room` | PWM 노출 스윕 |
+| `--bayer-scope` | `M_BAYER_CONVERSION`의 적용 범위 진단 |
+
+- `Unattended`가 참이면 모달 대화상자를 띄우지 않고 로그로 보낸다. 무인 실행에서 대화상자는
+  호출자가 시간 초과로 포기할 때까지 프로세스를 붙든다.
+- **디스패처 예외 백스톱**이 생겼다(→ §6-1 해소). UI 스레드에서 던진 MIL 예외가 녹화 중인
+  프로세스를 끝내지 않게 한다. UI 스레드 밖의 예외는 그대로 치명적으로 둔다.
+- `--channels`가 있으면 로그 파일에 접미사를 붙인다. 로그의 락이 프로세스 내부라
+  여러 인스턴스가 한 파일에 쓰면 줄이 유실된다.
+
+**`Views/Styles.xaml`** (370줄)
 - 다크 테마 팔레트(`#1E1E1E` 배경 / `#2A2A2A` 패널 / `#0E639C` 액센트)와
   `Button` / `TextBox` / `ComboBox` / `CheckBox` / `Label` / `Expander` 암시적 스타일.
 - **`RecToggle`**(체크 시 빨강 `#C62828`) vs **`RawToggle`**(체크 시 주황 `#E65100`) —
@@ -65,7 +90,7 @@ App.xaml ──> Views/MainWindow.xaml
 - `ComboBox`는 템플릿 재정의 없이 프로퍼티 레벨만 다크 처리(주석에 명시) — 드롭다운 팝업 일부에
   시스템 기본 스타일이 남는 것을 감수한 타협.
 
-### 2.2 `Views/MainWindow.xaml(.cs)` (155 + 266줄)
+### 2.2 `Views/MainWindow.xaml(.cs)` (217 + 912줄)
 
 **툴바 구성** (커밋 `121d605` → `07e9cbc`에서 단순화)
 - 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` / `◆ RAW All` / `⚙ Rec` 팝업 │ `Open` / `Browse…`
@@ -93,9 +118,19 @@ public MainWindow() {
 
 **전체화면 오버레이**
 - `MainContent`를 `Collapsed`, `FullscreenOverlay`를 `Visible`로 토글.
-- `MILWPFDisplay`를 **그때그때 `new`** 해서 `FullscreenBorder.Child`에 꽂고, 나올 때 `null`로 버린다
-  (같은 DisplayId를 두 컨트롤이 동시에 물지 않게 하려는 의도).
-- `SizeChanged` 때마다 `FitToWindow()` 재호출, 더블클릭으로 진입/이탈.
+- 패널의 디스플레이 컨트롤을 **옮긴다**(`DetachDisplay` → `FullscreenContentGrid`,
+  복귀 시 `ReattachDisplay`). 새로 만들지 않는다.
+- 더블클릭 또는 `⤢` 버튼으로 진입, ESC 또는 닫기 버튼으로 복귀.
+- 전체화면에도 ROI 편집 표면(`_fullscreenRoi`)이 붙는다.
+
+> **개정 (2026-08-27).** 이전 구현은 `MILWPFDisplay`를 그때그때 `new` 해서 오버레이에 꽂았다.
+> 그 결과 같은 DisplayId에 컨트롤이 둘 생겼고, **MIL의 줌 상태는 디스플레이당 하나뿐이라**
+> "창에 맞춤"이 어느 컨트롤 기준인지 모호해졌다. 증상은 전체화면에서 ROI 사각형이 사라지고
+> 복귀 후에도 안 보이는 것으로 나타났다(패널이 zoom 0.30이 아니라 1.011로 돌아왔다).
+> 컨트롤을 옮기는 방식으로 바꿔 해결했고, 복귀 시 zoom 0.438로 확인했다.
+>
+> 부수 효과로 오버레이의 시각 요소가 남는 문제가 생겨 `RemoveVisuals()`를 추가했다.
+> `Children.Clear()`는 디스플레이까지 지우므로 쓸 수 없다.
 
 **ESC 처리 — 이 파일에서 가장 비직관적인 부분**
 
@@ -112,7 +147,7 @@ MIL이 ESC를 다시 처리하지 못하게 막는다.
 **안전장치**: `StopAll_Click`은 녹화 중일 때만 한국어 확인 대화상자를 띄운다(되돌릴 수 없는 동작이므로).
 `OnRawRecordingFinished`는 **실패만** 알린다(성공은 그냥 출력 폴더에 mp4가 생기는 것으로 충분).
 
-### 2.3 `Views/CameraPaneView.xaml(.cs)` (191 + 218줄)
+### 2.3 `Views/CameraPaneView.xaml(.cs)` (248 + 355줄)
 
 한 카메라 패널. `DataContext`는 `CameraChannel`.
 
@@ -131,7 +166,7 @@ MIL이 ESC를 다시 처리하지 못하게 막는다.
 - `_rawTimer`: 패널별 RAW 자동정지 타이머(`Output.RawDurationSeconds > 0`일 때만 arm).
 - `Stop_Click`은 녹화 중이면 한국어 확인 → `StopRawTimer` → `StopRawRecording` → `StopGrab`.
 
-### 2.4 `ViewModels/MainViewModel.cs` (274줄)
+### 2.4 `ViewModels/MainViewModel.cs` (329줄)
 
 - `DispatcherTimer` 500ms → 모든 채널 `RefreshStats()` + `AnyRecording` / `AnyRawRecording` 알림.
   **세션 내내 계속 돈다**(패널별 Start도 fps를 갱신해야 하므로 — 주석에 명시).
@@ -149,7 +184,7 @@ MIL이 ESC를 다시 처리하지 못하게 막는다.
 - `RawSeconds` / `RawSegSeconds`는 문자열 프로퍼티(TextBox 바인딩) → 파싱 실패 시 조용히 무시.
 - `Shutdown()`은 타이머만 정지(MIL 해제는 MainWindow 담당).
 
-### 2.5 `Mil/MilApplicationManager.cs` (123줄)
+### 2.5 `Mil/MilApplicationManager.cs` (155줄)
 
 - `MappAlloc` → `MappControl(M_ERROR, M_THROW_EXCEPTION)` → `MsysAlloc`.
 - 시스템 디스크립터 **폴백 체인**: `M_SYSTEM_RAPIXOCXP` → `M_SYSTEM_DEFAULT`.
@@ -158,7 +193,7 @@ MIL이 ESC를 다시 처리하지 못하게 막는다.
 - `OutputSettings.Load()`를 한 번 해서 4개 채널이 **공유**한다.
 - `Free()`는 **역순 해제**: 채널 → `MsysFree` → `MappFree`.
 
-### 2.6 `Mil/GenICamFeatures.cs` (150줄)
+### 2.6 `Mil/GenICamFeatures.cs` (250줄)
 
 디지타이저 1개에 대한 GenICam SFNC 접근 래퍼. **설계 원칙 하나로 관통된다.**
 
@@ -174,7 +209,7 @@ MIL이 ESC를 다시 처리하지 못하게 막는다.
 - `Digitizer` 프로퍼티는 **재할당 때마다 갱신**해야 한다(`AllocateCamera`가 세팅, `FreeCamera`가 `M_NULL`).
 - 문자열 읽기는 `StringBuilder(256)` 고정 — 255자 초과 피처 값은 잘린다.
 
-### 2.7 `Mil/CameraChannel.cs` (1,394줄) — 앱의 심장
+### 2.7 `Mil/CameraChannel.cs` (2,096줄) — 앱의 심장
 
 #### 소유 리소스
 `_digId`(디지타이저), `_dispId`(WPF 디스플레이), `_dispBufId`(표시 버퍼), `_graId`(그래픽 컨텍스트),
@@ -339,7 +374,7 @@ try {
 - 프레임 버퍼는 `ConcurrentQueue<byte[]>` 풀(최대 12개)로 재사용, `FrameReturned` 콜백으로 회수.
 - `StatusSuffix()`가 `  ● REC 01:23 (dropped 5)` 형태의 상태 문자열을 만든다.
 
-### 2.9 `Infrastructure/FfmpegRecorder.cs` (220줄)
+### 2.9 `Infrastructure/FfmpegRecorder.cs` (259줄)
 
 - ffmpeg를 자식 프로세스로 띄우고 **stdin 파이프**로 rawvideo를 밀어 넣는다.
 - 인자: `-f rawvideo -pixel_format {pixFmt} -video_size WxH -framerate F -i pipe:0 -an
@@ -366,7 +401,7 @@ try {
   (`Failed`를 volatile로 쓰는 것이 `LastError` 문자열을 다른 스레드에 publish 하는 장치)
 - `FileStream`: 1MB 버퍼, `FileOptions.SequentialScan`. `CompleteAndWait`에서 `Flush(true)`.
 
-### 2.11 `Infrastructure/RawSegmentSession.cs` (221줄)
+### 2.11 `Infrastructure/RawSegmentSession.cs` (226줄)
 
 연속 무손실 녹화의 오케스트레이터.
 
@@ -390,7 +425,7 @@ try {
 - 스크래치 폴더가 출력 폴더와 분리된 이유(주석): RAW는 너무 빨라 네트워크 스토리지에 못 쓴다 →
   로컬 NVMe에 쓰고, 압축된 MP4만 (NAS일 수 있는) 출력 폴더로 보낸다.
 
-### 2.12 `Infrastructure/OutputSettings.cs` (193줄)
+### 2.12 `Infrastructure/OutputSettings.cs` (311줄)
 
 - 저장 위치: `%LocalAppData%\MatroxFrameGrabber\settings.json`
 - 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `Resolution`(Original / P1080 / P720),
@@ -410,6 +445,123 @@ try {
   (HWND가 존재해야 하므로 `Loaded`가 아니라 `SourceInitialized`).
 - `RelayCommand`: 최소 구현. `CanExecuteChanged`는 `CommandManager`가 아니라
   **수동 `RaiseCanExecuteChanged()`** 방식이다 (→ §6-2).
+
+### 2.14 분석 ROI 관련 (2026-08 추가)
+
+카메라 크롭이 이 장비에서 동작하지 않는다는 것이 확인된 뒤(→ §8), **어느 화소를 판정에 쓸지**를
+소프트웨어로 지정하는 경로가 생겼다. 규칙은 전부 `Infrastructure`에 순수 함수로 있다.
+
+**`Infrastructure/ChannelRoi.cs`** (177줄)
+- 불변 구조체. `Width` 또는 `Height`가 0 이하이면 **전체 프레임**을 뜻한다.
+- `Snap(maxW, maxH)`: 짝수 격자 정렬 + 프레임 안으로 클램프. CFA 위상 보존이 목적이다.
+- `Rescale(from, to)`: 디시메이션 변경 시 재축척. **하한이 없어 토글을 반복하면 사각형이
+  절반씩 줄어드는 결함이 있었다**(504×308 → 46×26). `MinEditableSize`(16)로 막았다.
+- 대역폭 상수(`HostDmaCeilingBytesPerSecond`, `WarnBytesPerSecond`)도 여기 있다.
+
+**`Infrastructure/RoiGesture.cs`** (156줄)
+- 드래그 규칙 전부. `HitTest` / `Resize` / `Move`.
+- 패널과 전체화면 두 표면이 같은 사각형을 편집하므로 **규칙을 한 곳에 모은 것**이다.
+  핸들러마다 복사하면 갈라진다.
+- 반대쪽 변을 지나쳐 끌면 **뒤집는다.** 음수 크기를 `ChannelRoi`가 "전체 프레임"으로 읽으므로,
+  뒤집지 않으면 측정 대상이 조용히 전체로 바뀐다.
+- `Snap`을 마지막에 적용해 미리보기와 커밋 값을 일치시킨다. 아니면 버튼을 뗄 때 사각형이 튄다.
+
+**`Infrastructure/DisplayMapping.cs`** (69줄)
+- 이미지 좌표 ↔ 컨트롤 좌표 변환. MIL의 줌·팬 상태를 반영한다.
+
+**`Views/RoiEditSurface.cs`** (455줄)
+- 패널과 전체화면이 공유하는 편집 표면. 사각형·점선·핸들 8개를 코드로 만든다.
+- `TryBeginDrag` / `ContinueDrag` / `EndDrag` / `CancelDrag` / `Refresh` / `UpdateCursor`.
+- **오버레이는 500ms 통계 틱에 얹혀 위치를 따라간다.** MIL의 줌·팬이 네이티브라 이벤트가
+  없으므로 폴링이 유일한 방법이다.
+- 사각형이 그려지지 않을 때 그 이유를 로그에 남긴다. 전이만 로깅하던 초기 구현은
+  **한 번도 그려지지 않은 표면에 대해 아무 말도 하지 않았다.**
+
+### 2.15 밝기 측정 (2026-08 추가)
+
+**`Mil/BrightnessMeter.cs`** (209줄)
+- 표시 버퍼에서 strip을 읽어 평균 luma·포화율·흑화율을 낸다.
+- **분석 ROI 안에서만 측정한다.** ROI가 없으면 전체 프레임이다.
+- 전체 해상도에서 점 표본을 뜬다. 축소본을 재면 이중선형 보간이 포화 화소를 이웃과 평균해
+  버려서 포화율이 존재하는 이유가 사라진다.
+- `MbufGet2d`를 쓴다. 행 패딩이 있는 버퍼를 `MbufGet`으로 읽으면 어긋난다.
+- 컬러는 Rec.601, 1밴드는 값 그대로. Bayer의 단순 평균이 `0.25R + 0.50G + 0.25B`라
+  두 모드 사이에서 그래프가 이어진다.
+
+**`Infrastructure/BrightnessSamplePlan.cs`** (107줄)
+- strip 배치 계산. 16 strip × 4행을 영역 안에 펼친다.
+- 짧은 영역에서는 strip 수를 줄여 **겹치지 않게** 한다. 겹치면 같은 행을 두 번 세어
+  실제로 본 면적을 과대 보고한다.
+- **그려진 ROI가 표본 불가일 때는 전체 프레임으로 되돌리지 않고 아무 값도 내지 않는다.**
+  되돌리면 그래프는 움직이는데 대상이 조작자가 요청한 적 없는 것이 된다.
+
+**`Infrastructure/BrightnessHistory.cs`** (79줄)
+- 240개 링 버퍼. `BrightnessSample`(luma / clip% / black%).
+
+### 2.16 PWM 노출 스윕 (2026-08 추가)
+
+**`Infrastructure/PwmSweep.cs`** (771줄)
+- 백라이트 PWM 주파수를 노출 스윕으로 찾는 계산 전부. MIL 무의존, 단위 테스트 대상.
+- 노출은 박스 적분이라 주파수 응답이 `|sinc(pi*f*T)|`이고 `f*T`가 정수면 0이 된다.
+  리플이 사라지는 노출이 주기의 정수배이며 거기서 주파수가 역산된다.
+- **4점 모드**는 100 Hz 계열과 120 Hz 계열만 가린다. **곡선 스캔**(4000~11000 µs, 250 µs 간격)은
+  널 위치에서 주파수를 직접 구한다.
+- 널 위치를 **V자 꼭짓점으로 보간한다.** 격자 그대로 쓰면 240 Hz를 250 Hz로 읽고,
+  그 값으로 계산한 노출은 진짜 널을 333 µs 빗나간다.
+- 널이 하나뿐이어도 대개 답이 나온다. 큰 k는 이웃 널을 함의하고 그 위치가 스캔 범위 안이면
+  스캔이 찾았을 것이므로, 그런 k는 배제된다.
+- 권장 fps를 노출에서 유도한다. 노출이 허용하는 최대치보다 낮게 캡을 걸면 노출 사이에
+  사각지대가 생긴다(5000 µs를 184 fps로 제한하면 8%).
+
+### 2.17 타일 검지기 (2026-08 추가, 미완)
+
+프레임 단위 이상 검지의 순수 로직. **MIL 접착부(`TileReducer`)와 분석 스레드는 아직 없다.**
+
+**`Infrastructure/TileGrid.cs`** (139줄)
+- 8×8 타일의 합·제곱합·화소수. mean / stdev / 중앙값 / 전역 평균이 파생된다.
+- 대표값은 **타일 평균의 중앙값**이다. 지나가는 밝은 물체가 평균은 끌지만 중앙값은 못 끈다.
+- 표준편차는 반올림으로 분산이 음수가 되면 0으로 clamp한다. NaN이 새면 백화 판정이 꺼진다.
+
+**`Infrastructure/FrameMetrics.cs`** (72줄)
+- `Depth(median, baseline)` = `1 − median/baseline`
+- `Coherence(before, after)` = `|Σd| / Σ|d|`
+- **정지 화면의 coh는 0이다.** 분모가 0인데 1을 돌려주면 센서 노이즈가 만든 depth와 짝지어져
+  변화 없는 화면에서 검출이 난다.
+
+**`Infrastructure/AnomalyDetector.cs`** (277줄)
+- running median 기준선, 사건형 확정, 디바운스, 프레임 번호 불연속 구간 제외.
+- **진입은 `depth AND coh`, 유지는 `depth`만.** 화면이 어두워지면 타일이 더 안 움직여 coh가
+  0으로 떨어지므로, 매 프레임 요구하면 여러 프레임 blank가 쪼개진다.
+- 지속 시간은 **프레임 수 × 주기**다. 타임스탬프 간격은 1프레임 사건을 0으로 보고한다.
+- 어두운 프레임은 기준선에 넣지 않되 완만한 정상 변화는 넣는다. 전자가 없으면 긴 블랙아웃이
+  스스로를 지우고, 후자가 없으면 패널을 어둡게 한 뒤 모든 프레임이 이상이 된다.
+- `Flush()`가 없으면 grab 종료 시점에 열려 있던 사건이 보고되지 않는다.
+
+### 2.18 `Infrastructure/MilErrorLog.cs` (112줄)
+
+MIL 오류는 실패한 스레드 위에 **모달 대화상자**로 뜬다(→ §5). 출력을 끄고 여기로 보낸다.
+
+- **프레임마다 부르면 안 된다.** 프로세스 전역 락 아래의 동기 디스크 쓰기라, 오류 폭풍이 나면
+  모든 취득 스레드가 파일 I/O 뒤에 줄을 선다.
+- 트림할 때 **최신 절반을 남긴다.** 초기 구현은 경계에서 전부 버렸다.
+- `FileSuffix`로 파일을 나눌 수 있다. 락이 프로세스 내부라 여러 프로세스가 한 파일에 쓰면
+  줄이 유실된다. 실제로 분리 프로세스 측정을 오염시킨 적이 있다.
+
+---
+
+### 2.19 테스트 프로젝트 (`tests/`, 153개)
+
+`Infrastructure`가 MIL 무의존이라 **보드 없이 검증 가능한 유일한 계층**이다.
+
+```
+ChannelRoiTests          RoiGestureTests        DisplayMappingTests
+BrightnessSamplePlanTests
+PwmSweepTests            PwmScanTests
+TileGridTests            FrameMetricsTests      AnomalyDetectorTests
+```
+
+`csproj`가 앱을 `ProjectReference`하지 않고 **소스로 포함**한다. 참조하면 x64 전용 MIL NuGet을
+끌어와 MIL 없는 머신에서 돌지 않는다.
 
 ---
 
@@ -518,8 +670,10 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 3. **`MainViewModel.AnyCanRecord`의 주석이 낡았다** — "MIL compression licensed"라고 적혀 있지만
    실제 판정 기준은 ffmpeg 존재 여부다.
 
-4. **`CameraChannel.DumpDiagnostics()`는 죽은 코드**다. 어디서도 호출하지 않는다.
-   fps 문제 진단에 유용한 내용이므로 UI(예: 패널 툴팁/로그)에 노출하든지 제거하든지 결정이 필요하다.
+4. ~~**`CameraChannel.DumpDiagnostics()`는 죽은 코드**다.~~ — **해결됨.**
+   `AllocateCamera`에서 `MilErrorLog.Note(DumpDiagnostics())`로 호출한다. 앱을 시작할 때마다
+   각 카메라의 노출·레이트·링크 구성이 로그에 남는다. "한 채널만 느리다"의 원인이 노출이었던
+   사례가 있어(→ §8) 그 진단을 매번 남기도록 했다.
 
 5. **`_rawFinishing` 세션이 종료 경로에서 `Dispose`되지 않을 수 있다.**
    `FreeCamera()`는 `WaitConversions(15000)`만 하고 `Dispose()`는 하지 않는다.
@@ -542,10 +696,18 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 9. **`OutputSettings.Save()`가 setter마다 동기 파일 쓰기**를 한다. 관련 TextBox가
    `UpdateSourceTrigger=PropertyChanged`라서 **타이핑 한 글자마다 JSON을 다시 쓴다.**
 
-10. **자동 테스트가 전혀 없다.** 하드웨어 의존이 크지만 `OutputSettings`(로드/저장/`ScaleFactorFor`),
-    `SafeName()`, `FfmpegRecorder.ResolveFfmpegPath` 정도는 순수 로직이라 단위 테스트가 가능하다.
+10. ~~**자동 테스트가 전혀 없다.**~~ — **해결됨.** `tests/` 에 153개가 있다(→ §2.19).
+    다만 대상은 `Infrastructure` 뿐이다(→ §2.19). 여기 적었던 `OutputSettings`, `SafeName()`,
+    `FfmpegRecorder.ResolveFfmpegPath` 는 **아직 테스트가 없다.** 새로 추가된 순수 로직
+    (ROI, 밝기 표본, PWM, 타일 검지기) 쪽으로 먼저 갔다.
 
-11. `docs/`에는 스크린샷 1장만 있고 설계 문서가 없다. 실질적 문서는 `CLAUDE.md` + 코드 주석 + 커밋 메시지.
+11. ~~`docs/`에는 스크린샷 1장만 있고 설계 문서가 없다.~~ — **해결됨.**
+    `CONTEXT.md`(용어), `docs/adr/`, `docs/superpowers/specs/`(이상 검지 설계),
+    `docs/GUI 가이드.md`, `docs/measurements/` 가 생겼다.
+
+12. **`research.md` 자신이 뒤처지기 쉽다.** 2026-08 갱신 시점에 View 절이 파일 크기 기준으로
+    3배 이상 차이가 났고, `Infrastructure` 의 10개 파일이 문서에 없었다. 파일을 추가할 때
+    §2 에 항목을 함께 넣는 습관이 필요하다.
 
 > **해결된 1·2·7번에 대한 검증 범위**: 컴파일(Release x64, 오류 0)까지만 확인했고
 > **카메라가 붙은 보드에서 실행 검증은 하지 못했다.** 특히 7번의 MIL→ffmpeg 패턴 매핑
