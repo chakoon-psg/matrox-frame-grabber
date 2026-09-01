@@ -392,6 +392,16 @@ namespace MatroxFrameGrabber.Mil
         public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
         public double DetectionBaseline => _detector?.Baseline ?? 0.0;
 
+        /// <summary>
+        /// The false-positive floor this run measured: the deepest fall on a frame judged normal,
+        /// how many normal frames crowded the gate, and how many were turned away by coherence
+        /// alone. The numbers the thresholds get chosen from.
+        /// </summary>
+        public double MaxCoherentNormalDepth => _detector?.MaxCoherentNormalDepth ?? 0.0;
+        public double MaxNormalDepth => _detector?.MaxNormalDepth ?? 0.0;
+        public long NormalFramesNearThreshold => _detector?.NormalFramesNearThreshold ?? 0;
+        public long CoherenceSaves => _detector?.CoherenceSaves ?? 0;
+
         /// <summary>Raised on the stats tick for each anomaly confirmed since the last tick.</summary>
         public event Action<CameraChannel, AnomalyEvent> AnomalyDetected;
 
@@ -1020,6 +1030,18 @@ namespace MatroxFrameGrabber.Mil
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
+
+            // Before Flush clears it: the floor this run measured is the reason for running it.
+            if (DetectionEnabled && _detector != null)
+                MilErrorLog.Note(
+                    $"{Name}: detection floor - coherent normal depth max {_detector.MaxCoherentNormalDepth:F4} "
+                  + $"at frame {_detector.MaxCoherentNormalDepthFrame} "
+                  + $"vs threshold {DetectionThresholds.Depth:F2} "
+                  + $"({(_detector.MaxCoherentNormalDepth > 0 ? DetectionThresholds.Depth / _detector.MaxCoherentNormalDepth : 0):F1}x margin), "
+                  + $"{_detector.NormalFramesNearThreshold} past half of it; "
+                  + $"any-normal depth max {_detector.MaxNormalDepth:F4}, "
+                  + $"{_detector.CoherenceSaves} turned away by coherence alone; "
+                  + $"{_detector.Observed} frames judged");
 
             // A fault still running when the grab ends would otherwise never be reported at all.
             AnomalyEvent? tail = _detector?.Flush();

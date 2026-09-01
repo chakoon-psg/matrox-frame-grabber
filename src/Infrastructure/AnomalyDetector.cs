@@ -124,6 +124,45 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Frames judged so far. Below BaselineWarmupFrames nothing is judged yet.</summary>
         public long Observed => _observed;
 
+        /// <summary>
+        /// The deepest fall on a normal frame whose tiles agreed -- coherence above its gate, so
+        /// coherence offered no protection and only the depth threshold stood between it and an
+        /// event. This is the number the depth threshold has to clear, and the ratio between them
+        /// is the margin. It cannot be read off the sampled log, because it lives in the tail.
+        /// </summary>
+        public double MaxCoherentNormalDepth { get; private set; }
+
+        /// <summary>
+        /// The frame <see cref="MaxCoherentNormalDepth"/> came from, so the figure can be checked
+        /// rather than trusted. It has to be: a fault does not start in one frame, and the frame
+        /// before an event opens is partway down it. Measured over 111900 frames the worst normal
+        /// depth was 0.0994 against a 0.10 threshold -- which reads as no margin at all until the
+        /// frame number puts it half a second before an 800 ms blackout, with everything away from
+        /// an event under 0.011. Without this the counter cannot tell the floor from a shoulder.
+        /// </summary>
+        public long MaxCoherentNormalDepthFrame { get; private set; }
+
+        /// <summary>
+        /// The deepest fall on any normal frame, agreeing tiles or not. Larger than
+        /// <see cref="MaxCoherentNormalDepth"/> by however much content movement the coherence gate
+        /// is turning away, which is what makes the pair worth reading together rather than either
+        /// alone.
+        /// </summary>
+        public double MaxNormalDepth { get; private set; }
+
+        /// <summary>
+        /// Normal frames that got past half the depth threshold. A maximum can be one freak frame;
+        /// this says whether the population crowds the gate or sits far below it.
+        /// </summary>
+        public long NormalFramesNearThreshold { get; private set; }
+
+        /// <summary>
+        /// Frames deep enough to fire that only the coherence gate turned away. How much work that
+        /// gate is doing: a large number means the depth threshold is too low and the defence rests
+        /// on coherence alone.
+        /// </summary>
+        public long CoherenceSaves { get; private set; }
+
         /// <summary>True while an event is open and not yet emitted.</summary>
         public bool InEvent => _inEvent;
 
@@ -198,6 +237,30 @@ namespace MatroxFrameGrabber.Infrastructure
             {
                 Remember(median);
 
+                // The floor this threshold has to clear. Only frames outside an event count: while
+                // one is open the baseline is frozen on purpose, so depth there measures the fault
+                // rather than the noise.
+                if (!_inEvent)
+                {
+                    if (depth > MaxNormalDepth) MaxNormalDepth = depth;
+
+                    if (coherence > _t.Coherence)
+                    {
+                        // Nothing but the depth threshold turned this frame away.
+                        if (depth > MaxCoherentNormalDepth)
+                        {
+                            MaxCoherentNormalDepth = depth;
+                            MaxCoherentNormalDepthFrame = frame;
+                        }
+                        if (depth > _t.Depth * 0.5) NormalFramesNearThreshold++;
+                    }
+                    else if (depth > _t.Depth)
+                    {
+                        // Deep enough to fire; the tiles disagreed and coherence rejected it.
+                        CoherenceSaves++;
+                    }
+                }
+
                 if (_inEvent && ++_clearFrames >= _t.DebounceFrames)
                     emitted = Close();
             }
@@ -222,6 +285,11 @@ namespace MatroxFrameGrabber.Infrastructure
             Baseline = 0;
 
             _hasPrevious = false;
+            MaxNormalDepth = 0;
+            MaxCoherentNormalDepth = 0;
+            MaxCoherentNormalDepthFrame = 0;
+            NormalFramesNearThreshold = 0;
+            CoherenceSaves = 0;
             _previousFrame = -1;
             _previousTime = 0;
             _framePeriodSec = 0;
