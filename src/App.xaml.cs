@@ -81,6 +81,15 @@ namespace MatroxFrameGrabber
         /// <summary>Seconds to hold each exposure, from <c>--dwell 30</c>.</summary>
         public static int DwellSeconds { get; private set; } = DefaultDwellSeconds;
 
+        private const string NoDetectSwitch = "--no-detect";
+
+        /// <summary>
+        /// <c>--no-detect</c>: run without the tile reduction and the detector. Exists for one
+        /// measurement -- frames missed with detection on the acquisition path against the same run
+        /// without it -- which is the acceptance test for putting it there.
+        /// </summary>
+        public static bool DetectionOff { get; private set; }
+
         private const string BayerScopeSwitch = "--bayer-scope";
         private const string DecimSwitch = "--decim";
 
@@ -122,6 +131,7 @@ namespace MatroxFrameGrabber
             PwmSweepScan = HasSwitch(e.Args, PwmScanSwitch);
             OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
             BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
+            DetectionOff = HasSwitch(e.Args, NoDetectSwitch);
             ExposureScan = ParseExposures(ParseSwitchValue(e.Args, ExposureScanSwitch));
             DwellSeconds = ParseDwellSeconds(e.Args);
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,

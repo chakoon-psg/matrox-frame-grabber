@@ -41,6 +41,12 @@ namespace MatroxFrameGrabber.ViewModels
             foreach (var channel in _manager.Channels)
                 channel.BrightnessEnabled = true;
 
+            // Detection likewise for the whole session, unless the command line switched it off.
+            // The switch exists for one measurement: frames missed with the tile reduction on the
+            // acquisition path against the same run without it.
+            foreach (var channel in _manager.Channels)
+                channel.DetectionEnabled = !App.DetectionOff;
+
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += (s, e) =>
@@ -103,7 +109,12 @@ namespace MatroxFrameGrabber.ViewModels
                     now, channel.Name, channel.Decimation, channel.ExposureUs,
                     channel.AnalysisRoi.Width, channel.AnalysisRoi.Height,
                     channel.FrameCount, channel.FrameRate, channel.FramesMissed,
-                    history.HasData, latest.Luma, latest.ClippedPct, latest.BlackPct);
+                    history.HasData, latest.Luma, latest.ClippedPct, latest.BlackPct,
+                    // LastReduceUs, not the running maximum: a monotonic column cannot show a
+                    // distribution, and what the cost does over a run is the question.
+                    channel.AnomalyCount, channel.LastReduceUs,
+                    channel.GridsAccepted, channel.DetectionDepth,
+                    channel.DetectionCoherence, channel.DetectionBaseline);
             }
 
             RaiseChanged(nameof(MeasurementLogText));

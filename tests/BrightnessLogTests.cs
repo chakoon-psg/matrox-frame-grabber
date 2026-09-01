@@ -69,8 +69,8 @@ namespace MatroxFrameGrabber.Tests
             {
                 log.Start(_folder, Started);
                 path = log.Path;
-                log.Append(Started.AddSeconds(0.5), "Camera 0", 2, 10000, 308, 182, 92, 184.06, 0, true, 118.25f, 0.0f, 0.125f);
-                log.Append(Started.AddSeconds(0.5), "Camera 1", 2, 5388.4, 348, 236, 92, 183.98, 3, true, 96.5f, 1.5f, 0.0f);
+                log.Append(Started.AddSeconds(0.5), "Camera 0", 2, 10000, 308, 182, 92, 184.06, 0, true, 118.25f, 0.0f, 0.125f, 0, 0.0, 0, 0.0, 0.0, 0.0);
+                log.Append(Started.AddSeconds(0.5), "Camera 1", 2, 5388.4, 348, 236, 92, 183.98, 3, true, 96.5f, 1.5f, 0.0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
                 Assert.Equal(2, log.Rows);
             }
 
@@ -78,10 +78,10 @@ namespace MatroxFrameGrabber.Tests
             Assert.Equal(3, lines.Length);
             Assert.Equal(BrightnessLog.Header, lines[0]);
             Assert.Equal(
-                "2026-09-01 15:30:00.500,0.5,Camera 0,2,10000,308,182,92,184.06,0,118.25,0.000,0.125",
+                "2026-09-01 15:30:00.500,0.5,Camera 0,2,10000,308,182,92,184.06,0,118.25,0.000,0.125,0,0.0,0,0.0000,0.0000,0.00",
                 lines[1]);
             Assert.Equal(
-                "2026-09-01 15:30:00.500,0.5,Camera 1,2,5388,348,236,92,183.98,3,96.50,1.500,0.000",
+                "2026-09-01 15:30:00.500,0.5,Camera 1,2,5388,348,236,92,183.98,3,96.50,1.500,0.000,0,0.0,0,0.0000,0.0000,0.00",
                 lines[2]);
         }
 
@@ -95,12 +95,12 @@ namespace MatroxFrameGrabber.Tests
             {
                 log.Start(_folder, Started);
                 path = log.Path;
-                log.Append(Started, "Camera 2", 2, 10000, 284, 208, 0, 0.0, 0, false, 0f, 0f, 0f);
+                log.Append(Started, "Camera 2", 2, 10000, 284, 208, 0, 0.0, 0, false, 0f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
             }
 
             string row = File.ReadAllLines(path)[1];
-            Assert.EndsWith("Camera 2,2,10000,284,208,0,0.00,0,,,", row);
-            Assert.Equal(12, row.Split(',').Length - 1);   // same column count as the header
+            Assert.EndsWith("Camera 2,2,10000,284,208,0,0.00,0,,,,0,0.0,0,0.0000,0.0000,0.00", row);
+            Assert.Equal(18, row.Split(',').Length - 1);   // same column count as the header
         }
 
         [Fact]
@@ -111,7 +111,7 @@ namespace MatroxFrameGrabber.Tests
             {
                 log.Start(_folder, Started);
                 path = log.Path;
-                log.Append(Started, "Camera 0", 1, 0, 0, 0, 5, 60.0, 0, true, 10f, 0f, 90f);
+                log.Append(Started, "Camera 0", 1, 0, 0, 0, 5, 60.0, 0, true, 10f, 0f, 90f, 0, 0.0, 0, 0.0, 0.0, 0.0);
             }
 
             string[] lines = File.ReadAllLines(path);
@@ -126,7 +126,7 @@ namespace MatroxFrameGrabber.Tests
             {
                 log.Start(_folder, Started);
                 path = log.Path;
-                log.Append(Started, "Camera 0, left", 2, 10000, 308, 182, 1, 1.0, 0, true, 1f, 0f, 0f);
+                log.Append(Started, "Camera 0, left", 2, 10000, 308, 182, 1, 1.0, 0, true, 1f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
             }
 
             Assert.Contains("\"Camera 0, left\"", File.ReadAllLines(path)[1]);
@@ -137,7 +137,7 @@ namespace MatroxFrameGrabber.Tests
         {
             using (var log = new BrightnessLog())
             {
-                log.Append(Started, "Camera 0", 2, 10000, 308, 182, 1, 1.0, 0, true, 1f, 0f, 0f);
+                log.Append(Started, "Camera 0", 2, 10000, 308, 182, 1, 1.0, 0, true, 1f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
                 Assert.Equal(0, log.Rows);
                 Assert.False(log.IsActive);
                 Assert.Null(log.Path);
@@ -165,7 +165,7 @@ namespace MatroxFrameGrabber.Tests
                 log.Start(_folder, Started);
                 path = log.Path;
                 for (int i = 0; i < 10; i++)
-                    log.Append(Started.AddSeconds(i * 0.5), "Camera 0", 2, 10000, 308, 182, i, 184.0, 0, true, 100f, 0f, 0f);
+                    log.Append(Started.AddSeconds(i * 0.5), "Camera 0", 2, 10000, 308, 182, i, 184.0, 0, true, 100f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
             }
 
             Assert.Equal(11, File.ReadAllLines(path).Length);
@@ -182,9 +182,9 @@ namespace MatroxFrameGrabber.Tests
             {
                 log.Start(_folder, Started);
                 path = log.Path;
-                log.Append(Started, "Camera 0", 2, 10000, 308, 182, 1, 99.6, 0, true, 29.2f, 0f, 0f);
-                log.Append(Started.AddSeconds(0.5), "Camera 0", 2, 8000, 308, 182, 2, 124.3, 0, true, 23.4f, 0f, 0f);
-                log.Append(Started.AddSeconds(1.0), "Camera 0", 2, 6000, 308, 182, 3, 165.3, 0, true, 17.5f, 0f, 0f);
+                log.Append(Started, "Camera 0", 2, 10000, 308, 182, 1, 99.6, 0, true, 29.2f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
+                log.Append(Started.AddSeconds(0.5), "Camera 0", 2, 8000, 308, 182, 2, 124.3, 0, true, 23.4f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
+                log.Append(Started.AddSeconds(1.0), "Camera 0", 2, 6000, 308, 182, 3, 165.3, 0, true, 17.5f, 0f, 0f, 0, 0.0, 0, 0.0, 0.0, 0.0);
             }
 
             string[] lines = File.ReadAllLines(path);

@@ -28,7 +28,8 @@ namespace MatroxFrameGrabber.Infrastructure
         public const int MaxRows = 200_000;
 
         public const string Header =
-            "iso_time,elapsed_s,channel,decim,exposure_us,roi_w,roi_h,frames,fps,missed,luma,clip_pct,black_pct";
+            "iso_time,elapsed_s,channel,decim,exposure_us,roi_w,roi_h,frames,fps,missed,"
+          + "luma,clip_pct,black_pct,anomalies,reduce_us,grids,depth,coherence,baseline";
 
         /// <summary>
         /// Where runs are written: beside the MIL error log, under a folder of its own so a
@@ -92,7 +93,9 @@ namespace MatroxFrameGrabber.Infrastructure
         public void Append(
             DateTime now, string channel, int decimation, double exposureUs, int roiWidth, int roiHeight,
             long frames, double fps, long missed,
-            bool hasBrightness, float luma, float clippedPct, float blackPct)
+            bool hasBrightness, float luma, float clippedPct, float blackPct,
+            long anomalies, double reduceUs,
+            long grids, double depth, double coherence, double baseline)
         {
             if (_writer == null || Rows >= MaxRows) return;
 
@@ -104,11 +107,13 @@ namespace MatroxFrameGrabber.Infrastructure
             try
             {
                 _writer.WriteLine(string.Format(
-                    inv, "{0},{1:F1},{2},{3},{4:F0},{5},{6},{7},{8:F2},{9},{10}",
+                    inv, "{0},{1:F1},{2},{3},{4:F0},{5},{6},{7},{8:F2},{9},{10},{11},{12:F1},"
+                       + "{13},{14:F4},{15:F4},{16:F2}",
                     now.ToString("yyyy-MM-dd HH:mm:ss.fff", inv),
                     (now - _startedAt).TotalSeconds,
                     Csv(channel), decimation, exposureUs, roiWidth, roiHeight,
-                    frames, fps, missed, luminance));
+                    frames, fps, missed, luminance, anomalies, reduceUs,
+                    grids, depth, coherence, baseline));
                 Rows++;
             }
             catch (IOException e)
