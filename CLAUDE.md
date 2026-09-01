@@ -64,8 +64,9 @@ src/
                                  RawSegmentSession, RelayCommand, NativeMethods,
                                  BrightnessHistory, ChannelRoi, RoiGesture,
                                  DisplayMapping, BrightnessSamplePlan, PwmSweep,
-                                 TileGrid, FrameMetrics, AnomalyDetector
-tests/                         MatroxFrameGrabber.Tests (153개). csproj가 위 파일들을
+                                 TileGrid, FrameMetrics, AnomalyDetector,
+                                 BrightnessLog
+tests/                         MatroxFrameGrabber.Tests (165개). csproj가 위 파일들을
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다.
 docs/
@@ -136,6 +137,15 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   갱신한다. 새 값을 노출하려면 거기서 올릴 것. 이벤트로 밀어내는 것은 세 가지뿐이다
   (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`). 밝기 측정도 이 틱 위에서 돈다 —
   취득 훅이 아니라 여기다. `MdigProcess` 훅에 넣은 작업은 취득 예산 안에서 돌기 때문이다.
+- **정지 상태의 스냅샷은 이전 실행의 마지막 프레임이다.** `SaveSnapshotToOutput`은 디스플레이
+  버퍼를 내보내는데, grab이 멈춰 있으면 그 버퍼는 직전 실행의 마지막 프레임에 얼어 있다. 노출을
+  바꿔 가며 스냅샷을 찍어도 **바이트 단위로 같은 파일**이 나온다(실측: 3개 노출 × 스냅샷 4장 →
+  해시 2개, 전부 이미 끝난 실행의 프레임). `Snap` 버튼을 `IsGrabbing`에 묶고 메서드에서도
+  거부하도록 해 두었다. 무언가를 버퍼에서 꺼내 저장하는 코드를 새로 추가한다면 같은 확인을 할 것.
+- **노출 하나만 바꿔 비교하면 가산 잡음과 곱셈성 플리커를 구별할 수 없다.** 두 점은 어느 쪽
+  이야기로도 이어진다 — 실측에서 이 때문에 한 번 반대로 읽었다. 최소 3점을 재서 **곡선의 모양**을
+  볼 것. 플리커는 단조가 아니라 `|sinc(πfT)|`의 V 자로 나타난다. `--expo-scan`이 이 스캔을
+  자동으로 돌린다.
 - **`Mim*` 함수는 하나의 라이선싱 그룹이 아니다.** `MimResize`와 `MimShift`는 MIL-Lite에
   포함되지만 `MimStat`은 Image Processing(IM) 모듈이 필요하고 이 장비에는 없다 — 호출하면
   `Licensing error. A module was used without a valid license`가 난다. 통계·히스토그램류를

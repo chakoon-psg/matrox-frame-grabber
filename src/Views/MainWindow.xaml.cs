@@ -151,9 +151,104 @@ namespace MatroxFrameGrabber.Views
                 RunBayerScopeTest();
             else if (App.PwmSweeping)
                 BeginPwmSweep(App.PwmSweepChannel, App.PwmSweepRoom);
+            else if (App.ExposureScanning)
+                BeginExposureScan(App.ExposureScan, App.DwellSeconds);
             else if (App.Unattended)
                 BeginAutoRun(App.AutoRunSeconds);
         }
+
+        #region Exposure scan
+
+        /// <summary>Seconds allowed for a new exposure to reach the display buffer before measuring.</summary>
+        private const int ExposureSettleSeconds = 3;
+
+        /// <summary>
+        /// Walks a list of exposures with every present camera grabbing, holding each one long
+        /// enough for the measurement log to fill, and saving one snapshot per channel at the end
+        /// of each hold.
+        ///
+        /// The order is the point. Doing this by hand, the cameras were stopped when the snapshots
+        /// were taken, so all of them exported the same frozen display buffer and three exposures
+        /// produced one picture; and because only startup writes the exposure to the log, which
+        /// snapshot belonged to which exposure had to be guessed from brightness. Here the grab
+        /// runs throughout, the exposure is written and read back per step, and the snapshot is
+        /// taken at the end of the hold so it matches the rows logged beside it.
+        ///
+        /// Driven by a timer rather than a sleep loop because the measurement log is written on the
+        /// stats tick: blocking this thread would hold the exposure and record nothing.
+        /// </summary>
+        private void BeginExposureScan(double[] exposures, int dwellSeconds)
+        {
+            if (_viewModel == null || exposures == null || exposures.Length == 0)
+                return;
+
+            MilErrorLog.Note(
+                $"expo-scan: {exposures.Length} exposures, {ExposureSettleSeconds}s settle + " +
+                $"{dwellSeconds}s hold each, snapshot at the end of each hold");
+
+            _viewModel.StartAllCommand.Execute(null);
+
+            int step = -1;              // which exposure we are on; -1 = none applied yet
+            int elapsedInStep = 0;      // seconds since this exposure was applied
+
+            var timer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            timer.Tick += (s, args) =>
+            {
+                if (step >= 0 && ++elapsedInStep < ExposureSettleSeconds + dwellSeconds)
+                    return;   // still holding
+
+                if (step >= 0)
+                    SnapshotEveryChannel(exposures[step]);
+
+                if (++step >= exposures.Length)
+                {
+                    timer.Stop();
+                    MilErrorLog.Note("expo-scan: done");
+                    _viewModel.StopAllCommand.Execute(null);
+                    Close();
+                    return;
+                }
+
+                ApplyExposureToEveryChannel(exposures[step]);
+                elapsedInStep = 0;
+            };
+            timer.Start();
+
+            // Apply the first exposure now rather than waiting a whole second for the first tick.
+            step = 0;
+            ApplyExposureToEveryChannel(exposures[0]);
+        }
+
+        /// <summary>Sets one exposure on every present camera. Each write logs its own read-back.</summary>
+        private void ApplyExposureToEveryChannel(double us)
+        {
+            MilErrorLog.Note($"expo-scan: step -> {us:0.##} us");
+            foreach (CameraChannel c in _viewModel.Channels)
+                if (c.CameraPresent)
+                    c.SetExposureUs(us);
+        }
+
+        /// <summary>
+        /// Saves one snapshot per grabbing channel and logs the path against the exposure, so the
+        /// file on disk can be tied to a step without reading the picture.
+        /// </summary>
+        private void SnapshotEveryChannel(double us)
+        {
+            foreach (CameraChannel c in _viewModel.Channels)
+            {
+                if (!c.IsGrabbing) continue;
+
+                string path = c.SaveSnapshotToOutput();
+                MilErrorLog.Note(path == null
+                    ? $"expo-scan: {c.Name} snapshot failed at {us:0.##} us"
+                    : $"expo-scan: {c.Name} at {us:0.##} us (camera reports {c.ExposureUs:0.##}) -> {path}");
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// Answers whether M_BAYER_CONVERSION is per-digitizer or board-wide, by disabling it on one
