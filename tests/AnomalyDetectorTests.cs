@@ -303,5 +303,52 @@ namespace MatroxFrameGrabber.Tests
             var d = new AnomalyDetector(Fast());
             Assert.Null(d.Observe(null, 0));
         }
-    }
+    
+        /// <summary>
+        /// The caller may hand the same grid back frame after frame, and detection must survive it.
+        ///
+        /// This is not a hypothetical. The reducer on the acquisition path reuses one grid per
+        /// channel -- allocating one per frame is what it was written to avoid -- and the detector
+        /// used to keep that object as its previous frame. The previous frame and the current one
+        /// were then the same object, every tile delta was zero, coherence was zero, and since
+        /// coherence gates entry no event could ever open. On hardware the detector reported
+        /// nothing while the exposure was halved under it. Every other test here hands Observe a
+        /// fresh grid, which is the one pattern where holding the reference happens to work.
+        /// </summary>
+        [Fact]
+        public void ADropoutIsFoundEvenWhenTheCallerReusesOneGrid()
+        {
+            var detector = new AnomalyDetector(Fast());
+            var scratch = new TileGrid();
+            var emitted = new List<AnomalyEvent>();
+
+            void Feed1(double value, long frame)
+            {
+                // The reducer's exact pattern: one grid, reset and refilled in place.
+                scratch.Reset();
+                scratch.FrameNumber = frame;
+                for (int i = 0; i < TileGrid.TileCount; i++)
+                    scratch.Accumulate(i, (long)value, (long)(value * value), 1);
+
+                AnomalyEvent? closed = detector.Observe(scratch, frame * 0.01);
+                if (closed.HasValue) emitted.Add(closed.Value);
+            }
+
+            long n = 1;
+            for (; n <= 8; n++) Feed1(Normal, n);           // warm the baseline
+
+            Feed1(Normal * 0.1, n++);                       // the dropout
+            Assert.True(detector.LastCoherence > 0.99,
+                "a uniform fall must agree across every tile; " +
+                $"coherence was {detector.LastCoherence}");
+            Assert.True(detector.InEvent, "the event should be open on the dropout frame");
+
+            for (int i = 0; i < 5; i++) Feed1(Normal, n++); // clear frames close it
+            Assert.False(detector.InEvent);
+
+            AnomalyEvent one = Assert.Single(emitted);
+            Assert.Equal(1, one.FrameCount);
+            Assert.True(one.MaxDepth > 0.8, $"depth was {one.MaxDepth}");
+        }
+}
 }

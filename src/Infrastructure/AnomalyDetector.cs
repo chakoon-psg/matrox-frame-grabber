@@ -86,7 +86,10 @@ namespace MatroxFrameGrabber.Infrastructure
         private int _windowNext;
         private long _observed;
 
-        private TileGrid _previous;
+        // Owned, and copied into: the caller reuses one grid per channel, so keeping its
+        // reference would make the previous frame and the current one the same object.
+        private readonly TileGrid _previous = new TileGrid();
+        private bool _hasPrevious;
         private long _previousFrame = -1;
         private double _previousTime;
         private double _framePeriodSec;
@@ -107,6 +110,19 @@ namespace MatroxFrameGrabber.Infrastructure
 
         /// <summary>The running median of recent normal frames. Zero until warm.</summary>
         public double Baseline { get; private set; }
+
+        /// <summary>
+        /// What the last judged frame measured. These are here to be watched, not merely debugged:
+        /// the thresholds have to be set from the distribution these take on a healthy panel, and
+        /// that distribution is a property of the rig rather than something to reason out. Depth and
+        /// coherence are the two numbers the gates compare, so they are the two worth recording.
+        /// </summary>
+        public double LastDepth { get; private set; }
+        public double LastCoherence { get; private set; }
+        public double LastMedian { get; private set; }
+
+        /// <summary>Frames judged so far. Below BaselineWarmupFrames nothing is judged yet.</summary>
+        public long Observed => _observed;
 
         /// <summary>True while an event is open and not yet emitted.</summary>
         public bool InEvent => _inEvent;
@@ -139,12 +155,16 @@ namespace MatroxFrameGrabber.Infrastructure
                 return null;
             }
 
-            if (_previous != null && timeStampSec > _previousTime)
+            if (_hasPrevious && timeStampSec > _previousTime)
                 _framePeriodSec = timeStampSec - _previousTime;
 
             double median = grid.TileMedian();
             double depth = FrameMetrics.Depth(median, Baseline);
-            double coherence = FrameMetrics.Coherence(_previous, grid);
+            double coherence = _hasPrevious ? FrameMetrics.Coherence(_previous, grid) : 0.0;
+
+            LastMedian = median;
+            LastDepth = depth;
+            LastCoherence = coherence;
 
             AnomalyEvent? emitted = null;
 
@@ -201,7 +221,7 @@ namespace MatroxFrameGrabber.Infrastructure
             _observed = 0;
             Baseline = 0;
 
-            _previous = null;
+            _hasPrevious = false;
             _previousFrame = -1;
             _previousTime = 0;
             _framePeriodSec = 0;
@@ -269,7 +289,8 @@ namespace MatroxFrameGrabber.Infrastructure
 
         private void AdoptAsReference(TileGrid grid, double timeStampSec)
         {
-            _previous = grid;
+            _previous.CopyFrom(grid);
+            _hasPrevious = true;
             _previousFrame = grid.FrameNumber;
             _previousTime = timeStampSec;
         }

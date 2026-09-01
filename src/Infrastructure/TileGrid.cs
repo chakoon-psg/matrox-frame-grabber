@@ -54,6 +54,26 @@ namespace MatroxFrameGrabber.Infrastructure
             _count[tile] += count;
         }
 
+        /// <summary>
+        /// Replaces this grid's contents with another's.
+        ///
+        /// Here because a caller on the acquisition path reuses one grid frame after frame, so
+        /// anything that needs to keep a frame has to take a copy of it. Keeping the reference
+        /// instead is silent rather than wrong-looking: the kept grid and the next frame become the
+        /// same object, every delta between them is zero, and coherence -- which gates the whole
+        /// detector -- reads zero forever.
+        /// </summary>
+        public void CopyFrom(TileGrid source)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (ReferenceEquals(source, this)) return;
+
+            Array.Copy(source._sum, _sum, TileCount);
+            Array.Copy(source._sqSum, _sqSum, TileCount);
+            Array.Copy(source._count, _count, TileCount);
+            FrameNumber = source.FrameNumber;
+        }
+
         /// <summary>Whether this tile saw any pixels. An unsampled tile is not a black one.</summary>
         public bool IsPopulated(int tile) =>
             tile >= 0 && tile < TileCount && _count[tile] > 0;
