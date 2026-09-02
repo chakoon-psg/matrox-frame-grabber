@@ -44,8 +44,21 @@ namespace MatroxFrameGrabber.Infrastructure
         public const double DefaultDepth = 0.05;
 
         /// <summary>
-        /// How much the tiles must agree before a fall is believed. This is the whole defence
-        /// against content changing, so it is the one to tune first if false positives appear.
+        /// How much the tiles must agree before a fall is believed. The defence against content
+        /// changing -- but only against one kind of it, and the boundary is worth knowing before
+        /// this is the knob anyone reaches for.
+        ///
+        /// It rejects content that moves tiles in different directions, which is most animation:
+        /// measured on the load clip, coherence turned away every burst on two channels while the
+        /// depth reached 0.39. It cannot reject content that dims the whole region at once. On the
+        /// same clip, played twice, one channel each time saw the pattern as a uniform 12% dim at
+        /// coherence 1.00 -- and which channel that was changed between runs, so it follows viewing
+        /// geometry rather than the camera.
+        ///
+        /// That is not a gate failure. A brief uniform dim from content is physically the same
+        /// measurement as a brief uniform dim from a fault; nothing computed from one frame pair
+        /// separates them. What separates them is the depth threshold's height, which is why that
+        /// one is per channel.
         /// </summary>
         public double Coherence { get; set; } = 0.80;
 
