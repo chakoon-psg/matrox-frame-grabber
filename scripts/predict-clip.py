@@ -33,14 +33,22 @@ import tempfile
 TILES = 64
 
 
-def tile_means(clip):
-    """One 64-value tile grid per frame. Area scaling to 8x8 is a box average, i.e. a tile mean."""
+def tile_means(clip, region=None):
+    """One 64-value tile grid per frame. Area scaling to 8x8 is a box average, i.e. a tile mean.
+
+    `region` crops first, which is the whole point of having it: the camera does not see the clip
+    frame, it sees a rectangle of the panel, and where that rectangle falls decides where the tile
+    boundaries land in the picture. A pattern at the tile pitch gives completely different answers
+    under a half-tile shift -- measured at 10, 7 and 1 false positives on three cameras watching one
+    clip. Passing a shifted region here is how that sensitivity gets checked before filming.
+    """
+    crop = f"crop={region}," if region else ""
     fd, path = tempfile.mkstemp(suffix=".gray")
     os.close(fd)
     try:
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", clip,
-             "-vf", "scale=8:8:flags=area,format=gray", "-f", "rawvideo", path],
+             "-vf", f"{crop}scale=8:8:flags=area,format=gray", "-f", "rawvideo", path],
             check=True)
         data = open(path, "rb").read()
     finally:
@@ -68,11 +76,14 @@ def main():
     ap.add_argument("--window", type=int, default=91)
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--fps", type=float, default=60.0)
+    ap.add_argument("--region", default=None, metavar="W:H:X:Y",
+                    help="crop before reducing, as ffmpeg crop takes it. Use this to check that "
+                         "the answer does not depend on where the tile grid lands")
     ap.add_argument("--phases", default="",
                     help="comma-separated phase boundaries in seconds, e.g. 4,24,44")
     args = ap.parse_args()
 
-    grids = tile_means(args.clip)
+    grids = tile_means(args.clip, args.region)
     print(f"{os.path.basename(args.clip)}: {len(grids)} frames at {args.fps:g} fps "
           f"({len(grids) / args.fps:.1f} s)")
     print(f"  thresholds: depth {args.depth}, coherence {args.coherence}, "

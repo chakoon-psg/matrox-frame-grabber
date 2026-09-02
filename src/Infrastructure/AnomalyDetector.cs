@@ -55,6 +55,22 @@ namespace MatroxFrameGrabber.Infrastructure
         /// </summary>
         public int DebounceFrames { get; set; } = 20;
 
+        /// <summary>
+        /// How long one event may stay open before it is closed and the baseline re-adopted.
+        /// 250 frames is about 2 s at 124.3 fps.
+        ///
+        /// Without a cap the detector can be silenced by content. While an event is open the
+        /// baseline is deliberately frozen, so a sustained fall that came from the picture rather
+        /// than a fault holds depth above the threshold indefinitely, the event never closes, and
+        /// nothing is emitted while one is open. Measured: a channel entered on an 8% fall from
+        /// moving content and then missed all seven true events of the following cycle, which the
+        /// other two channels caught.
+        ///
+        /// The cost is that a genuinely sustained fault is reported once rather than continuously.
+        /// It carries <see cref="AnomalyEvent.Truncated"/> so that reads as what it is.
+        /// </summary>
+        public int MaxEventFrames { get; set; } = 250;
+
         /// <summary>Frames of history the running baseline holds.</summary>
         public int BaselineWindow { get; set; } = 91;
 
@@ -79,9 +95,17 @@ namespace MatroxFrameGrabber.Infrastructure
         public double StartTimeSec { get; }
         public double DurationMs { get; }
 
+        /// <summary>
+        /// Whether this event was closed by the duration cap rather than by the picture recovering.
+        /// A truncated event says the fall was still going when counting stopped, so its duration is
+        /// a floor rather than a measurement.
+        /// </summary>
+        public bool Truncated { get; }
+
         public AnomalyEvent(long startFrame, long endFrame, int frameCount,
                             double maxDepth, double maxCoherence,
-                            double startTimeSec, double durationMs)
+                            double startTimeSec, double durationMs,
+                            bool truncated = false)
         {
             StartFrame = startFrame;
             EndFrame = endFrame;
@@ -90,11 +114,13 @@ namespace MatroxFrameGrabber.Infrastructure
             MaxCoherence = maxCoherence;
             StartTimeSec = startTimeSec;
             DurationMs = durationMs;
+            Truncated = truncated;
         }
 
         public override string ToString() =>
             $"frame {StartFrame}-{EndFrame} ({FrameCount}), {DurationMs:F1} ms, " +
-            $"depth {MaxDepth:F2}, coh {MaxCoherence:F2}";
+            $"depth {MaxDepth:F2}, coh {MaxCoherence:F2}" +
+            (Truncated ? " (still running - duration is a floor)" : string.Empty);
     }
 
     /// <summary>
@@ -264,6 +290,17 @@ namespace MatroxFrameGrabber.Infrastructure
 
                 // Deliberately not remembered: a fault must not become the new normal. If dark
                 // frames fed the running median, a long enough blackout would erase itself.
+                //
+                // Which is exactly why the event needs a cap. Frozen baseline plus a fall that came
+                // from the picture rather than a fault means depth never recovers, the event never
+                // closes, and nothing is emitted while one is open -- the channel goes silent. So
+                // past the cap the event is reported as still-running and the current level becomes
+                // the new normal, which restores sensitivity on the very next frame.
+                if (_darkFrames >= _t.MaxEventFrames)
+                {
+                    emitted = Close(truncated: true);
+                    AdoptBaseline(median);
+                }
             }
             else
             {
@@ -349,7 +386,7 @@ namespace MatroxFrameGrabber.Infrastructure
             return _inEvent || coherence > _t.Coherence;
         }
 
-        private AnomalyEvent Close()
+        private AnomalyEvent Close(bool truncated = false)
         {
             // Duration is frames times the frame period, not the span between the first and last
             // timestamps: the span leaves out the last frame's own exposure and under-reports a
@@ -358,11 +395,28 @@ namespace MatroxFrameGrabber.Infrastructure
             var e = new AnomalyEvent(
                 _startFrame, _lastDarkFrame, _darkFrames,
                 _maxDepth, _maxCoherence,
-                _startTime, _darkFrames * period * 1000.0);
+                _startTime, _darkFrames * period * 1000.0, truncated);
 
             _inEvent = false;
             _clearFrames = 0;
             return e;
+        }
+
+        /// <summary>
+        /// Throws away the baseline history and makes <paramref name="median"/> the whole of it, so
+        /// the next frame is judged against what the screen is doing now rather than what it was
+        /// doing before a capped event began.
+        ///
+        /// The window is filled rather than emptied: leaving one sample in it would let the next
+        /// few frames drag the baseline about, and re-entering the warmup would blind the detector
+        /// for the thirty frames it was just unblocked from.
+        /// </summary>
+        private void AdoptBaseline(double median)
+        {
+            for (int i = 0; i < _window.Length; i++) _window[i] = median;
+            _windowCount = _window.Length;
+            _windowNext = 0;
+            Baseline = median;
         }
 
         private void Remember(double median)

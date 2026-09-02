@@ -350,5 +350,106 @@ namespace MatroxFrameGrabber.Tests
             Assert.Equal(1, one.FrameCount);
             Assert.True(one.MaxDepth > 0.8, $"depth was {one.MaxDepth}");
         }
+
+        /// <summary>Thresholds with a short event cap, for the truncation rules.</summary>
+        static AnomalyThresholds Capped(int cap) => new AnomalyThresholds
+        {
+            Depth = 0.10,
+            Coherence = 0.80,
+            DebounceFrames = 3,
+            BaselineWindow = 9,
+            BaselineWarmupFrames = 5,
+            MaxEventFrames = cap,
+        };
+
+        [Fact]
+        public void ASustainedFallIsClosedAtTheCapAndMarkedStillRunning()
+        {
+            var detector = new AnomalyDetector(Capped(6));
+            long n = Warm(detector);
+
+            AnomalyEvent? emitted = null;
+            for (int i = 0; i < 6; i++, n++)
+            {
+                AnomalyEvent? closed = detector.Observe(Uniform(Normal * 0.5, n), n * 0.01);
+                if (closed.HasValue) emitted = closed;
+            }
+
+            Assert.True(emitted.HasValue, "the cap should have closed the event");
+            Assert.True(emitted.Value.Truncated);
+            Assert.Equal(6, emitted.Value.FrameCount);
+            Assert.False(detector.InEvent);
+            Assert.Contains("still running", emitted.Value.ToString());
+        }
+
+        [Fact]
+        public void AFallShorterThanTheCapIsNotMarkedStillRunning()
+        {
+            var detector = new AnomalyDetector(Capped(100));
+            long n = Warm(detector);
+
+            List<AnomalyEvent> events = Feed(detector, n, Normal * 0.5, Normal, Normal, Normal, Normal);
+
+            AnomalyEvent one = Assert.Single(events);
+            Assert.False(one.Truncated);
+            Assert.Equal(1, one.FrameCount);
+        }
+
+        /// <summary>
+        /// The failure the cap exists for. On hardware a channel entered an event on a sustained 8%
+        /// fall that came from moving content, the baseline froze, depth never recovered, and since
+        /// nothing is emitted while an event is open the channel reported nothing for the rest of
+        /// the run -- it missed all seven true events that followed, which two other channels
+        /// caught. One long event was never the problem; going blind was.
+        /// </summary>
+        [Fact]
+        public void DetectionResumesAfterTheCapInsteadOfGoingBlind()
+        {
+            var detector = new AnomalyDetector(Capped(6));
+            long n = Warm(detector);
+
+            var events = new List<AnomalyEvent>();
+            void Feed1(double value)
+            {
+                AnomalyEvent? closed = detector.Observe(Uniform(value, n), n * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+                n++;
+            }
+
+            // A sustained fall that never recovers, well past the cap.
+            for (int i = 0; i < 40; i++) Feed1(Normal * 0.80);
+
+            Assert.NotEmpty(events);
+            Assert.True(events[0].Truncated);
+
+            // Now a real dropout, deeper than the level the baseline was re-adopted at. Before the
+            // cap existed this could not be seen at all: the detector was still inside the first
+            // event and emitting nothing.
+            int before = events.Count;
+            Feed1(Normal * 0.10);
+            for (int i = 0; i < 5; i++) Feed1(Normal * 0.80);
+
+            Assert.True(events.Count > before,
+                "a dropout after a capped event must still be reported");
+            AnomalyEvent found = events[events.Count - 1];
+            Assert.False(found.Truncated);
+            Assert.True(found.MaxDepth > 0.5, $"depth was {found.MaxDepth}");
+        }
+
+        [Fact]
+        public void TheBaselineIsReadoptedAtTheCapSoDepthReturnsToZero()
+        {
+            var detector = new AnomalyDetector(Capped(6));
+            long n = Warm(detector);
+
+            for (int i = 0; i < 6; i++, n++)
+                detector.Observe(Uniform(Normal * 0.80, n), n * 0.01);
+
+            // The cap fired on the sixth frame and took the current level as the new normal.
+            Assert.Equal(Normal * 0.80, detector.Baseline, 3);
+
+            detector.Observe(Uniform(Normal * 0.80, n), n * 0.01);
+            Assert.Equal(0.0, detector.LastDepth, 6);
+        }
 }
 }
