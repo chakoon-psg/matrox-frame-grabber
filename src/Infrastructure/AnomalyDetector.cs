@@ -94,6 +94,33 @@ namespace MatroxFrameGrabber.Infrastructure
         public int BaselineWarmupFrames { get; set; } = 30;
 
         /// <summary>
+        /// How many frames the fall may take to cover the tiles before it is read as something
+        /// crossing the field rather than the surface dimming. 6 frames is about 48 ms at 124.3 fps.
+        ///
+        /// Measured against known content: the full-field dips of the load clip spread over 1
+        /// frame, and its moving content over 37 to 412. Nothing fell in between.
+        ///
+        /// Neither depth nor coherence can make this distinction. An object crossing the field
+        /// darkens the tiles it has reached, and those all move the same way, so coherence reads
+        /// 1.00 exactly as a panel switching off does.
+        ///
+        /// The number is 6 rather than half the gap because of what this can see. Onset is only
+        /// tracked once the event is open, and an event opens when the median crosses -- which for
+        /// a sweep is around the time it has covered half the tiles. So the spread measured here is
+        /// roughly half the real one, and a budget of 6 turns away sweeps that take about 12 frames
+        /// or more in total. Against a real dimming that spreads over 0 to 1 frames, that still
+        /// leaves six times the margin.
+        /// </summary>
+        public int MaxOnsetSpreadFrames { get; set; } = 6;
+
+        /// <summary>
+        /// Tiles that must have fallen before the spread is trusted enough to reject on. A shallow
+        /// event moves few tiles, and a spread measured from two of them says nothing -- so below
+        /// this the gate stands aside rather than guessing.
+        /// </summary>
+        public int MinOnsetTiles { get; set; } = 8;
+
+        /// <summary>
         /// Copies every threshold from <paramref name="other"/>, clamping each to a range that
         /// cannot silence the detector.
         ///
@@ -110,6 +137,8 @@ namespace MatroxFrameGrabber.Infrastructure
             Coherence = Clamp(other.Coherence, 0.0, 1.0);
             DebounceFrames = Clamp(other.DebounceFrames, 1, 100000);
             MaxEventFrames = Clamp(other.MaxEventFrames, 1, 1000000);
+            MaxOnsetSpreadFrames = Clamp(other.MaxOnsetSpreadFrames, 1, 1000000);
+            MinOnsetTiles = Clamp(other.MinOnsetTiles, 1, TileGrid.TileCount);
             BaselineWindow = Clamp(other.BaselineWindow, 3, 100000);
             BaselineWarmupFrames = Clamp(other.BaselineWarmupFrames, 1, 100000);
         }
@@ -141,10 +170,21 @@ namespace MatroxFrameGrabber.Infrastructure
         /// </summary>
         public bool Truncated { get; }
 
+        /// <summary>
+        /// Frames between the first tile falling and the last. Near zero for a surface that dimmed
+        /// at once; hundreds for something that crossed the field. Carried on the event so a report
+        /// says why it was believed, and so a rejected one can be argued with.
+        /// </summary>
+        public int OnsetSpreadFrames { get; }
+
+        /// <summary>Tiles that fell far enough to have an onset at all.</summary>
+        public int OnsetTiles { get; }
+
         public AnomalyEvent(long startFrame, long endFrame, int frameCount,
                             double maxDepth, double maxCoherence,
                             double startTimeSec, double durationMs,
-                            bool truncated = false)
+                            bool truncated = false,
+                            int onsetSpreadFrames = 0, int onsetTiles = 0)
         {
             StartFrame = startFrame;
             EndFrame = endFrame;
@@ -154,11 +194,14 @@ namespace MatroxFrameGrabber.Infrastructure
             StartTimeSec = startTimeSec;
             DurationMs = durationMs;
             Truncated = truncated;
+            OnsetSpreadFrames = onsetSpreadFrames;
+            OnsetTiles = onsetTiles;
         }
 
         public override string ToString() =>
             $"frame {StartFrame}-{EndFrame} ({FrameCount}), {DurationMs:F1} ms, " +
-            $"depth {MaxDepth:F2}, coh {MaxCoherence:F2}" +
+            $"depth {MaxDepth:F2}, coh {MaxCoherence:F2}, " +
+            $"onset {OnsetSpreadFrames}f over {OnsetTiles} tiles" +
             (Truncated ? " (still running - duration is a floor)" : string.Empty);
     }
 
@@ -187,6 +230,12 @@ namespace MatroxFrameGrabber.Infrastructure
         // reference would make the previous frame and the current one the same object.
         private readonly TileGrid _previous = new TileGrid();
         private bool _hasPrevious;
+
+        // Per-tile onset within the open event: the tile's level just before the event began, and
+        // the frame at which it first fell past the depth threshold from there.
+        private readonly double[] _entryLevel = new double[TileGrid.TileCount];
+        private readonly long[] _tileOnset = new long[TileGrid.TileCount];
+        private int _onsetTiles;
         private long _previousFrame = -1;
         private double _previousTime;
         private double _framePeriodSec;
@@ -267,6 +316,16 @@ namespace MatroxFrameGrabber.Infrastructure
         public long FramesSkippedForGaps { get; private set; }
 
         /// <summary>
+        /// Events that met depth and coherence but whose fall swept across rather than happening at
+        /// once. Counted, and the last one kept, because a gate whose rejections leave no trace is
+        /// indistinguishable from a rig with nothing wrong.
+        /// </summary>
+        public long EventsRejectedForSpread { get; private set; }
+
+        /// <summary>The most recent rejected event, or null. Reset when the next one is rejected.</summary>
+        public AnomalyEvent? LastRejectedEvent { get; private set; }
+
+        /// <summary>
         /// Takes one frame. Returns an event when one has just closed, otherwise null.
         ///
         /// An event is emitted after the debounce passes without recurrence, so it arrives a few
@@ -319,6 +378,29 @@ namespace MatroxFrameGrabber.Infrastructure
                     _darkFrames = 0;
                     _maxDepth = 0;
                     _maxCoherence = 0;
+
+                    // The level each tile was at before the fall, taken from the previous frame.
+                    // Per tile rather than one figure: the whole question is whether the tiles fell
+                    // together, and they start from different brightnesses.
+                    for (int i = 0; i < TileGrid.TileCount; i++)
+                    {
+                        _entryLevel[i] = _hasPrevious && _previous.IsPopulated(i) ? _previous.Mean(i) : 0.0;
+                        _tileOnset[i] = -1;
+                    }
+                    _onsetTiles = 0;
+                }
+
+                // When each tile crossed the same threshold the event was judged by. Online, so no
+                // per-frame history is kept: one pass over 64 tiles.
+                for (int i = 0; i < TileGrid.TileCount; i++)
+                {
+                    if (_tileOnset[i] >= 0 || _entryLevel[i] <= 0 || !grid.IsPopulated(i))
+                        continue;
+                    if (grid.Mean(i) <= _entryLevel[i] * (1.0 - _t.Depth))
+                    {
+                        _tileOnset[i] = frame;
+                        _onsetTiles++;
+                    }
                 }
                 _clearFrames = 0;
                 _darkFrames++;
@@ -337,7 +419,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 // the new normal, which restores sensitivity on the very next frame.
                 if (_darkFrames >= _t.MaxEventFrames)
                 {
-                    emitted = Close(truncated: true);
+                    emitted = Judge(Close(truncated: true));
                     AdoptBaseline(median);
                 }
             }
@@ -370,7 +452,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 }
 
                 if (_inEvent && ++_clearFrames >= _t.DebounceFrames)
-                    emitted = Close();
+                    emitted = Judge(Close());
             }
 
             _observed++;
@@ -382,7 +464,29 @@ namespace MatroxFrameGrabber.Infrastructure
         /// Closes an open event, for when acquisition stops. Without it, a fault still running when
         /// the grab ends is never reported at all.
         /// </summary>
-        public AnomalyEvent? Flush() => _inEvent ? Close() : (AnomalyEvent?)null;
+        public AnomalyEvent? Flush() => _inEvent ? Judge(Close()) : (AnomalyEvent?)null;
+
+        /// <summary>
+        /// Lets a closed event through, or turns it away because its fall swept across the tiles
+        /// rather than covering them at once.
+        ///
+        /// This is the only gate that cannot sit at entry: the spread is not known until the fall
+        /// has finished spreading. Putting it here costs nothing, because an event is already
+        /// emitted late - after the debounce.
+        ///
+        /// It stands aside when too few tiles fell. A shallow event moves few of them, and a spread
+        /// measured from two tiles is not a measurement.
+        /// </summary>
+        private AnomalyEvent? Judge(AnomalyEvent candidate)
+        {
+            if (candidate.OnsetTiles < _t.MinOnsetTiles ||
+                candidate.OnsetSpreadFrames <= _t.MaxOnsetSpreadFrames)
+                return candidate;
+
+            EventsRejectedForSpread++;
+            LastRejectedEvent = candidate;
+            return null;
+        }
 
         public void Reset()
         {
@@ -393,6 +497,10 @@ namespace MatroxFrameGrabber.Infrastructure
             Baseline = 0;
 
             _hasPrevious = false;
+            _onsetTiles = 0;
+            EventsRejectedForSpread = 0;
+            LastRejectedEvent = null;
+            for (int i = 0; i < TileGrid.TileCount; i++) _tileOnset[i] = -1;
             MaxNormalDepth = 0;
             MaxCoherentNormalDepth = 0;
             MaxCoherentNormalDepthFrame = 0;
@@ -425,6 +533,24 @@ namespace MatroxFrameGrabber.Infrastructure
             return _inEvent || coherence > _t.Coherence;
         }
 
+        /// <summary>
+        /// Frames between the first tile falling and the last, over the tiles that fell at all.
+        /// Zero when fewer than two did.
+        /// </summary>
+        private int OnsetSpread()
+        {
+            long first = long.MaxValue, last = long.MinValue;
+            int seen = 0;
+            for (int i = 0; i < TileGrid.TileCount; i++)
+            {
+                if (_tileOnset[i] < 0) continue;
+                if (_tileOnset[i] < first) first = _tileOnset[i];
+                if (_tileOnset[i] > last) last = _tileOnset[i];
+                seen++;
+            }
+            return seen < 2 ? 0 : (int)(last - first);
+        }
+
         private AnomalyEvent Close(bool truncated = false)
         {
             // Duration is frames times the frame period, not the span between the first and last
@@ -434,7 +560,8 @@ namespace MatroxFrameGrabber.Infrastructure
             var e = new AnomalyEvent(
                 _startFrame, _lastDarkFrame, _darkFrames,
                 _maxDepth, _maxCoherence,
-                _startTime, _darkFrames * period * 1000.0, truncated);
+                _startTime, _darkFrames * period * 1000.0, truncated,
+                OnsetSpread(), _onsetTiles);
 
             _inEvent = false;
             _clearFrames = 0;

@@ -99,6 +99,8 @@ namespace MatroxFrameGrabber.Mil
         // it. See TileHistory for why the frames themselves cannot be kept.
         private readonly TileHistory _history = new TileHistory();
         private int _eventWindowsWritten;
+        private int _rejectedWindowsWritten;
+        private long _rejectedSeen;
         private AnomalyDetector _detector;
 
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
@@ -452,6 +454,13 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Anomalies confirmed during this run.</summary>
         public long AnomalyCount => Interlocked.Read(ref _anomalyCount);
+
+        /// <summary>
+        /// Falls that met depth and coherence but swept across the tiles instead of covering them
+        /// at once - something crossing the field rather than the surface dimming. Surfaced because
+        /// a gate whose rejections leave no trace cannot be told from a quiet rig.
+        /// </summary>
+        public long EventsRejectedForSpread => _detector?.EventsRejectedForSpread ?? 0;
 
         /// <summary>The most recent anomaly, formatted, or empty when there has been none.</summary>
         public string LastAnomalyText => _hasLastAnomaly ? _lastAnomaly.ToString() : string.Empty;
@@ -847,7 +856,8 @@ namespace MatroxFrameGrabber.Mil
                 MilErrorLog.Note($"{Name}: detection thresholds - depth {t.Depth:0.###}, "
                                + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}, "
                                + $"max event {t.MaxEventFrames}, baseline {t.BaselineWindow}"
-                               + $"/{t.BaselineWarmupFrames} frames");
+                               + $"/{t.BaselineWarmupFrames} frames, "
+                               + $"onset spread {t.MaxOnsetSpreadFrames} over {t.MinOnsetTiles}+ tiles");
             }
 
             RaisePropertyChanged(nameof(CameraPresent));
@@ -1085,6 +1095,8 @@ namespace MatroxFrameGrabber.Mil
             _reducer.ResetCost();
             _history.Clear();
             _eventWindowsWritten = 0;
+            _rejectedWindowsWritten = 0;
+            _rejectedSeen = 0;
             while (_anomalies.TryDequeue(out _)) { }
             Interlocked.Exchange(ref _anomalyCount, 0);
             _hasLastAnomaly = false;
@@ -1219,6 +1231,25 @@ namespace MatroxFrameGrabber.Mil
                     RaisePropertyChanged(nameof(AnomalyCount));
                     RaisePropertyChanged(nameof(LastAnomalyText));
                     RaisePropertyChanged(nameof(DetectionHint));
+                }
+
+                // Rejections are surfaced on the same tick. Only the last one is kept, so a tick
+                // that turned away several leaves one window and a count - which is why the count
+                // is logged rather than inferred from the files.
+                AnomalyDetector detector = _detector;
+                if (detector != null && detector.EventsRejectedForSpread > _rejectedSeen)
+                {
+                    long now = detector.EventsRejectedForSpread;
+                    AnomalyEvent? turned = detector.LastRejectedEvent;
+                    if (turned.HasValue)
+                    {
+                        MilErrorLog.Note(
+                            $"{Name}: swept, not dimmed - {turned.Value} "
+                          + $"(rejected {now} so far)");
+                        WriteEventWindow(turned.Value, rejected: true);
+                    }
+                    _rejectedSeen = now;
+                    RaisePropertyChanged(nameof(EventsRejectedForSpread));
                 }
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
@@ -1407,12 +1438,26 @@ namespace MatroxFrameGrabber.Mil
         /// Writes the tile history around a confirmed event. On the stats tick, not the hook: this
         /// touches the disk.
         /// </summary>
-        private void WriteEventWindow(AnomalyEvent found)
-        {
-            if (_eventWindowsWritten >= MaxEventWindows)
-                return;
+        /// <summary>
+        /// Windows written for rejected falls. Fewer than for confirmed ones, and counted
+        /// separately: on the run this gate was built from, 56 of 60 events were sweeps, and a
+        /// shared cap would have filled entirely with them and left no room for the real ones.
+        /// </summary>
+        private const int MaxRejectedWindows = 5;
 
-            string label = $"event-ch{_index}-{DateTime.Now:yyyyMMdd-HHmmss-fff}";
+        private void WriteEventWindow(AnomalyEvent found, bool rejected = false)
+        {
+            if (rejected)
+            {
+                if (_rejectedWindowsWritten >= MaxRejectedWindows) return;
+            }
+            else if (_eventWindowsWritten >= MaxEventWindows)
+            {
+                return;
+            }
+
+            string kind = rejected ? "rejected" : "event";
+            string label = $"{kind}-ch{_index}-{DateTime.Now:yyyyMMdd-HHmmss-fff}";
             string path = _history.Write(
                 BrightnessLog.DefaultFolder,
                 label,
@@ -1424,8 +1469,8 @@ namespace MatroxFrameGrabber.Mil
             if (path == null)
                 return;
 
-            _eventWindowsWritten++;
-            MilErrorLog.Note($"{Name}: event window -> {path}");
+            if (rejected) _rejectedWindowsWritten++; else _eventWindowsWritten++;
+            MilErrorLog.Note($"{Name}: {kind} window -> {path}");
         }
 
         /// <summary>Queues a confirmed anomaly for the stats tick. On the acquisition thread.</summary>
@@ -2225,6 +2270,7 @@ namespace MatroxFrameGrabber.Mil
             // 124 fps is 8045 us, and one reduction over that is a missed frame.
             if (DetectionEnabled)
                 MilErrorLog.Note($"{Name}: detection - {AnomalyCount} anomalies, "
+                               + $"{EventsRejectedForSpread} swept and turned away, "
                                + $"reduce mean {_reducer.MeanReduceUs:F0} us / max {_reducer.MaxReduceUs:F0} us "
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period, "
                                + $"{_reducer.Accepted}/{_reducer.Reductions} grids accepted"

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using MatroxFrameGrabber.Infrastructure;
 using Xunit;
@@ -450,6 +451,158 @@ namespace MatroxFrameGrabber.Tests
 
             detector.Observe(Uniform(Normal * 0.80, n), n * 0.01);
             Assert.Equal(0.0, detector.LastDepth, 6);
+        }
+
+        /// <summary>Thresholds with a short onset budget, for the sweep rules.</summary>
+        static AnomalyThresholds Sweep(int maxSpread, int minTiles = 8) => new AnomalyThresholds
+        {
+            Depth = 0.10,
+            Coherence = 0.80,
+            DebounceFrames = 3,
+            BaselineWindow = 9,
+            BaselineWarmupFrames = 5,
+            MaxEventFrames = 10000,
+            MaxOnsetSpreadFrames = maxSpread,
+            MinOnsetTiles = minTiles,
+        };
+
+        /// <summary>A grid where the first <paramref name="dark"/> tiles have fallen and the rest have not.</summary>
+        static TileGrid PartlyDark(int dark, long frame, double normal = Normal, double fallen = 30)
+        {
+            var g = new TileGrid { FrameNumber = frame };
+            for (int i = 0; i < TileGrid.TileCount; i++)
+            {
+                double v = i < dark ? fallen : normal;
+                g.Accumulate(i, (long)v, (long)(v * v), 1);
+            }
+            return g;
+        }
+
+        [Fact]
+        public void AFallThatCoveredEveryTileAtOnceIsReported()
+        {
+            var detector = new AnomalyDetector(Sweep(maxSpread: 12));
+            long n = Warm(detector);
+
+            List<AnomalyEvent> events = Feed(detector, n, Normal * 0.2, Normal, Normal, Normal, Normal);
+
+            AnomalyEvent one = Assert.Single(events);
+            Assert.Equal(0, one.OnsetSpreadFrames);
+            Assert.Equal(TileGrid.TileCount, one.OnsetTiles);
+            Assert.Equal(0, detector.EventsRejectedForSpread);
+        }
+
+        /// <summary>
+        /// The measured false positive this gate exists for. An object crossing the field darkens
+        /// the tiles it has reached, and those all move the same way, so depth and coherence read
+        /// the same as a panel switching off - 0.91 to 1.00 on the real windows. Sixty windows from
+        /// one run split into 1 frame of spread for the clip's full-field dips and 37 to 412 frames
+        /// for its moving content, with nothing in between.
+        /// </summary>
+        [Fact]
+        public void AFallThatSweptAcrossTheTilesIsTurnedAway()
+        {
+            var detector = new AnomalyDetector(Sweep(maxSpread: 12));
+            long n = Warm(detector);
+
+            var events = new List<AnomalyEvent>();
+            void Feed1(TileGrid g)
+            {
+                AnomalyEvent? closed = detector.Observe(g, g.FrameNumber * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+            }
+
+            // Two tiles a frame: 64 tiles over 32 frames. The event only opens when the median
+            // crosses, around tile 33, so the spread this gate can see is the second half -- about
+            // 16 frames, past the 6-frame budget.
+            for (int step = 1; step <= 32; step++, n++)
+                Feed1(PartlyDark(step * 2, n));
+
+            // Recover, so the event closes.
+            for (int i = 0; i < 5; i++, n++)
+                Feed1(Uniform(Normal, n));
+
+            Assert.Empty(events);
+            Assert.Equal(1, detector.EventsRejectedForSpread);
+
+            AnomalyEvent turned = detector.LastRejectedEvent.Value;
+            Assert.True(turned.OnsetSpreadFrames > 6, $"spread was {turned.OnsetSpreadFrames}");
+            Assert.True(turned.MaxCoherence > 0.9,
+                "the point of the gate: coherence could not tell this from a real dimming, " +
+                $"and read {turned.MaxCoherence:F2}");
+        }
+
+        [Fact]
+        public void ASweepInsideTheBudgetIsStillReported()
+        {
+            var detector = new AnomalyDetector(Sweep(maxSpread: 6));
+            long n = Warm(detector);
+
+            var events = new List<AnomalyEvent>();
+            for (int step = 1; step <= 8; step++, n++)   // 64 tiles over 8 frames
+            {
+                AnomalyEvent? closed = detector.Observe(PartlyDark(step * 8, n), n * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+            }
+            for (int i = 0; i < 5; i++, n++)
+            {
+                AnomalyEvent? closed = detector.Observe(Uniform(Normal, n), n * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+            }
+
+            AnomalyEvent one = Assert.Single(events);
+            Assert.True(one.OnsetSpreadFrames <= 6, $"spread was {one.OnsetSpreadFrames}");
+            Assert.Equal(0, detector.EventsRejectedForSpread);
+        }
+
+        [Fact]
+        public void TheGateStandsAsideWhenTooFewTilesFell()
+        {
+            // A spread measured from a handful of tiles is not a measurement. Rejecting on it would
+            // throw away a real fault that happened to cover part of the screen.
+            // Most tiles are already down when the median crosses, so few of them get an onset
+            // here at all - which is the situation the guard is for.
+            // 56 rather than 40: the median crosses around tile 32, so about 40 tiles get an
+            // onset here and a guard set at 40 would sit exactly on the boundary.
+            var detector = new AnomalyDetector(Sweep(maxSpread: 1, minTiles: 56));
+            long n = Warm(detector);
+
+            var events = new List<AnomalyEvent>();
+            for (int step = 1; step <= 8; step++, n++)   // 64 tiles over 8 frames, 8 at a time
+            {
+                AnomalyEvent? closed = detector.Observe(PartlyDark(step * 8, n), n * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+            }
+            for (int i = 0; i < 5; i++, n++)
+            {
+                AnomalyEvent? closed = detector.Observe(Uniform(Normal, n), n * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+            }
+
+            Assert.Single(events);
+            Assert.Equal(0, detector.EventsRejectedForSpread);
+        }
+
+        [Fact]
+        public void ATruncatedEventIsJudgedOnItsSpreadToo()
+        {
+            // The cap closes an event without the picture recovering, and that path has to go
+            // through the same gate - otherwise a sweep long enough to hit the cap gets reported.
+            var thresholds = Sweep(maxSpread: 4);
+            thresholds.MaxEventFrames = 12;          // fires while the sweep is still spreading
+            var detector = new AnomalyDetector(thresholds);
+            long n = Warm(detector);
+
+            var events = new List<AnomalyEvent>();
+            for (int step = 1; step <= 32; step++, n++)   // two tiles a frame
+            {
+                AnomalyEvent? closed = detector.Observe(PartlyDark(Math.Min(64, step * 2), n), n * 0.01);
+                if (closed.HasValue) events.Add(closed.Value);
+            }
+
+            Assert.Empty(events);
+            Assert.Equal(1, detector.EventsRejectedForSpread);
+            Assert.True(detector.LastRejectedEvent.Value.Truncated);
         }
 }
 }
