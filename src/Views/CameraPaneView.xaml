@@ -200,6 +200,30 @@
                                 ToolTip="Measure the whole frame" />
                     </StackPanel>
 
+                    <!-- Detection thresholds. Per channel because the cameras do not see the same
+                         thing: measured against one clip, the dimmest of three produced nine
+                         shallow false positives where the other two produced none. Takes effect on
+                         the next Start, not the run in progress. -->
+                    <StackPanel Orientation="Horizontal">
+                        <Label Content="Detect" Width="42" />
+                        <TextBlock Text="depth" Margin="0,0,3,0" VerticalAlignment="Center"
+                                   Foreground="#9A9A9A" FontSize="10" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="detect" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding DepthInput, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="How far brightness must fall to count, as a fraction of the baseline" />
+                        <TextBlock Text="coh" Margin="6,0,3,0" VerticalAlignment="Center"
+                                   Foreground="#9A9A9A" FontSize="10" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="detect" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding CoherenceInput, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="How much the tiles must agree before a fall is believed" />
+                        <TextBlock Text="{Binding DetectionHint}" Margin="6,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                        <Button Content="Apply" Click="ApplyThresholds_Click"
+                                ToolTip="Saved to settings; takes effect on the next Start" />
+                    </StackPanel>
+
                     <!-- DCF / feature browser -->
                     <StackPanel Orientation="Horizontal">
                         <Label Content="DCF" Width="34" />

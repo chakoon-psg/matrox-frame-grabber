@@ -360,11 +360,90 @@ namespace MatroxFrameGrabber.Mil
         public bool DetectionEnabled { get; set; }
 
         /// <summary>
-        /// The numbers this channel judges by. Per channel rather than global: the three cameras
-        /// see three panels at three brightnesses, and the measured wander already differs between
-        /// them.
+        /// The numbers this channel judges by, held in the settings file so they survive a restart
+        /// and can differ between channels without a rebuild. Per channel because the cameras do
+        /// not see the same thing: measured against one clip, the dimmest of three produced nine
+        /// shallow false positives where the other two produced none.
+        ///
+        /// Falls back to a private instance only when there are no settings yet, which happens
+        /// during construction before <see cref="Output"/> is attached.
         /// </summary>
-        public AnomalyThresholds DetectionThresholds { get; } = new AnomalyThresholds();
+        public AnomalyThresholds DetectionThresholds =>
+            Output?.GetThresholds(_index) ?? _fallbackThresholds;
+
+        private readonly AnomalyThresholds _fallbackThresholds = new AnomalyThresholds();
+
+        /// <summary>Editable copies of the two thresholds an operator tunes, as typed.</summary>
+        public string DepthInput
+        {
+            get => _depthInput ??= DetectionThresholds.Depth.ToString("0.###", CultureInfo.InvariantCulture);
+            set { _depthInput = value; RaisePropertyChanged(nameof(DepthInput)); }
+        }
+
+        public string CoherenceInput
+        {
+            get => _coherenceInput ??= DetectionThresholds.Coherence.ToString("0.###", CultureInfo.InvariantCulture);
+            set { _coherenceInput = value; RaisePropertyChanged(nameof(CoherenceInput)); }
+        }
+
+        private string _depthInput;
+        private string _coherenceInput;
+
+        /// <summary>
+        /// The thresholds that are not on the pane, in the units they actually act in. Frames are
+        /// what the detector counts, but nobody reasons in frames at 124 fps -- and the same frame
+        /// count means a different duration at a different exposure, which is exactly the sort of
+        /// thing that goes unnoticed.
+        /// </summary>
+        public string DetectionHint
+        {
+            get
+            {
+                AnomalyThresholds t = DetectionThresholds;
+                double ms = _frameRate > 0 ? 1000.0 / _frameRate : 0.0;
+                return ms > 0
+                    ? $"debounce {t.DebounceFrames}f ({t.DebounceFrames * ms:0} ms), cap {t.MaxEventFrames}f ({t.MaxEventFrames * ms / 1000.0:0.0} s)"
+                    : $"debounce {t.DebounceFrames}f, cap {t.MaxEventFrames}f";
+            }
+        }
+
+        /// <summary>
+        /// Applies the typed thresholds to this channel and saves them. Returns false when either
+        /// box does not parse, leaving both alone -- a half-applied pair is worse than neither.
+        ///
+        /// Takes effect on the next run, not this one: the detector is created per grab and holds
+        /// the instance, so an edit mid-grab would change the rules underneath a baseline built
+        /// under the old ones.
+        /// </summary>
+        public bool ApplyDetectionThresholds()
+        {
+            if (!double.TryParse(_depthInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double depth) ||
+                !double.TryParse(_coherenceInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double coherence))
+                return false;
+
+            AnomalyThresholds t = DetectionThresholds;
+            var edited = new AnomalyThresholds
+            {
+                Depth = depth,
+                Coherence = coherence,
+                DebounceFrames = t.DebounceFrames,
+                MaxEventFrames = t.MaxEventFrames,
+                BaselineWindow = t.BaselineWindow,
+                BaselineWarmupFrames = t.BaselineWarmupFrames,
+            };
+            t.CopyFrom(edited);            // clamps, so a typo cannot silence the detector
+            Output?.SaveThresholds();
+
+            // Show what was actually kept, not what was typed: CopyFrom clamps.
+            _depthInput = null;
+            _coherenceInput = null;
+            RaisePropertyChanged(nameof(DepthInput));
+            RaisePropertyChanged(nameof(CoherenceInput));
+            RaisePropertyChanged(nameof(DetectionHint));
+            MilErrorLog.Note($"{Name}: thresholds now depth {t.Depth:0.###}, coherence {t.Coherence:0.###}, "
+                           + $"debounce {t.DebounceFrames}, max event {t.MaxEventFrames} frames");
+            return true;
+        }
 
         /// <summary>Anomalies confirmed during this run.</summary>
         public long AnomalyCount => Interlocked.Read(ref _anomalyCount);
@@ -755,6 +834,15 @@ namespace MatroxFrameGrabber.Mil
                 // ASCII note on MilErrorLog).
                 TryGetFrameSize(out int frameW, out int frameH);
                 MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {frameW}x{frameH} (decim {_decimation})");
+
+                // The thresholds as loaded, for the same reason: they now come from a file that a
+                // person edits, they differ per channel on purpose, and a value that silently fell
+                // back to its default would otherwise be invisible until a run reported nothing.
+                AnomalyThresholds t = DetectionThresholds;
+                MilErrorLog.Note($"{Name}: detection thresholds - depth {t.Depth:0.###}, "
+                               + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}, "
+                               + $"max event {t.MaxEventFrames}, baseline {t.BaselineWindow}"
+                               + $"/{t.BaselineWarmupFrames} frames");
             }
 
             RaisePropertyChanged(nameof(CameraPresent));
@@ -1122,6 +1210,7 @@ namespace MatroxFrameGrabber.Mil
                 {
                     RaisePropertyChanged(nameof(AnomalyCount));
                     RaisePropertyChanged(nameof(LastAnomalyText));
+                    RaisePropertyChanged(nameof(DetectionHint));
                 }
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).

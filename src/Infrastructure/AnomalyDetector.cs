@@ -79,6 +79,32 @@ namespace MatroxFrameGrabber.Infrastructure
         /// to be a fraction of, and every opening frame would read as a total blackout.
         /// </summary>
         public int BaselineWarmupFrames { get; set; } = 30;
+
+        /// <summary>
+        /// Copies every threshold from <paramref name="other"/>, clamping each to a range that
+        /// cannot silence the detector.
+        ///
+        /// Clamped rather than trusted because these come from a settings file a person edits. A
+        /// depth of 0 fires on every frame, a depth of 1 fires on nothing, a coherence above 1 can
+        /// never be satisfied, and a baseline window of 0 leaves nothing to compare against -- each
+        /// of those turns the detector off in a way that looks like a quiet rig.
+        /// </summary>
+        public void CopyFrom(AnomalyThresholds other)
+        {
+            if (other == null) return;
+
+            Depth = Clamp(other.Depth, 0.001, 0.999);
+            Coherence = Clamp(other.Coherence, 0.0, 1.0);
+            DebounceFrames = Clamp(other.DebounceFrames, 1, 100000);
+            MaxEventFrames = Clamp(other.MaxEventFrames, 1, 1000000);
+            BaselineWindow = Clamp(other.BaselineWindow, 3, 100000);
+            BaselineWarmupFrames = Clamp(other.BaselineWarmupFrames, 1, 100000);
+        }
+
+        private static double Clamp(double v, double lo, double hi) =>
+            double.IsNaN(v) ? lo : (v < lo ? lo : (v > hi ? hi : v));
+
+        private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
     }
 
     /// <summary>
