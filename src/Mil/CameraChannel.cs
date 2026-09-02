@@ -460,7 +460,12 @@ namespace MatroxFrameGrabber.Mil
         /// at once - something crossing the field rather than the surface dimming. Surfaced because
         /// a gate whose rejections leave no trace cannot be told from a quiet rig.
         /// </summary>
-        public long EventsRejectedForSpread => _detector?.EventsRejectedForSpread ?? 0;
+        public long EventsRejectedForSpread => _detector?.EventsRejectedForSpread ?? _rejectedAtStop;
+
+        // The detector is released before the run is summarised, so the count has to outlive it.
+        // Without this the summary reported "0 swept and turned away" for a run whose own log
+        // carried 72 of them - the one line a reader would take the run's verdict from.
+        private long _rejectedAtStop;
 
         /// <summary>The most recent anomaly, formatted, or empty when there has been none.</summary>
         public string LastAnomalyText => _hasLastAnomaly ? _lastAnomaly.ToString() : string.Empty;
@@ -1097,6 +1102,7 @@ namespace MatroxFrameGrabber.Mil
             _eventWindowsWritten = 0;
             _rejectedWindowsWritten = 0;
             _rejectedSeen = 0;
+            _rejectedAtStop = 0;
             while (_anomalies.TryDequeue(out _)) { }
             Interlocked.Exchange(ref _anomalyCount, 0);
             _hasLastAnomaly = false;
@@ -1154,6 +1160,10 @@ namespace MatroxFrameGrabber.Mil
             AnomalyEvent? tail = _detector?.Flush();
             if (tail.HasValue)
                 RecordAnomaly(tail.Value);
+
+            // Before releasing it: LogGrabSummary reads this, and a detector that is gone reports
+            // nothing rather than what it found.
+            _rejectedAtStop = _detector?.EventsRejectedForSpread ?? 0;
             _detector = null;
 
             // Leave the run its own evidence. The acceptance criterion for the whole payload
