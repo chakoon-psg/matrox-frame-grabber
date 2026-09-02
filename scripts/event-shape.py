@@ -35,14 +35,26 @@ TILES = COLUMNS * ROWS
 
 
 def load(path):
-    frames, times, grids = [], [], []
+    """Returns frames, board times, the in_event flags, and the tile grids.
+
+    in_event is optional so windows written before the column existed still read. Without it the
+    onset has to be measured over the whole window, preroll and all, which inflates a sweep's
+    spread by however long the preroll happened to be eventful -- up to 3370 ms on real files.
+    """
+    frames, times, flags, grids = [], [], [], []
     for row in csv.reader(io.open(path, encoding="utf-8-sig")):
         if not row or row[0] == "frame":
+            header = row
             continue
         frames.append(int(row[0]))
         times.append(float(row[1]))
-        grids.append([float(v) if v else None for v in row[2:2 + TILES]])
-    return frames, times, grids
+        if len(row) >= 3 + TILES:                 # has in_event
+            flags.append(row[2] == "1")
+            grids.append([float(v) if v else None for v in row[3:3 + TILES]])
+        else:
+            flags.append(True)                    # older file: treat it all as the event
+            grids.append([float(v) if v else None for v in row[2:2 + TILES]])
+    return frames, times, flags, grids
 
 
 def main():
@@ -56,7 +68,7 @@ def main():
                     help="ignore tiles that never fell this far; their onset is noise (default 5%%)")
     args = ap.parse_args()
 
-    frames, times, grids = load(args.csv)
+    frames, times, flags, grids = load(args.csv)
     if len(frames) < 10:
         raise SystemExit(f"{args.csv}: only {len(frames)} frames, too few to read a shape from")
 
@@ -65,8 +77,14 @@ def main():
     print(f"{os.path.basename(args.csv)}: frames {frames[0]}-{frames[-1]} "
           f"({len(frames)}), {span * 1000:.0f} ms, {fps:.1f} fps\n")
 
-    # Baseline per tile from the quietest quarter of the window, which is the preroll.
-    lead = max(5, len(frames) // 4)
+    # The preroll is everything before the event began; the baseline comes from there. Falling back
+    # to the first quarter only for a file written before in_event existed.
+    marked = flags.count(True)
+    lead = flags.index(True) if (True in flags and marked < len(flags)) else max(5, len(frames) // 4)
+    lead = max(5, lead)
+    event = [n for n, f in enumerate(flags) if f] or list(range(len(frames)))
+    print(f"  event: frames {frames[event[0]]}-{frames[event[-1]]} "
+          f"({len(event)}), preroll {lead} frames")
     base = []
     for i in range(TILES):
         vals = [g[i] for g in grids[:lead] if g[i] is not None]
@@ -87,10 +105,11 @@ def main():
     # so a 12% event and a 90% one are read the same way.
     onset = [None] * TILES
     fell = [0.0] * TILES
+    lo, hi = event[0], min(len(grids) - 1, event[-1])
     for i in range(TILES):
         if base[i] is None or base[i] <= 0:
             continue
-        seen = [g[i] for g in grids if g[i] is not None]
+        seen = [grids[n][i] for n in range(lo, hi + 1) if grids[n][i] is not None]
         if not seen:
             continue
         fell[i] = 1.0 - min(seen) / base[i]
@@ -99,8 +118,8 @@ def main():
         if base[i] is None or base[i] <= 0 or fell[i] < args.min_fall:
             continue
         floor = base[i] * (1.0 - args.fraction * fell[i])
-        for n, g in enumerate(grids):
-            if g[i] is not None and g[i] <= floor:
+        for n in range(lo, hi + 1):
+            if grids[n][i] is not None and grids[n][i] <= floor:
                 onset[i] = n
                 break
 

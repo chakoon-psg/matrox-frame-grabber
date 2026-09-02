@@ -83,8 +83,15 @@ namespace MatroxFrameGrabber.Infrastructure
         /// An unpopulated tile is written empty rather than as a zero. A tile nothing was sampled
         /// from is not a dark tile, and a reader averaging a column of zeros would conclude the
         /// opposite of what happened.
+        ///
+        /// The in_event column marks the frames the detector actually called the event, because the
+        /// window is mostly preroll and an analysis cannot tell the two apart otherwise. Measured on
+        /// 60 real windows without it, onset spreads came out as long as 3370 ms - longer than the
+        /// events they were describing - because a tile that dipped a second earlier for its own
+        /// reasons counted as that event's first.
         /// </summary>
-        public string Write(string folder, string label, long fromFrame, long toFrame)
+        public string Write(string folder, string label, long fromFrame, long toFrame,
+                            long eventFrom, long eventTo)
         {
             float[] means;
             long[] frames;
@@ -111,7 +118,7 @@ namespace MatroxFrameGrabber.Infrastructure
 
                 using (var writer = new StreamWriter(path, append: false, Encoding.UTF8))
                 {
-                    var header = new StringBuilder("frame,board_time_s");
+                    var header = new StringBuilder("frame,board_time_s,in_event");
                     for (int i = 0; i < TileGrid.TileCount; i++)
                         header.Append(inv, $",t{i / TileGrid.Columns}{i % TileGrid.Columns}");
                     writer.WriteLine(header.ToString());
@@ -126,7 +133,8 @@ namespace MatroxFrameGrabber.Infrastructure
 
                         row.Clear();
                         row.Append(frame.ToString(inv)).Append(',')
-                           .Append(times[slot].ToString("F6", inv));
+                           .Append(times[slot].ToString("F6", inv)).Append(',')
+                           .Append(frame >= eventFrom && frame <= eventTo ? '1' : '0');
 
                         int at = slot * TileGrid.TileCount;
                         for (int i = 0; i < TileGrid.TileCount; i++)

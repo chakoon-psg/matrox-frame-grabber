@@ -48,12 +48,12 @@ namespace MatroxFrameGrabber.Tests
             var history = new TileHistory();
             Fill(history, 1, 400);
 
-            string path = history.Write(_folder, "window", 100, 120);
+            string path = history.Write(_folder, "window", 100, 120, 100, 120);
             Assert.NotNull(path);
 
             string[] lines = File.ReadAllLines(path);
             Assert.Equal(22, lines.Length);                    // header plus 21 frames
-            Assert.StartsWith("frame,board_time_s,t00", lines[0]);
+            Assert.StartsWith("frame,board_time_s,in_event,t00", lines[0]);
 
             for (int i = 1; i < lines.Length; i++)
                 Assert.Equal((100 + i - 1).ToString(), lines[i].Split(',')[0]);
@@ -65,11 +65,11 @@ namespace MatroxFrameGrabber.Tests
             var history = new TileHistory();
             Fill(history, 1, 10);
 
-            string path = history.Write(_folder, "window", 1, 10);
+            string path = history.Write(_folder, "window", 1, 10, 1, 10);
             string[] lines = File.ReadAllLines(path);
 
-            Assert.Equal(TileGrid.TileCount + 2, lines[0].Split(',').Length);
-            Assert.Equal(TileGrid.TileCount + 2, lines[1].Split(',').Length);
+            Assert.Equal(TileGrid.TileCount + 3, lines[0].Split(',').Length);
+            Assert.Equal(TileGrid.TileCount + 3, lines[1].Split(',').Length);
         }
 
         [Fact]
@@ -80,11 +80,11 @@ namespace MatroxFrameGrabber.Tests
             var history = new TileHistory();
             history.Add(Grid(1, 100, populated: 60), 0.008);
 
-            string path = history.Write(_folder, "window", 1, 1);
+            string path = history.Write(_folder, "window", 1, 1, 1, 1);
             string[] cells = File.ReadAllLines(path)[1].Split(',');
 
-            Assert.Equal("100.00", cells[2]);                  // a populated tile
-            Assert.Equal(string.Empty, cells[2 + 63]);         // one that was never accumulated
+            Assert.Equal("100.00", cells[3]);                  // a populated tile
+            Assert.Equal(string.Empty, cells[3 + 63]);         // one that was never accumulated
         }
 
         [Fact]
@@ -93,7 +93,7 @@ namespace MatroxFrameGrabber.Tests
             var history = new TileHistory();
             Fill(history, 1, TileHistory.Capacity + 200);      // frames 1-200 have rolled out
 
-            Assert.Null(history.Write(_folder, "gone", 1, 50));
+            Assert.Null(history.Write(_folder, "gone", 1, 50, 1, 50));
             Assert.False(File.Exists(Path.Combine(_folder, "gone.csv")),
                 "an empty window must not leave a file behind");
         }
@@ -101,7 +101,7 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void Write_ReturnsNullOnAnEmptyHistory()
         {
-            Assert.Null(new TileHistory().Write(_folder, "empty", 0, 100));
+            Assert.Null(new TileHistory().Write(_folder, "empty", 0, 100, 0, 100));
         }
 
         [Fact]
@@ -112,9 +112,30 @@ namespace MatroxFrameGrabber.Tests
             Fill(history, 1, TileHistory.Capacity + 100);
 
             long oldest = 101;                                 // Capacity + 100 - Capacity + 1
-            string path = history.Write(_folder, "window", oldest, oldest + 4);
+            string path = history.Write(_folder, "window", oldest, oldest + 4, oldest, oldest + 4);
             Assert.NotNull(path);
             Assert.Equal(6, File.ReadAllLines(path).Length);
+        }
+
+        [Fact]
+        public void Write_MarksWhichFramesWereTheEvent()
+        {
+            // Without this the shape analysis measures onset across the preroll too, and a tile
+            // that dipped a second earlier for its own reasons counts as the event's first tile.
+            var history = new TileHistory();
+            Fill(history, 1, 100);
+
+            string path = history.Write(_folder, "marked", 20, 60, 40, 45);
+            string[] lines = File.ReadAllLines(path);
+
+            Assert.Equal("in_event", lines[0].Split(',')[2]);
+            for (int i = 1; i < lines.Length; i++)
+            {
+                string[] cells = lines[i].Split(',');
+                int frame = int.Parse(cells[0]);
+                string expected = frame >= 40 && frame <= 45 ? "1" : "0";
+                Assert.Equal(expected, cells[2]);
+            }
         }
 
         [Fact]
@@ -124,7 +145,7 @@ namespace MatroxFrameGrabber.Tests
             Fill(history, 1, 50);
             history.Clear();
             Assert.Equal(0, history.Count);
-            Assert.Null(history.Write(_folder, "cleared", 1, 50));
+            Assert.Null(history.Write(_folder, "cleared", 1, 50, 1, 50));
         }
 
         [Fact]

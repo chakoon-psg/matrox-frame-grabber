@@ -1417,7 +1417,9 @@ namespace MatroxFrameGrabber.Mil
                 BrightnessLog.DefaultFolder,
                 label,
                 found.StartFrame - EventPrerollFrames,
-                found.EndFrame + DetectionThresholds.DebounceFrames);
+                found.EndFrame + DetectionThresholds.DebounceFrames,
+                found.StartFrame,
+                found.EndFrame);
 
             if (path == null)
                 return;
