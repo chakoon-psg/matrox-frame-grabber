@@ -94,6 +94,11 @@ namespace MatroxFrameGrabber.Mil
         // acquisition path allocates. The detector is per-run, created in StartGrab.
         private readonly TileReducer _reducer = new TileReducer();
         private readonly TileGrid _grid = new TileGrid();
+
+        // Recent tile grids, so a confirmed event can be written out with the frames that led to
+        // it. See TileHistory for why the frames themselves cannot be kept.
+        private readonly TileHistory _history = new TileHistory();
+        private int _eventWindowsWritten;
         private AnomalyDetector _detector;
 
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
@@ -1078,6 +1083,8 @@ namespace MatroxFrameGrabber.Mil
             // region may well have changed in between -- during the exposure scan both did.
             _detector = new AnomalyDetector(DetectionThresholds);
             _reducer.ResetCost();
+            _history.Clear();
+            _eventWindowsWritten = 0;
             while (_anomalies.TryDequeue(out _)) { }
             Interlocked.Exchange(ref _anomalyCount, 0);
             _hasLastAnomaly = false;
@@ -1204,6 +1211,7 @@ namespace MatroxFrameGrabber.Mil
                     _hasLastAnomaly = true;
                     raised = true;
                     MilErrorLog.Note($"{Name}: anomaly {found}");
+                    WriteEventWindow(found);
                     AnomalyDetected?.Invoke(this, found);
                 }
                 if (raised)
@@ -1374,10 +1382,48 @@ namespace MatroxFrameGrabber.Mil
 
             // After Reduce: it resets the grid, which clears the number.
             _grid.FrameNumber = frameNumber;
+            _history.Add(_grid, timeStampSec);
 
             AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
             if (closed.HasValue)
                 RecordAnomaly(closed.Value);
+        }
+
+        /// <summary>
+        /// Frames of history written before an event starts. 200 is about 1.6 s at 124.3 fps --
+        /// enough to show what the tiles were doing before the fall, which is the difference
+        /// between a panel that switched off and something that swept across in front of it.
+        /// </summary>
+        private const int EventPrerollFrames = 200;
+
+        /// <summary>
+        /// Event windows one run will write before it stops. A run that fires constantly is a
+        /// misconfiguration, and the diagnosis is in the first few windows either way; without a
+        /// cap it would fill the disk while nobody was reading them.
+        /// </summary>
+        private const int MaxEventWindows = 20;
+
+        /// <summary>
+        /// Writes the tile history around a confirmed event. On the stats tick, not the hook: this
+        /// touches the disk.
+        /// </summary>
+        private void WriteEventWindow(AnomalyEvent found)
+        {
+            if (_eventWindowsWritten >= MaxEventWindows)
+                return;
+
+            string label = $"event-ch{_index}-{DateTime.Now:yyyyMMdd-HHmmss-fff}";
+            string path = _history.Write(
+                BrightnessLog.DefaultFolder,
+                label,
+                found.StartFrame - EventPrerollFrames,
+                found.EndFrame + DetectionThresholds.DebounceFrames);
+
+            if (path == null)
+                return;
+
+            _eventWindowsWritten++;
+            MilErrorLog.Note($"{Name}: event window -> {path}");
         }
 
         /// <summary>Queues a confirmed anomaly for the stats tick. On the acquisition thread.</summary>

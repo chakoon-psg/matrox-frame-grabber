@@ -28,6 +28,7 @@
     <Compile Include="..\src\Infrastructure\BrightnessHistory.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\BrightnessLog.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\TileBounds.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\TileHistory.cs" LinkBase="Included" />
     <Compile Include="..\src\Infrastructure\MilErrorLog.cs" LinkBase="Included" />
   </ItemGroup>
 
