@@ -224,6 +224,21 @@
                                 ToolTip="Saved to settings; takes effect on the next Start" />
                     </StackPanel>
 
+                    <!-- Where the depth threshold came from, and what the last run would propose
+                         instead. Applying is a separate act on purpose: the histogram is collected
+                         every run because it is free, but only a person can say the run was on a
+                         healthy panel. -->
+                    <StackPanel Orientation="Horizontal">
+                        <Label Content="Calib" Width="42" />
+                        <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
+                                   Foreground="#9A9A9A" FontSize="10" Width="300"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding CalibrationText}" />
+                        <Button Content="Use proposal" Margin="4,0,0,0" Click="ApplyCalibration_Click"
+                                IsEnabled="{Binding CanCalibrate}"
+                                ToolTip="Only after a run on a known-good panel" />
+                    </StackPanel>
+
                     <!-- DCF / feature browser -->
                     <StackPanel Orientation="Horizontal">
                         <Label Content="DCF" Width="34" />

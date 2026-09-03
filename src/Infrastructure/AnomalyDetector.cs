@@ -121,6 +121,27 @@ namespace MatroxFrameGrabber.Infrastructure
         public int MinOnsetTiles { get; set; } = 8;
 
         /// <summary>
+        /// False positives the operator will tolerate per hour on this channel. The rule a proposed
+        /// <see cref="Depth"/> is derived from - not something anything watches afterwards.
+        /// </summary>
+        public double FalsePositiveBudgetPerHour { get; set; } = 1.0;
+
+        /// <summary>
+        /// When <see cref="Depth"/> was last set from a measurement, in ISO 8601, or empty if it
+        /// never was.
+        ///
+        /// Recorded because a settings file cannot otherwise be trusted. Six months on, 0.15 in a
+        /// file says nothing about whether it came from a calibration run or from somebody trying
+        /// numbers - and a calibration that predates a change of lens or lighting is worse than
+        /// none, because it looks authoritative.
+        /// </summary>
+        public string CalibratedAt { get; set; } = string.Empty;
+
+        /// <summary>Frames the calibration judged, and the depth its normal frames reached.</summary>
+        public long CalibrationFrames { get; set; }
+        public double CalibrationFloor { get; set; }
+
+        /// <summary>
         /// Copies every threshold from <paramref name="other"/>, clamping each to a range that
         /// cannot silence the detector.
         ///
@@ -139,6 +160,13 @@ namespace MatroxFrameGrabber.Infrastructure
             MaxEventFrames = Clamp(other.MaxEventFrames, 1, 1000000);
             MaxOnsetSpreadFrames = Clamp(other.MaxOnsetSpreadFrames, 1, 1000000);
             MinOnsetTiles = Clamp(other.MinOnsetTiles, 1, TileGrid.TileCount);
+            FalsePositiveBudgetPerHour = Clamp(other.FalsePositiveBudgetPerHour, 0.001, 100000.0);
+
+            // Provenance is taken verbatim: it records where Depth came from, and clamping a record
+            // of the past would make it a different record.
+            CalibratedAt = other.CalibratedAt ?? string.Empty;
+            CalibrationFrames = other.CalibrationFrames;
+            CalibrationFloor = other.CalibrationFloor;
             BaselineWindow = Clamp(other.BaselineWindow, 3, 100000);
             BaselineWarmupFrames = Clamp(other.BaselineWarmupFrames, 1, 100000);
         }
@@ -206,6 +234,75 @@ namespace MatroxFrameGrabber.Infrastructure
     }
 
     /// <summary>
+    /// A depth threshold worked out from what a run measured, and the evidence behind it.
+    ///
+    /// The rule is a rate, not a margin: given a budget of false positives per hour, this is the
+    /// lowest depth at which the run's normal frames exceeded it rarely enough to stay inside that
+    /// budget. Stated that way because it is the quantity anyone actually cares about, and because
+    /// a few frames on the shoulder of a real event cannot move it - which a maximum can, and did.
+    /// The same channel measured 0.0028, 0.0089 and 0.0475 across three runs on one rig.
+    /// </summary>
+    public readonly struct DepthProposal
+    {
+        /// <summary>The proposed threshold. Zero when the run could not support one.</summary>
+        public double Depth { get; }
+
+        /// <summary>
+        /// Frames the run judged, which is what its length is measured from. Not the population the
+        /// depths came from: that is <see cref="FramesInPopulation"/>, and on a still panel it is a
+        /// few per cent of this. Dividing by the wrong one made a five-minute run look like two
+        /// seconds and would have proposed a threshold far too high.
+        /// </summary>
+        public long FramesJudged { get; }
+
+        /// <summary>
+        /// Frames the depths were taken from: judged, outside an event and its approach, with the
+        /// tiles in agreement. Those are the ones coherence would not have stopped, so they are the
+        /// ones the depth threshold has to. A small number here is the coherence gate working.
+        /// </summary>
+        public long FramesInPopulation { get; }
+
+        /// <summary>Frames still above <see cref="Depth"/> - inside the allowance, by definition.</summary>
+        public long FramesAbove { get; }
+
+        /// <summary>Frames the budget allowed over a run of this length.</summary>
+        public double AllowedFrames { get; }
+
+        /// <summary>
+        /// The tightest budget this run could resolve, per hour. A ten-minute run cannot
+        /// demonstrate one false positive an hour: with nothing above a threshold it can only say
+        /// the rate is under six an hour. Carried so the proposal is not read as more than it is.
+        /// </summary>
+        public double MeasurableBudgetPerHour { get; }
+
+        /// <summary>
+        /// Whether the run was long enough to propose from. The run, not the population: what has
+        /// to be long is the time, and a population of a few hundred frames out of a long run is
+        /// the coherence gate doing its job rather than a shortage of data.
+        /// </summary>
+        public bool IsUsable => FramesJudged >= AnomalyDetector.MinCalibrationFrames && Depth > 0;
+
+        public DepthProposal(double depth, long framesJudged, long framesInPopulation,
+                             long framesAbove, double allowedFrames, double measurableBudgetPerHour)
+        {
+            Depth = depth;
+            FramesJudged = framesJudged;
+            FramesInPopulation = framesInPopulation;
+            FramesAbove = framesAbove;
+            AllowedFrames = allowedFrames;
+            MeasurableBudgetPerHour = measurableBudgetPerHour;
+        }
+
+        public override string ToString() =>
+            !IsUsable
+                ? $"not enough to propose from ({FramesJudged} frames judged)"
+                : $"depth {Depth:0.###} from {FramesJudged} frames judged, "
+                + $"{FramesInPopulation} in the population "
+                + $"({FramesAbove} above it, {AllowedFrames:0.#} allowed; "
+                + $"this run resolves {MeasurableBudgetPerHour:0.#}/hour)";
+    }
+
+    /// <summary>
     /// Watches one channel's tile grids and reports transient blanking — the event-type anomaly the
     /// spec makes v1's body.
     ///
@@ -233,6 +330,21 @@ namespace MatroxFrameGrabber.Infrastructure
 
         // Per-tile onset within the open event: the tile's level just before the event began, and
         // the frame at which it first fell past the depth threshold from there.
+        // The depth of every normal frame whose tiles agreed, in thousandths. That is exactly the
+        // population the depth threshold has to turn away by itself, and 0.001 is finer resolution
+        // than any threshold worth choosing.
+        private readonly long[] _depthHistogram = new long[DepthBuckets];
+        private long _histogramFrames;
+
+        // The buckets the most recent frames went into, so they can be taken back out if an event
+        // turns out to have been starting. A fault does not begin between two frames.
+        private readonly int[] _recentBuckets = new int[HistogramGuardFrames];
+        private int _recentCount;
+        private int _recentNext;
+
+        // Frames still to skip after an event closed: the way back up is not normal either.
+        private int _histogramSuppress;
+
         private readonly double[] _entryLevel = new double[TileGrid.TileCount];
         private readonly long[] _tileOnset = new long[TileGrid.TileCount];
         private int _onsetTiles;
@@ -269,6 +381,32 @@ namespace MatroxFrameGrabber.Infrastructure
 
         /// <summary>Frames judged so far. Below BaselineWarmupFrames nothing is judged yet.</summary>
         public long Observed => _observed;
+
+        /// <summary>Buckets in the depth histogram, one per thousandth of depth.</summary>
+        public const int DepthBuckets = 1000;
+
+        /// <summary>
+        /// Frames either side of an event kept out of the calibration histogram - about 240 ms at
+        /// 124.3 fps.
+        ///
+        /// Not an arbitrary guard. The frame before an event opens is already partway into the
+        /// fall: one measured 0.0994 where everything away from an event sat under 0.011, and that
+        /// single frame was what made a reported floor look like it had no margin at all. Leaving
+        /// them in and hoping the budget absorbs them does not work either - at one false positive
+        /// an hour, a five-minute run allows 0.089 frames, so five outliers set the threshold by
+        /// themselves.
+        /// </summary>
+        public const int HistogramGuardFrames = 30;
+
+        /// <summary>
+        /// Frames a run must judge before a proposal is offered - about 80 s at 124.3 fps. Below
+        /// that the tail is a handful of frames and the proposal would follow whichever way they
+        /// happened to fall.
+        /// </summary>
+        public const long MinCalibrationFrames = 10000;
+
+        /// <summary>Frames in the histogram a proposal would be computed from.</summary>
+        public long HistogramFrames => _histogramFrames;
 
         /// <summary>
         /// The deepest fall on a normal frame whose tiles agreed -- coherence above its gate, so
@@ -388,6 +526,9 @@ namespace MatroxFrameGrabber.Infrastructure
                         _tileOnset[i] = -1;
                     }
                     _onsetTiles = 0;
+
+                    // Those frames were the approach to this, not a description of normal.
+                    ForgetRecentHistogramFrames();
                 }
 
                 // When each tile crossed the same threshold the event was judged by. Online, so no
@@ -442,6 +583,23 @@ namespace MatroxFrameGrabber.Infrastructure
                             MaxCoherentNormalDepth = depth;
                             MaxCoherentNormalDepthFrame = frame;
                         }
+
+                        if (_histogramSuppress > 0)
+                        {
+                            _histogramSuppress--;      // still climbing out of the last event
+                        }
+                        else
+                        {
+                            int bucket = (int)(depth * DepthBuckets);
+                            if (bucket < 0) bucket = 0;
+                            if (bucket >= DepthBuckets) bucket = DepthBuckets - 1;
+                            _depthHistogram[bucket]++;
+                            _histogramFrames++;
+
+                            _recentBuckets[_recentNext] = bucket;
+                            _recentNext = (_recentNext + 1) % HistogramGuardFrames;
+                            if (_recentCount < HistogramGuardFrames) _recentCount++;
+                        }
                         if (depth > _t.Depth * 0.5) NormalFramesNearThreshold++;
                     }
                     else if (depth > _t.Depth)
@@ -465,6 +623,68 @@ namespace MatroxFrameGrabber.Infrastructure
         /// the grab ends is never reported at all.
         /// </summary>
         public AnomalyEvent? Flush() => _inEvent ? Judge(Close()) : (AnomalyEvent?)null;
+
+        /// <summary>
+        /// Takes the most recently counted frames back out of the histogram, for when an event
+        /// turns out to have been beginning during them.
+        /// </summary>
+        private void ForgetRecentHistogramFrames()
+        {
+            for (int n = 0; n < _recentCount; n++)
+            {
+                int slot = (_recentNext - 1 - n + HistogramGuardFrames * 2) % HistogramGuardFrames;
+                int bucket = _recentBuckets[slot];
+                if (_depthHistogram[bucket] > 0)
+                {
+                    _depthHistogram[bucket]--;
+                    _histogramFrames--;
+                }
+            }
+            _recentCount = 0;
+            _recentNext = 0;
+        }
+
+        /// <summary>
+        /// The lowest depth threshold this run supports for a given budget of false positives per
+        /// hour, found by walking down the histogram until the tail no longer fits the allowance.
+        ///
+        /// <paramref name="fps"/> turns frames into hours, so it has to be the rate the run
+        /// achieved rather than a nominal one: the same frame count is a different length of time
+        /// at a different exposure.
+        ///
+        /// A run too short for the budget is not an error. With nothing above a threshold, ten
+        /// minutes bounds the rate at six an hour and no tighter, and the proposal carries that
+        /// bound rather than pretending to the budget it was asked for.
+        /// </summary>
+        public DepthProposal Propose(double budgetPerHour, double fps)
+        {
+            if (_histogramFrames <= 0 || fps <= 0 || budgetPerHour <= 0)
+                return new DepthProposal(0, _observed, _histogramFrames, 0, 0, 0);
+
+            // The run's length, from every frame it judged. Not from the histogram: that holds only
+            // the frames the coherence gate let through, a few per cent on a still panel, and using
+            // it made a five-minute run look like two seconds.
+            double seconds = _observed / fps;
+            double allowed = budgetPerHour * seconds / 3600.0;
+            double resolvable = 3600.0 / seconds;
+
+            // Down from the top. The first bucket whose tail no longer fits is one below the
+            // answer, so the threshold is that bucket's upper edge.
+            long tail = 0;
+            int bucket = DepthBuckets - 1;
+            for (; bucket >= 0; bucket--)
+            {
+                long next = tail + _depthHistogram[bucket];
+                if (next > allowed)
+                    break;
+                tail = next;
+            }
+
+            double depth = (bucket + 2) / (double)DepthBuckets;
+            if (depth > 1.0) depth = 1.0;
+
+            return new DepthProposal(depth, _observed, _histogramFrames, tail, allowed, resolvable);
+        }
 
         /// <summary>
         /// Lets a closed event through, or turns it away because its fall swept across the tiles
@@ -501,6 +721,11 @@ namespace MatroxFrameGrabber.Infrastructure
             EventsRejectedForSpread = 0;
             LastRejectedEvent = null;
             for (int i = 0; i < TileGrid.TileCount; i++) _tileOnset[i] = -1;
+            Array.Clear(_depthHistogram, 0, _depthHistogram.Length);
+            _histogramFrames = 0;
+            _recentCount = 0;
+            _recentNext = 0;
+            _histogramSuppress = 0;
             MaxNormalDepth = 0;
             MaxCoherentNormalDepth = 0;
             MaxCoherentNormalDepthFrame = 0;
@@ -565,6 +790,7 @@ namespace MatroxFrameGrabber.Infrastructure
 
             _inEvent = false;
             _clearFrames = 0;
+            _histogramSuppress = HistogramGuardFrames;
             return e;
         }
 

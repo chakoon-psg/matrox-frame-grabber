@@ -467,6 +467,13 @@ namespace MatroxFrameGrabber.Mil
         // carried 72 of them - the one line a reader would take the run's verdict from.
         private long _rejectedAtStop;
 
+        // What the last run would propose as a depth threshold, and the floor it measured. Kept
+        // past the detector for the same reason, and because applying it is a separate act: a
+        // threshold must not follow the picture on its own, or a failing panel becomes the normal
+        // one -- the same reason the baseline freezes during an event.
+        private DepthProposal _lastProposal;
+        private double _floorAtStop;
+
         /// <summary>The most recent anomaly, formatted, or empty when there has been none.</summary>
         public string LastAnomalyText => _hasLastAnomaly ? _lastAnomaly.ToString() : string.Empty;
 
@@ -502,6 +509,79 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Raised on the stats tick for each anomaly confirmed since the last tick.</summary>
         public event Action<CameraChannel, AnomalyEvent> AnomalyDetected;
+
+        /// <summary>What the last completed run would propose as this channel's depth threshold.</summary>
+        public DepthProposal LastProposal => _lastProposal;
+
+        /// <summary>Whether there is a proposal worth offering.</summary>
+        public bool CanCalibrate => _lastProposal.IsUsable && !_isGrabbing;
+
+        /// <summary>
+        /// The proposal, and where the current threshold came from. Both, because the second is
+        /// what says whether the first is worth acting on: a threshold with no recorded
+        /// calibration is somebody's guess, and one calibrated before the lens moved is worse.
+        /// </summary>
+        public string CalibrationText
+        {
+            get
+            {
+                AnomalyThresholds t = DetectionThresholds;
+                string from = string.IsNullOrEmpty(t.CalibratedAt)
+                    ? "depth never calibrated"
+                    : $"calibrated {t.CalibratedAt} ({t.CalibrationFrames} frames, floor {t.CalibrationFloor:0.####})";
+
+                if (_isGrabbing)
+                    return from;
+
+                return _lastProposal.FramesJudged > 0
+                    ? $"{from}   |   last run proposes {_lastProposal}"
+                    : from;
+            }
+        }
+
+        /// <summary>
+        /// Takes the last run's proposal as this channel's depth threshold, and records where it
+        /// came from.
+        ///
+        /// Deliberately a separate act from measuring it. The histogram is collected on every run
+        /// because it costs nothing, but only a person can say the run was on a healthy panel --
+        /// and a threshold derived from a run that was not becomes a threshold that accepts the
+        /// fault as normal.
+        /// </summary>
+        public bool ApplyCalibration()
+        {
+            if (!_lastProposal.IsUsable)
+                return false;
+
+            AnomalyThresholds t = DetectionThresholds;
+            var edited = new AnomalyThresholds
+            {
+                Depth = _lastProposal.Depth,
+                Coherence = t.Coherence,
+                DebounceFrames = t.DebounceFrames,
+                MaxEventFrames = t.MaxEventFrames,
+                MaxOnsetSpreadFrames = t.MaxOnsetSpreadFrames,
+                MinOnsetTiles = t.MinOnsetTiles,
+                BaselineWindow = t.BaselineWindow,
+                BaselineWarmupFrames = t.BaselineWarmupFrames,
+                FalsePositiveBudgetPerHour = t.FalsePositiveBudgetPerHour,
+                CalibratedAt = DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
+                CalibrationFrames = _lastProposal.FramesJudged,
+                CalibrationFloor = _floorAtStop,
+            };
+            t.CopyFrom(edited);
+            Output?.SaveThresholds();
+
+            _depthInput = null;
+            RaisePropertyChanged(nameof(DepthInput));
+            RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(CalibrationText));
+            MilErrorLog.Note(
+                $"{Name}: depth calibrated to {t.Depth:0.###} at {t.CalibratedAt} "
+              + $"from {t.CalibrationFrames} frames, floor {t.CalibrationFloor:0.####}, "
+              + $"budget {t.FalsePositiveBudgetPerHour:0.##}/hour");
+            return true;
+        }
 
         /// <summary>Editable base name used as the snapshot/recording filename prefix.</summary>
         public string OutputName
@@ -1147,6 +1227,11 @@ namespace MatroxFrameGrabber.Mil
             // Before Flush clears it: the floor this run measured is the reason for running it.
             if (DetectionEnabled && _detector != null)
                 MilErrorLog.Note(
+                    $"{Name}: depth proposal - {_detector.Propose(DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate)}"
+                  + $" against the current {DetectionThresholds.Depth:0.###}");
+
+            if (DetectionEnabled && _detector != null)
+                MilErrorLog.Note(
                     $"{Name}: detection floor - coherent normal depth max {_detector.MaxCoherentNormalDepth:F4} "
                   + $"at frame {_detector.MaxCoherentNormalDepthFrame} "
                   + $"vs threshold {DetectionThresholds.Depth:F2} "
@@ -1161,10 +1246,16 @@ namespace MatroxFrameGrabber.Mil
             if (tail.HasValue)
                 RecordAnomaly(tail.Value);
 
-            // Before releasing it: LogGrabSummary reads this, and a detector that is gone reports
+            // Before releasing it: LogGrabSummary reads these, and a detector that is gone reports
             // nothing rather than what it found.
             _rejectedAtStop = _detector?.EventsRejectedForSpread ?? 0;
+            _floorAtStop = _detector?.MaxCoherentNormalDepth ?? 0.0;
+            if (_detector != null)
+                _lastProposal = _detector.Propose(
+                    DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
             _detector = null;
+            RaisePropertyChanged(nameof(CalibrationText));
+            RaiseCommandStates();
 
             // Leave the run its own evidence. The acceptance criterion for the whole payload
             // change is that frames missed does not increase, and until now reading it meant

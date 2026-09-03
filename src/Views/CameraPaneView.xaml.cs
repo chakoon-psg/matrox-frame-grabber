@@ -262,6 +262,16 @@ namespace MatroxFrameGrabber.Views
 
         private void ClearRoi_Click(object sender, RoutedEventArgs e) => Channel?.ClearAnalysisRoi();
 
+        private void ApplyCalibration_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyCalibration())
+                MessageBox.Show(
+                    "제안할 값이 없습니다. 정상 패널 앞에서 충분히 긴 실행을 한 번 마쳐야 합니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         private void ApplyThresholds_Click(object sender, RoutedEventArgs e)
         {
             var channel = Channel;
