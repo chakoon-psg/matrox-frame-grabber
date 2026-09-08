@@ -48,10 +48,6 @@
                               Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
                               ToolTip="Live color H.264 recording — may drop frames at high fps" />
-                <ToggleButton Content="◆ RAW" Style="{StaticResource RawToggle}" FontSize="11"
-                              Click="RawRecord_Click" IsChecked="{Binding IsRawRecording, Mode=OneWay}"
-                              IsEnabled="{Binding CanRecord}"
-                              ToolTip="Lossless RAW recording: every frame at full fps → color MP4 (grayscale preview while recording)" />
                 <!-- IsGrabbing, not CameraPresent: while stopped the display buffer still holds the
                      previous run's last frame, so a snapshot of it looks fresh but is not. -->
                 <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding IsGrabbing}" Margin="10,0,3,0" />
@@ -103,19 +99,10 @@
                 </Grid>
             </Border>
 
-            <!-- Persistent recording banner: red = live H.264, orange = RAW lossless -->
+            <!-- Persistent recording banner while a live H.264 recording is running -->
             <Border VerticalAlignment="Top" Padding="8,4"
+                    Background="{StaticResource RecBrush}"
                     Visibility="{Binding RecordingActive, Converter={StaticResource BoolToVis}}">
-                <Border.Style>
-                    <Style TargetType="Border">
-                        <Setter Property="Background" Value="{StaticResource RecBrush}" />
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding IsRawRecording}" Value="True">
-                                <Setter Property="Background" Value="{StaticResource RawBrush}" />
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </Border.Style>
                 <TextBlock Text="{Binding RecordingBannerText}" Foreground="White"
                            FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
             </Border>

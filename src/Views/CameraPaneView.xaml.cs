@@ -190,60 +190,18 @@ namespace MatroxFrameGrabber.Views
             }
         }
 
-        // ----- Settings strip -----
-
-        private System.Windows.Threading.DispatcherTimer _rawTimer;
-
         private void Stop_Click(object sender, RoutedEventArgs e)
         {
             var channel = Channel;
             if (channel == null) return;
 
             // Stopping ends any in-progress recording (irreversible) — confirm, but only while recording.
-            if ((channel.IsRecording || channel.IsRawRecording) &&
+            if (channel.IsRecording &&
                 MessageBox.Show("이 카메라가 녹화 중입니다. 중지하면 녹화가 종료됩니다. 계속할까요?",
                     channel.Name, MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
 
-            StopRawTimer();
-            if (channel.IsRawRecording) channel.StopRawRecording();
-            channel.StopGrab();   // also stops a color recording
-        }
-
-        private void RawRecord_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-
-            if (channel.IsRawRecording)
-            {
-                StopRawTimer();
-                channel.StopRawRecording();
-                return;
-            }
-
-            if (!channel.StartRawRecording(out string error))
-            {
-                MessageBox.Show(error ?? "Failed to start RAW recording.", channel.Name,
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            int seconds = channel.Output?.RawDurationSeconds ?? 0;
-            if (seconds > 0)
-            {
-                _rawTimer = new System.Windows.Threading.DispatcherTimer
-                {
-                    Interval = TimeSpan.FromSeconds(seconds)
-                };
-                _rawTimer.Tick += (s, a) => { StopRawTimer(); Channel?.StopRawRecording(); };
-                _rawTimer.Start();
-            }
-        }
-
-        private void StopRawTimer()
-        {
-            if (_rawTimer != null) { _rawTimer.Stop(); _rawTimer = null; }
+            channel.StopGrab();   // also stops the recording
         }
 
         private CameraSettingsWindow _settingsWindow;

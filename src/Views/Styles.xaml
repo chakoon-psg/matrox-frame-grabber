@@ -18,8 +18,6 @@
     <Color x:Key="Ch1Color">#FF81C784</Color>
     <Color x:Key="Ch2Color">#FFFFB74D</Color>
     <Color x:Key="Ch3Color">#FFBA68C8</Color>
-    <Color x:Key="RawColor">#FFE65100</Color>
-    <Color x:Key="RawHoverColor">#FFF57C00</Color>
     <!-- Warning text on PanelBrush (e.g. clipping callouts): RecBrush's ~2.6:1 contrast there is
          worse than a healthy channel's ~8:1, which is backwards for something meant to stand out. -->
     <Color x:Key="WarnColor">#FFFF6E6E</Color>
@@ -34,7 +32,6 @@
     <SolidColorBrush x:Key="MutedTextBrush" Color="{StaticResource MutedTextColor}" />
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
     <SolidColorBrush x:Key="RecBrush" Color="{StaticResource RecColor}" />
-    <SolidColorBrush x:Key="RawBrush" Color="{StaticResource RawColor}" />
     <SolidColorBrush x:Key="WarnBrush" Color="{StaticResource WarnColor}" />
     <SolidColorBrush x:Key="Ch0Brush" Color="{StaticResource Ch0Color}" />
     <SolidColorBrush x:Key="Ch1Brush" Color="{StaticResource Ch1Color}" />
@@ -117,44 +114,13 @@
     </Style>
 
     <!-- RAW (lossless) toggle: orange when checked, to distinguish from red H.264 Rec -->
-    <Style x:Key="RawToggle" TargetType="ToggleButton">
-        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-        <Setter Property="Background" Value="{StaticResource ControlBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushColor}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Padding" Value="8,3" />
-        <Setter Property="Margin" Value="0,0,4,0" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="ToggleButton">
-                    <Border x:Name="bd" CornerRadius="3" Background="{TemplateBinding Background}"
-                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" />
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="bd" Property="Background" Value="{StaticResource ControlHoverBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsChecked" Value="True">
-                            <Setter TargetName="bd" Property="Background" Value="{StaticResource RawBrush}" />
-                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource RawBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.4" />
-                        </Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-    </Style>
 
     <!-- Default ToggleButton. Nothing uses it today (every toggle in the app names RecToggle or
-         RawToggle explicitly), but it is kept as a safety net: without it, a ToggleButton added
+         RecToggle explicitly), but it is kept as a safety net: without it, a ToggleButton added
          with no explicit Style renders with default Windows chrome — a bright control on a dark toolbar,
          with black default text, unreadable and out of theme. Mirrors the Button style, and (since
          a toggle is useless if its state isn't visible at a glance) uses AccentBrush when checked,
-         matching this app's existing accent convention. RecToggle/RawToggle above are unaffected:
+         matching this app's existing accent convention. RecToggle above is unaffected:
          they are referenced by explicit Style="{StaticResource ...}", which always wins over this
          implicit (unkeyed) style. -->
     <Style TargetType="ToggleButton">

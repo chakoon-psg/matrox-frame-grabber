@@ -54,7 +54,6 @@ namespace MatroxFrameGrabber.Views
                     ch.RecordingFailed += OnRecordingFailed;
                     ch.CameraLost += OnCameraLost;
                     ch.GrabFailed += OnGrabFailed;
-                    ch.RawRecordingFinished += OnRawRecordingFinished;
                 }
 
                 _viewModel = new MainViewModel(_manager);
@@ -456,7 +455,7 @@ namespace MatroxFrameGrabber.Views
 
         private void FinishPwmSweep(CameraChannel channel, string label, List<PwmPoint> results)
         {
-            // Before anything that can fail, exactly as RestoreColorAfterRaw does: a persistent
+            // Before anything that can fail: a persistent
             // camera setting must not be left changed because writing a report threw.
             if (_pwmOriginalExposureUs > 0)
             {
@@ -590,7 +589,7 @@ namespace MatroxFrameGrabber.Views
             if (_viewModel == null) return;
 
             // Stopping all ends every in-progress recording (irreversible) — confirm, but only if recording.
-            if ((_viewModel.AnyRecording || _viewModel.AnyRawRecording) &&
+            if (_viewModel.AnyRecording &&
                 MessageBox.Show("녹화 중인 카메라가 있습니다. 모두 중지하면 녹화가 종료됩니다. 계속할까요?",
                     "Stop All", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
@@ -608,21 +607,7 @@ namespace MatroxFrameGrabber.Views
             RecSettingsPopup.IsOpen = !RecSettingsPopup.IsOpen;
         }
 
-        private void RawAll_Click(object sender, RoutedEventArgs e)
-        {
-            string errors = _viewModel?.ToggleRawAll();
-            if (!string.IsNullOrEmpty(errors))
-                MessageBox.Show("Some cameras could not start RAW recording:\n\n" + errors,
-                    "RAW All", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
 
-        // Only surface RAW conversion FAILURES (success just leaves the .mp4 in the output folder).
-        private void OnRawRecordingFinished(CameraChannel channel, bool ok, string message)
-        {
-            if (!ok)
-                MessageBox.Show($"RAW recording could not be converted:\n{message}", channel.Name,
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
 
         // ----- Fullscreen -----
 
