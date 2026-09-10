@@ -35,18 +35,11 @@ namespace MatroxFrameGrabber.ViewModels
             StartAllCommand = new RelayCommand(StartAll);
             StopAllCommand = new RelayCommand(StopAll);
 
-            // The brightness strip is always on screen, so measurement is enabled for the whole
-            // session — set once here rather than pushed every tick, since nothing turns it off.
-            // A channel that is not grabbing still costs nothing: CameraChannel.RefreshStats
-            // only samples while it has a live display buffer.
-            foreach (var channel in _manager.Channels)
-                channel.BrightnessEnabled = true;
-
-            // Detection likewise for the whole session, unless the command line switched it off.
-            // The switch exists for one measurement: frames missed with the tile reduction on the
-            // acquisition path against the same run without it.
-            foreach (var channel in _manager.Channels)
-                channel.DetectionEnabled = !App.DetectionOff;
+            // Brightness and detection are NOT switched on here any more. They are set when the
+            // manager builds each channel, which is before anything can grab: pushing them from
+            // this constructor left both false until it ran, and a channel that judges no frames
+            // reports the same empty lane as a healthy one - so the failure would have been
+            // silent. See MilApplicationManager.DetectionEnabled.
 
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };

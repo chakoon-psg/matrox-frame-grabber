@@ -55,10 +55,12 @@ namespace MatroxFrameGrabber.Infrastructure
         FramesMissed = 7,
 
         /// <summary>
-        /// Running, and watching for nothing: every kind with a detector behind it is switched off.
+        /// Running, and judging nothing. Either every kind with a detector behind it is switched
+        /// off, or the channel's detection was switched off outright (<c>--no-detect</c>).
         ///
         /// Not a fault - somebody chose it - but it cannot be reported as Healthy either. A quiet
         /// lane on a channel that is not looking is the exact ambiguity this enum exists to remove.
+        /// The log says which of the two it was; the dot only has to say that it is one of them.
         /// </summary>
         DetectionOff = 8,
     }
@@ -139,7 +141,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 case ChannelHealth.ClipIncomplete: return "사건 클립에 구멍 — 인코더가 프레임을 놓쳤습니다";
                 case ChannelHealth.DetectorBlind: return "검지기 실명 — 판정되지 않은 프레임이 있습니다";
                 case ChannelHealth.FramesMissed: return "프레임 유실 — 그 사이 일은 복구할 수 없습니다";
-                case ChannelHealth.DetectionOff: return "검출 꺼짐 — 아무 종류도 감시하지 않습니다";
+                case ChannelHealth.DetectionOff: return "검출 꺼짐 — 이 채널은 프레임을 판정하지 않습니다";
                 default: return string.Empty;
             }
         }

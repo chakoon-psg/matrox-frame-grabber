@@ -372,15 +372,24 @@ namespace MatroxFrameGrabber.Mil
         /// explicit switch rather than folded away: the acceptance test for this feature is a
         /// comparison of frames missed with measurement on and off.
         /// </summary>
-        public bool BrightnessEnabled { get; set; }
+        public bool BrightnessEnabled { get; set; } = true;
 
         /// <summary>
-        /// Whether this channel reduces frames and judges them. Off by default and switched on for
-        /// the session by MainViewModel, kept as an explicit flag for the same reason
+        /// Whether this channel reduces frames and judges them.
+        ///
+        /// **On by default**, and that is the fix for an initialization order that had teeth: the
+        /// flag used to start false and be switched on by MainViewModel's constructor, so anything
+        /// that reached a grab before that ran would have detected nothing - silently, since a
+        /// channel judging no frames reports the same empty lane as a healthy one. It is set at
+        /// creation now (MilApplicationManager), which is before a channel can grab, and the
+        /// default is the safe value rather than the one that needs rescuing.
+        ///
+        /// Still an explicit flag rather than a read of the command line, for the same reason
         /// <see cref="BrightnessEnabled"/> is: the acceptance test for putting the reduction on the
-        /// acquisition path is a comparison of frames missed with it on and off.
+        /// acquisition path is a comparison of frames missed with it on and off, and that wants a
+        /// switch. <c>--no-detect</c> is what turns it off in practice.
         /// </summary>
-        public bool DetectionEnabled { get; set; }
+        public bool DetectionEnabled { get; set; } = true;
 
         /// <summary>
         /// The numbers this channel judges by, held in the settings file so they survive a restart

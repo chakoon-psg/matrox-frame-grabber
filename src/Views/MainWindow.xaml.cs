@@ -45,7 +45,11 @@ namespace MatroxFrameGrabber.Views
             // display id makes MIL raise an error dialog).
             try
             {
-                _manager = new MilApplicationManager { OwnedChannels = App.OwnedChannels };
+                _manager = new MilApplicationManager
+                {
+                    OwnedChannels = App.OwnedChannels,
+                    DetectionEnabled = !App.DetectionOff,
+                };
                 _manager.Allocate();
 
                 // Surface unexpected recording stops (e.g. ffmpeg died) and camera loss.
@@ -328,7 +332,6 @@ namespace MatroxFrameGrabber.Views
             _pwmOriginalExposureUs = originalExposureUs;
             MilErrorLog.Note($"pwm-sweep: exposure on entry {originalExposureUs} us (restored on exit)");
 
-            channel.BrightnessEnabled = true;
             channel.StartCommand.Execute(null);
 
             var results = new List<PwmPoint>();
