@@ -177,6 +177,13 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         private FrameExtractor _frames;
 
+        // The uncompressed evidence: a few seconds of frames in RAM, and its own scheduler so the
+        // window closes on its own (shorter) timing rather than the clip's.
+        private EvidenceRing _evidence;
+        private ClipScheduler _evidenceClips;
+        private int _evidenceBusy;
+        private long _evidenceWritten;
+
         // When the session recording started, for the record written beside it. The sink knows its
         // own elapsed time but not the wall clock it began at, and a record has to say when.
         private DateTimeOffset _recordingStartedAt;
@@ -1473,6 +1480,7 @@ namespace MatroxFrameGrabber.Mil
             // Before MdigProcess stops: the tier flushes what is pending, and a clip cut here still
             // needs the segments that are about to be swept.
             StopEventTier();
+            StopEvidence();
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
@@ -1585,6 +1593,7 @@ namespace MatroxFrameGrabber.Mil
                     raised = true;
                     RecentAnomalies.Add(found, rejected: false);
                     _clips?.Offer(found);
+                    _evidenceClips?.Offer(found);
                     ExportStills(found);
                     MilErrorLog.Note($"{Name}: anomaly {found}");
                     WriteEventWindow(found);
@@ -1738,12 +1747,20 @@ namespace MatroxFrameGrabber.Mil
                 FrameExtractor frames = _frames;
                 // Nothing is read out while every encoder is behind: the live view comes first,
                 // and each sink counts the frame it did not get.
+                // The ring wants every frame, so it is a reason to read one out even when both
+                // encoders are behind - it is the measurement, and it costs no encoder time.
+                EvidenceRing evidence = _evidence;
                 bool room = (eventsHost?.WantsFrame(frameNumber) ?? false)
-                         || (sessionHost?.WantsFrame(frameNumber) ?? false);
+                         || (sessionHost?.WantsFrame(frameNumber) ?? false)
+                         || evidence != null;
                 byte[] frame = room && frames != null ? frames.Extract(grabbedBuffer) : null;
 
                 eventsHost?.FeedShared(frame, frameNumber);
                 sessionHost?.FeedShared(frame, frameNumber);
+
+                // One memcpy, on the acquisition thread. The bytes are already in the layout the
+                // lossless encoder wants, so this is the whole cost of keeping them.
+                if (frame != null) evidence?.Add(frame, frameNumber, timeStampSec);
 
                 // The caller's own hold, last: each sink added its own before queueing, so the
                 // array cannot go back to the pool while either writer is still reading it.
@@ -2203,6 +2220,101 @@ namespace MatroxFrameGrabber.Mil
         #endregion
 
         /// <summary>
+        /// Allocates the uncompressed evidence ring, if it is switched on.
+        ///
+        /// Alongside the event tier because they answer the same event from two sides - the clip
+        /// is the context and this is the measurement - and because the tier's scheduler is what
+        /// this borrows the shape of. Sized from the measured rate, so an exposure change
+        /// re-sizes it the way it restarts the tier.
+        /// </summary>
+        private void StartEvidenceRing()
+        {
+            _evidence = null;
+            _evidenceClips = null;
+            _evidenceWritten = 0;
+
+            double around = Output?.EvidenceSeconds ?? 0.0;
+            if (around <= 0.0) return;
+
+            double fps = _detectionFps > 1.0 ? _detectionFps : 0.0;
+            if (fps <= 0.0 || !TryGetFrameShape(out int w, out int h, out int bands)) return;
+
+            long frameBytes = (long)w * h * Math.Max(1, bands);
+            // The event cap is part of the window: a fault runs to it, and the window brackets the
+            // fault rather than a point in time.
+            double maxEventSec = DetectionThresholds.MaxEventFrames / Math.Max(1.0, fps);
+            int frames = EvidenceRing.FramesFor(around, fps, maxEventSec);
+            long bytes = (long)frames * frameBytes;
+
+            // Asked for before it is taken. Windows would not fail this allocation, it would page
+            // for it, and paging beside the acquisition is the load measured to cost frames. Each
+            // channel starts after the one before it, so this sees what they already took.
+            long free = HostMemory.AvailableBytes();
+            if (!HostMemory.Fits(bytes, free))
+            {
+                MilErrorLog.Note($"{Name}: uncompressed evidence off - the ring wants "
+                               + $"{bytes / 1e9:F2} GB and only {free / 1e9:F2} GB is free. "
+                               + $"Lower the evidence window or the acquired resolution.");
+                return;
+            }
+
+            try
+            {
+                _evidence = new EvidenceRing(frames, (int)frameBytes);
+                // Its own scheduler: no segment to wait for, so the window closes exactly `around`
+                // seconds after the event rather than after the clip's segment-close delay. That
+                // difference is the whole ring - waiting the clip's 7 s would need one twice as long.
+                _evidenceClips = new ClipScheduler(new AnomalyClipSettings(around, 0.0));
+                MilErrorLog.Note($"{Name}: uncompressed evidence on - +-{around:0.#} s, "
+                               + $"{frames} frames of {frameBytes / 1e6:F2} MB = {bytes / 1e9:F2} GB "
+                               + $"at {fps:F3} fps");
+            }
+            catch (Exception e)
+            {
+                _evidence = null;
+                _evidenceClips = null;
+                MilErrorLog.Write($"{Name}: allocate the {bytes / 1e9:F2} GB evidence ring", e);
+            }
+        }
+
+        /// <summary>
+        /// Finishes the evidence before the grab goes away.
+        ///
+        /// Waits for a dump already running, because the alternative is what the measurement
+        /// showed: the run ended 250 ms into a write and left a 98 MB file with no record beside
+        /// it. Also dumps the window the scheduler is still holding - a fault in the last two
+        /// seconds of a run is the one most likely to be why the run ended.
+        /// </summary>
+        private void StopEvidence()
+        {
+            ClipScheduler due = _evidenceClips;
+            EvidenceRing ring = _evidence;
+
+            if (due != null && ring != null && Interlocked.CompareExchange(ref _evidenceBusy, 0, 0) == 0)
+            {
+                foreach (ClipRequest r in due.Flush())
+                {
+                    BeginEvidenceDump(r);
+                    break;   // one at a time, and the ring only holds one window's worth anyway
+                }
+            }
+
+            // Long enough for a full window: measured 1.4 s for 748 frames of 2.37 MB.
+            var until = DateTime.UtcNow.AddSeconds(20);
+            while (Interlocked.CompareExchange(ref _evidenceBusy, 0, 0) != 0 && DateTime.UtcNow < until)
+                System.Threading.Thread.Sleep(20);
+
+            if (Interlocked.CompareExchange(ref _evidenceBusy, 0, 0) != 0)
+                MilErrorLog.Note($"{Name}: evidence - a dump was still running after 20 s, "
+                               + "the file it was writing is short");
+            else if (_evidenceWritten > 0)
+                MilErrorLog.Note($"{Name}: evidence - {_evidenceWritten} window(s) written this run");
+
+            _evidence = null;
+            _evidenceClips = null;
+        }
+
+        /// <summary>
         /// Writes the kept frames as PNG, if this kind is one that stills say anything about.
         ///
         /// On the stats tick, never in the hook: a PNG write measured 6.4 to 8.0 ms, which is a
@@ -2216,7 +2328,7 @@ namespace MatroxFrameGrabber.Mil
             if (!AnomalyClipPolicy.For(found.Kind).Stills) { stills.ClearEvent(); return; }
 
             string stem = $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{found.Kind}";
-            int written = stills.ExportAll(Output.EnsureFolder(), stem, out string err);
+            int written = stills.ExportAll(Output.EnsureEventFolder(), stem, out string err);
             MilErrorLog.Note(written > 0
                 ? $"{Name}: {written} still(s) written for {found.Kind} at frame {found.StartFrame}, "
                   + $"{stills.MaxExportMs:F1} ms worst"
@@ -2279,6 +2391,7 @@ namespace MatroxFrameGrabber.Mil
                                         encoding: VideoEncoding.H264),
                 });
 
+            StartEvidenceRing();
             sink.SharedFrames = EnsureFrames();
             if (!sink.Start(spec, out string err))
             {
@@ -2311,7 +2424,7 @@ namespace MatroxFrameGrabber.Mil
         {
             SegmentRing ring = _segments;
             ClipScheduler clips = _clips;
-            if (ring == null || clips == null) return;
+            if (ring == null || clips == null) { ServiceEvidence(LastBoardTimeSec); return; }
 
             ring.Poll();
 
@@ -2321,6 +2434,8 @@ namespace MatroxFrameGrabber.Mil
                 if (clips.TryTakeDue(now, out ClipRequest request))
                     BeginExtract(request);
             }
+
+            ServiceEvidence(now);
 
             // Reserved from the oldest thing still wanted: the pending queue, and the cut in
             // flight. ffmpeg cannot seek a concat input and reads from the first file's start, so
@@ -2336,6 +2451,170 @@ namespace MatroxFrameGrabber.Mil
         /// copy, but the stats tick must not wait for a process. One at a time per channel, and the
         /// window stays reserved in the ring until it finishes.
         /// </summary>
+        /// <summary>
+        /// Writes the uncompressed window when it closes. On the stats tick, like the clip.
+        ///
+        /// Its own scheduler rather than the clip's, because the timing is what sizes the ring:
+        /// the clip waits for a segment to close, and waiting that long here would need a ring
+        /// twice as big for the same window.
+        /// </summary>
+        private void ServiceEvidence(double nowBoardSec)
+        {
+            ClipScheduler due = _evidenceClips;
+            if (due == null || nowBoardSec <= 0.0) return;
+            if (Interlocked.CompareExchange(ref _evidenceBusy, 0, 0) != 0) return;
+            if (!due.TryTakeDue(nowBoardSec, out ClipRequest request)) return;
+
+            BeginEvidenceDump(request);
+        }
+
+        /// <summary>
+        /// Pipes the window's frames to a lossless encoder, on a worker thread.
+        ///
+        /// Ut Video rather than raw: the pixels are identical - verified by frame hashes through a
+        /// round trip - and it is 3.2 to 4.2 times smaller and no slower. Nothing is copied out of
+        /// the ring first; each frame is written straight from its slot and checked afterwards,
+        /// because copying 1.7 GB out would put 0.85 GB/s beside the acquisition and that is the
+        /// load measured to cost frames.
+        /// </summary>
+        private void BeginEvidenceDump(ClipRequest request)
+        {
+            EvidenceRing ring = _evidence;
+            if (ring == null) return;
+            if (Interlocked.Exchange(ref _evidenceBusy, 1) != 0) return;
+
+            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath);
+            double fps = _detectionFps;
+            if (string.IsNullOrEmpty(ffmpeg) || fps <= 1.0
+                || !TryGetFrameShape(out int w, out int h, out int bands))
+            {
+                Interlocked.Exchange(ref _evidenceBusy, 0);
+                return;
+            }
+
+            // Clamped to what the ring can serve and still be written. The scheduler merges,
+            // so a run of faults can ask for a window several times the ring - measured, 22 merged
+            // occurrences wanted 18.8 s. The recent end is kept: it is nearest the fault that
+            // closed the window.
+            double from = request.FromSec;
+            double usable = ring.UsableSpanSec(fps);
+            if (usable > 0.0 && request.ToSec - from > usable)
+            {
+                from = request.ToSec - usable;
+                MilErrorLog.Note($"{Name}: evidence - window {request.ToSec - request.FromSec:F2} s "
+                               + $"is wider than the ring can write, keeping the last {usable:F2} s");
+            }
+
+            if (!ring.TryWindow(from, request.ToSec,
+                                out long firstFrame, out long lastFrame, out int held))
+            {
+                MilErrorLog.Note($"{Name}: evidence - the ring no longer holds "
+                               + $"{from:F3}-{request.ToSec:F3} s, nothing written");
+                Interlocked.Exchange(ref _evidenceBusy, 0);
+                return;
+            }
+
+            string path = System.IO.Path.Combine(
+                Output.EnsureEventFolder(),
+                $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{request.Kind}_evidence.mkv");
+            var started = DateTimeOffset.Now;
+
+            Task.Run(() =>
+            {
+                var recorder = new FfmpegRecorder();
+                int written = 0, lost = 0;
+                double firstTime = 0.0, lastTime = 0.0;
+                try
+                {
+                    string args = FfmpegArgs.Build(w, h, bands, fps, new[]
+                    {
+                        new FfmpegOutput(path, fps, encoding: VideoEncoding.Lossless),
+                    });
+                    if (!recorder.Start(ffmpeg, args, out string err))
+                    {
+                        MilErrorLog.Note($"{Name}: evidence - encoder did not start: {err}");
+                        return;
+                    }
+
+                    for (long n = firstFrame; n <= lastFrame; n++)
+                    {
+                        byte[] slot = ring.Peek(n, out double t);
+                        if (slot == null) { lost++; continue; }   // the ring overtook the writer
+
+                        // Synchronous, not queued. The array belongs to the ring and the ring keeps
+                        // filling: queued, the write happens up to eight frames later and the check
+                        // below would be asking about bytes that had already been handed over.
+                        if (!recorder.WriteFrameNow(slot, ring.BytesPerFrame))
+                        {
+                            MilErrorLog.Note($"{Name}: evidence - the pipe closed at frame {n}");
+                            break;
+                        }
+
+                        if (!ring.StillHolds(n)) { lost++; continue; }
+                        if (written == 0) firstTime = t;
+                        lastTime = t;
+                        written++;
+                    }
+                }
+                catch (Exception e)
+                {
+                    MilErrorLog.Write($"{Name}: write the evidence window", e);
+                }
+                finally
+                {
+                    try { recorder.Stop(); } catch { }
+                    Interlocked.Exchange(ref _evidenceBusy, 0);
+                }
+
+                long bytes = System.IO.File.Exists(path) ? new System.IO.FileInfo(path).Length : 0;
+                _evidenceWritten++;
+                MilErrorLog.Note($"{Name}: evidence written - {request.Kind} "
+                               + $"{firstFrame}-{lastFrame}, {written} frame(s) of {held} held"
+                               + (lost > 0 ? $", {lost} LOST to the ring" : string.Empty)
+                               + $", {bytes / 1e6:F0} MB lossless -> "
+                               + System.IO.Path.GetFileName(path));
+
+                WriteEvidenceRecord(path, request, started, firstTime, lastTime,
+                                    written, lost, fps);
+            });
+        }
+
+        /// <summary>The record beside the evidence, in the same shape a recording gets.</summary>
+        private void WriteEvidenceRecord(string path, ClipRequest request, DateTimeOffset started,
+                                         double firstTime, double lastTime, int written, int lost,
+                                         double fps)
+        {
+            try
+            {
+                var rec = new RecordingRecord
+                {
+                    Camera = SafeName(),
+                    Started = started,
+                    Stopped = DateTimeOffset.Now,
+                    BoardFirstSec = firstTime,
+                    BoardLastSec = lastTime,
+                    AcquiredFrames = written + lost,
+                    FramesWritten = written,
+                    SourceDeclaredFps = fps,
+                    FileDeclaredFps = fps,
+                    EveryNthFrame = 1,
+                    // A frame the ring overtook is missing from the file, so it belongs in the
+                    // same column as anything else that went missing.
+                    FramesDropped = lost,
+                    Encoding = VideoEncoding.Lossless.ToString(),
+                    Container = "Matroska",
+                    SegmentSeconds = 0.0,
+                    Files = path,
+                };
+                System.IO.File.WriteAllText(
+                    System.IO.Path.ChangeExtension(path, ".json"), rec.ToJson());
+            }
+            catch (Exception e)
+            {
+                MilErrorLog.Write($"{Name}: write the evidence record", e);
+            }
+        }
+
         private void BeginExtract(ClipRequest request)
         {
             if (Interlocked.Exchange(ref _clipBusy, 1) != 0) return;
@@ -2358,7 +2637,7 @@ namespace MatroxFrameGrabber.Mil
 
             _extractingFromSec = request.FromSec;
             string path = System.IO.Path.Combine(
-                Output.EnsureFolder(),
+                Output.EnsureEventFolder(),
                 $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{request.Kind}.mp4");
 
             Task.Run(() =>

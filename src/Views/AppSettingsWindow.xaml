@@ -199,6 +199,24 @@
                     <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Uncompressed" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.EvidenceSeconds, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="사건 전후로 무압축(무손실)으로 남길 초. 0 = 끔&#x0a;RAM에 담습니다 — 링은 창(전후 + 사건 최대 길이)보다 길어야 하고, ±2초가 카메라당 2.7 GB입니다&#x0a;실측 사건 길이가 0.87~2.0초라 ±2초면 충분히 감쌉니다" />
+                    <TextBlock Text="s either side  ·  0 = off"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="{Binding EvidenceCostText}" Margin="0,0,0,6"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
                 <Label Grid.Column="0" Content="Stills" />
                 <CheckBox Grid.Column="1" VerticalAlignment="Center"
                           Content="4 lossless PNG per anomaly"

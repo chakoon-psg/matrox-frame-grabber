@@ -66,7 +66,7 @@ src/
                                  FfmpegVideoSink, MilSeqVideoSink
   Mil/Stills/                    StillRing (무손실 PNG. MbufExport는 압축 라이선스가 필요 없다)
   Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
-                                 OutputSettings, RelayCommand, NativeMethods,
+                                 OutputSettings, RelayCommand, NativeMethods, HostMemory,
                                  BrightnessHistory, ChannelRoi, RoiGesture,
                                  DisplayMapping, BrightnessSamplePlan, PwmSweep,
                                  TileGrid, TileBounds, TileHistory, FrameMetrics,
@@ -78,8 +78,9 @@ src/
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
                                  VideoEncoding(+VideoCodecs+VideoContainer),
                                  VideoSinkPolicy, RecordingRecord, SharedFramePool,
-                                 StoragePolicy(+StorageWarden), SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (425개). csproj가 `Infrastructure/**`를
+                                 StoragePolicy(+StorageWarden), EvidenceRing,
+                                 SegmentRing, ClipExtractor
+tests/                         MatroxFrameGrabber.Tests (445개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -187,7 +188,7 @@ research.md                    src/ 심층 분석
 `MilSeqVideoSink`는 **이 장비에서 한 번도 실행된 적 없는 골격**이다. `tools/MilVideoSink/`가
 그것을 개발·계측할 독립 하네스이며 납품사에 넘기는 슬라이스다.
 
-## 사건 증거 (±5초 클립 + 무손실 정지화면)
+## 사건 증거 (±5초 클립 + 무손실 정지화면 + 무압축 RAM 링)
 
 grab이 도는 동안 **사건 tier**가 2초 세그먼트를 링으로 쓴다(`SegmentRing`, 로컬 폴더).
 상태이상이 확정되면 `ClipScheduler`가 창(전후 N초)과 due 시각을 잡고, due가 지나면
@@ -203,7 +204,39 @@ CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면
 때문에 링이 곧 클립의 인코딩이고, 링은 그랩이 도는 동안 계속 쓰인다 — 무손실 링은 채널당
 295 MB/s(3채널 884 MB/s = **하루 76 TB**, 1 TB TLC SSD 총 수명이 약 750 TB)다. 그래서 **클립은
 문맥, 정지화면은 측정**으로 역할을 갈랐고, 설정 창도 그렇게 두 섹션으로 말한다. 무압축 사건
-증거가 필요하면 그것은 링이 아니라 **RAM 링(짧은 창)** 이어야 한다 — 아직 없다.
+증거가 필요하면 그것은 링이 아니라 **RAM 링(짧은 창)** 이어야 한다 — 그것이 아래
+`EvidenceRing`이다.
+
+**무압축 증거 링(`EvidenceRing`, 요구 2).** `EvidenceSeconds > 0`이면 그랩과 함께 호스트 RAM에
+프레임 링을 잡고, 사건이 확정되면 그 창만 Ut Video 무손실로 `events/`에 쓴다. 세 가지가 이 설계를
+결정했다.
+
+- **링은 창보다 길어야 한다.** 창은 사건이 끝난 뒤 N초에 닫히고, 사건 자체는 이벤트 상한까지
+  이어지므로 한 사건의 창은 `2N + 상한`이다. 그리고 쓰기가 시작될 때 창의 머리는 이미 링에서
+  가장 오래된 프레임이라, 쓰는 동안 덮이지 않을 여유가 더 필요하다(`UsableFraction = 0.66`).
+  ±2초 · 124.316 fps에서 1133 프레임 = **카메라당 2.69 GB**(3채널 8.06 GB). 처음에 상한 항과
+  여유를 빼먹었더니 8건 중 2건이 `1 LOST to the ring`을 찍었다 — 그게 이 산술의 출처다.
+- **스케줄러가 사건을 병합하므로 요청 창이 링보다 넓어질 수 있다**(실측 22건 병합 = 18.8초).
+  그래서 덤프는 `UsableSpanSec`으로 잘라 **최근 쪽**(창을 닫은 사건에 가까운 쪽)을 남기고, 잘랐다는
+  사실을 로그에 남긴다.
+- **링의 배열을 큐에 넣으면 안 된다.** `WriteFrame`은 큐에 넣고 바로 돌아오고 실제 파이프 쓰기는
+  최대 8프레임 뒤다 — 그 사이에 링이 그 슬롯을 덮는다. 그래서 덤프는 `WriteFrameNow`로 동기
+  기록하고 곧바로 `StillHolds`로 확인한다. 큐 경로는 덤으로 **받은 것보다 3프레임 적게** 파일에
+  넣었다(2026-09-11 실측). 동기로 바꾼 뒤 10개 파일 전부 `packets == frames_written`.
+
+검증(2026-09-11, ch0 45초 · 강제 사건 78건): 창 10개, 유실 0, `missed` 0, 그리고 **증거 파일에서
+디코드한 프레임 5000이 같은 프레임의 무손실 PNG와 바이트 단위로 동일**했다(MIL 버퍼 → `MbufExport`
+경로와 RAM 링 → ffmpeg 경로가 서로 독립인데도). 링이 온전하고, 파일의 프레임 번호가 검출기의 것과
+같으며, Ut Video가 이 경로에서 무손실이라는 것을 한 번에 보인 검증이다.
+
+**그랩을 멈출 때 `StopEvidence()`가 진행 중인 덤프를 기다린다.** 안 기다렸을 때 98 MB짜리 잘린
+파일이 사이드카 없이 남았다. 남아 있는 창도 여기서 한 번 더 내보낸다 — 실행이 끝나기 직전의 사건이
+바로 그 실행이 끝난 이유일 가능성이 높다.
+
+**RAM은 미리 물어본다(`HostMemory.Fits`).** Windows는 이 크기의 할당을 거절하지 않고 페이징으로
+받아 주는데, 취득 옆의 페이징이 곧 프레임 유실이다. 여유의 60%를 넘으면 링 없이 시작하고 그렇게
+로그에 적는다. ±5초로 올리면 카메라당 5.36 GB라 32 GB 머신에서 3채널은 들어가지 않는다 — 설정 창이
+그 숫자를 그대로 보여 주는 이유다.
 
 실측 한계 둘: 인코더가 3채널 **124.3·132.6 fps에서는 유실 0, 247 fps에서는 세그먼트 목록이 15초
 뒤처졌다.** 그리고 클립이 뒤쪽에서 약 2% 짧게 나온 사례가 있고 원인은 규명되지 않았다.

@@ -206,6 +206,32 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
+        /// <summary>
+        /// Writes one frame straight down the pipe, blocking until ffmpeg has taken it.
+        ///
+        /// The queued path is for the acquisition thread, which must never block. This one is for
+        /// the evidence dump, which hands over the ring's own array: queued, the call returns as
+        /// soon as the frame is enqueued, and up to eight frames later the ring can overwrite the
+        /// slot the writer thread is still reading out of. Synchronous is what makes
+        /// <c>EvidenceRing.StillHolds</c> mean anything - by the time it is asked, the bytes have
+        /// already gone. It also has no queue left to lose at <see cref="Stop"/>: measured
+        /// 2026-09-11, the queued path finished three frames short of what it was given.
+        ///
+        /// One caller at a time, and never mixed with <see cref="WriteFrame"/> on the same
+        /// recorder - they would interleave halfway through a frame.
+        /// </summary>
+        public bool WriteFrameNow(byte[] frame, int count = 0)
+        {
+            if (!_running || _stdin == null || frame == null) return false;
+            int n = count > 0 && count <= frame.Length ? count : frame.Length;
+            try { _stdin.Write(frame, 0, n); return true; }
+            catch
+            {
+                if (_running) { _running = false; LastError ??= "ffmpeg pipe write failed."; Failed?.Invoke(); }
+                return false;
+            }
+        }
+
         private void WriterLoop()
         {
             try
