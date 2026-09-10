@@ -46,6 +46,7 @@ namespace MatroxFrameGrabber.Mil.Video
         private long _droppedAtStop;               // survives Stop(), which nulls the recorder
         private double _declaredFps, _elapsedAtStop, _feedUsSum, _maxFeedUs;
         private string[] _paths = Array.Empty<string>();
+        private double[] _rates = Array.Empty<double>();
 
         public FfmpegVideoSink(MIL_ID sysId, string ffmpegPath)
         {
@@ -58,6 +59,7 @@ namespace MatroxFrameGrabber.Mil.Video
         public bool Failed => _failed;
         public string LastError { get; private set; }
         public IReadOnlyList<string> FilePaths => _paths;
+        public IReadOnlyList<double> FileRates => _rates;
 
         public VideoSinkStats Stats => new VideoSinkStats(
             _fed, _skipped, _recorder?.DroppedFrames ?? _droppedAtStop, _declaredFps,
@@ -113,6 +115,7 @@ namespace MatroxFrameGrabber.Mil.Video
                 string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 var outputs = new List<FfmpegOutput>(spec.Outputs.Length);
                 var paths = new List<string>(spec.Outputs.Length);
+                var rates = new List<double>(spec.Outputs.Length);
                 foreach (VideoOutputSpec o in spec.Outputs)
                 {
                     double fileFps = VideoRatePolicy.FileFps(spec.SourceFps, o.EveryNthFrame);
@@ -127,6 +130,7 @@ namespace MatroxFrameGrabber.Mil.Video
                         VideoRatePolicy.KeyframeInterval(fileFps, o.KeyframeSeconds),
                         o.SegmentSeconds, list));
                     paths.Add(path);
+                    rates.Add(fileFps);
                 }
 
                 // Planar capture buffer. Color frames are read out one band at a time (MbufGet on a
@@ -160,6 +164,7 @@ namespace MatroxFrameGrabber.Mil.Video
                 lock (_lock)
                 {
                     _paths = paths.ToArray();
+                    _rates = rates.ToArray();
                     _captureBuf = captureBuf;
                     _resizeBuf = resizeBuf;
                     _b0 = b0; _b1 = b1; _b2 = b2;

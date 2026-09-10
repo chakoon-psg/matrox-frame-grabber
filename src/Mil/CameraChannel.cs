@@ -1876,10 +1876,13 @@ namespace MatroxFrameGrabber.Mil
             double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
                        ? resulting
                        : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
+            // The wanted rate becomes a divisor of what the camera delivers, so the file
+            // declares 31.079 rather than the 30 that was asked for - see VideoRatePolicy.
+            int everyNth = VideoRatePolicy.EveryNthFor(fps, Output?.RecordingRateFps ?? 0);
             var spec = new VideoStreamSpec(
                 _dispBufId, fps, Output.EnsureFolder(), SafeName(),
                 Output.ScaleFactorFor(MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL)),
-                new[] { VideoOutputSpec.SingleFile() });
+                new[] { new VideoOutputSpec(string.Empty, everyNth) });
             bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -2360,10 +2363,20 @@ namespace MatroxFrameGrabber.Mil
             VideoSinkStats rec = _recording?.Stats ?? default;
             if (rec.FramesFed > 0 || rec.FramesSkipped > 0)
             {
+                // Both rates named: the pipe carries every frame while a file may declare a
+                // quarter of that, and the two silently disagreeing is what this line is for.
+                var fileRates = new System.Text.StringBuilder();
+                foreach (double r in _recording.FileRates)
+                {
+                    if (fileRates.Length > 0) fileRates.Append(", ");
+                    fileRates.Append(r.ToString("0.###", CultureInfo.InvariantCulture));
+                }
+
                 MilErrorLog.Note($"{Name}: recording ({_recording.Name}) - {rec.FramesFed} fed, "
                                + $"{rec.FramesSkipped} skipped (encoder full), {rec.FramesDropped} dropped, "
-                               + $"{rec.WrittenFps:F1} fps written vs {rec.DeclaredFps:F2} fps declared "
-                               + $"over {rec.ElapsedSeconds:F1} s, "
+                               + $"fed at {rec.WrittenFps:F1}/s over {rec.ElapsedSeconds:F1} s "
+                               + $"(source {rec.DeclaredFps:F2} fps), "
+                               + $"file declares {fileRates} fps, "
                                + $"extract mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period");
             }

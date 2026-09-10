@@ -38,6 +38,15 @@ namespace MatroxFrameGrabber.Mil.Video
         /// <summary>The files being written, in the order of the spec's outputs.</summary>
         IReadOnlyList<string> FilePaths { get; }
 
+        /// <summary>
+        /// The rate each of those files declares, in the same order.
+        ///
+        /// Not the same as the rate frames arrive at: an output taking every fourth frame of
+        /// 124.316 fps declares 31.079. Reported so a summary can name both, since the two
+        /// disagreeing without anybody noticing is what made a 120 s recording read as 81 s.
+        /// </summary>
+        IReadOnlyList<double> FileRates { get; }
+
         /// <summary>What it did and what it lost.</summary>
         VideoSinkStats Stats { get; }
 

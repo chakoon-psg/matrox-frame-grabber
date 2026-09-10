@@ -34,6 +34,7 @@ namespace MatroxFrameGrabber.Infrastructure
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
+        private int _recordingRateFps = DefaultRecordingRateFps;   // 0 = every frame
 
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
@@ -149,6 +150,34 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>
+        /// Frames per second to record at. 0 records every frame, which is what this app did before
+        /// the setting existed.
+        ///
+        /// A wanted rate, not the rate written: it becomes a divisor, and a quarter of 124.316 fps
+        /// is 31.079. Declaring the 30 that was asked for would make the file 3.6% slow - the same
+        /// class of error as taking the camera's requested rate instead of its deliverable one,
+        /// which once made a 120 s recording read as 81 s.
+        ///
+        /// Clamped to 0 or 5..1000: a rate of one or two frames a second is not a recording of a
+        /// screen fault, and a typo must not produce one.
+        /// </summary>
+        /// <summary>
+        /// The rate a fresh install records at. Thirty because that is the requirement - the
+        /// full-rate tier is for the event clips, which are cut from their own files.
+        /// </summary>
+        public const int DefaultRecordingRateFps = 30;
+
+        public int RecordingRateFps
+        {
+            get => _recordingRateFps;
+            set
+            {
+                int v = value <= 0 ? 0 : (value < 5 ? 5 : (value > 1000 ? 1000 : value));
+                if (_recordingRateFps != v) { _recordingRateFps = v; RaiseChanged(nameof(RecordingRateFps)); Save(); }
+            }
+        }
+
+        /// <summary>
         /// Which backend records. Auto uses MIL when it is known to work here and ffmpeg otherwise;
         /// an explicit choice is honoured with no fallback, which is what makes a delivered MIL sink
         /// testable - see VideoSinkPolicy.
@@ -202,6 +231,9 @@ namespace MatroxFrameGrabber.Infrastructure
             // A name, not the enum's number: an unrecognised string falls back to Auto, where an
             // out-of-range index would select a backend nobody asked for.
             public string VideoSink { get; set; }
+            // Nullable so an absent key means "never chosen" and takes the default, where a
+            // plain int would read as 0 and silently mean "every frame".
+            public int? RecordingRateFps { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -244,6 +276,10 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
+                        int wanted = dto.RecordingRateFps ?? DefaultRecordingRateFps;
+                        s._recordingRateFps = wanted <= 0
+                            ? 0
+                            : (wanted < 5 ? 5 : (wanted > 1000 ? 1000 : wanted));
                         s._videoSink =
                             Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
                                 ? pref : VideoSinkPreference.Auto;
@@ -347,6 +383,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
+                    RecordingRateFps = _recordingRateFps,
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelDetection = _channelDetection
                 };

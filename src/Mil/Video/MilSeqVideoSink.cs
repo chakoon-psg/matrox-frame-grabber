@@ -119,6 +119,7 @@ namespace MatroxFrameGrabber.Mil.Video
         public bool Failed => false;
         public string LastError { get; private set; }
         public IReadOnlyList<string> FilePaths => _paths;
+        public IReadOnlyList<double> FileRates => Array.Empty<double>();
         public VideoSinkStats Stats => default;
 
         /// <summary>
