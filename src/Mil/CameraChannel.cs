@@ -835,7 +835,7 @@ namespace MatroxFrameGrabber.Mil
             MIL.MgraAlloc(_sysId, ref _graId);
             // Which backend is decided here, once, and reported. Nothing downstream knows or
             // cares which one it got.
-            _recording = VideoSinkFactory.Create(_sysId, Output, VideoSinkPreference.Auto,
+            _recording = VideoSinkFactory.Create(_sysId, Output, Output?.VideoSink ?? VideoSinkPreference.Auto,
                                                  out string backend);
             _ffmpegSink = _recording as FfmpegVideoSink;
             RecordBackend = backend;
@@ -902,10 +902,14 @@ namespace MatroxFrameGrabber.Mil
 
                     // Enable Rec only if something can encode, and keep the reason: a greyed-out
                     // button with nothing to read was the old behaviour.
-                    CanRecord = VideoSinkFactory.CanRecord(Output, VideoSinkPreference.Auto,
+                    CanRecord = VideoSinkFactory.CanRecord(Output,
+                                                           Output?.VideoSink ?? VideoSinkPreference.Auto,
                                                            out string why);
                     RecordBackend = why;
                     RaisePropertyChanged(nameof(RecordBackend));
+                    // Written down because the alternative is a greyed-out Rec button and a guess.
+                    MilErrorLog.Note($"{Name}: recording {(CanRecord ? "via " : "unavailable - ")}{why}"
+                                   + $" (preference {Output?.VideoSink ?? VideoSinkPreference.Auto})");
                     RaisePropertyChanged(nameof(CanRecord));
 
                     // Decimation before AllocateBuffers: the buffer sizes come from

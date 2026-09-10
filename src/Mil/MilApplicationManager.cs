@@ -146,16 +146,17 @@ namespace MatroxFrameGrabber.Mil
         /// each start costs two inquiries and keeps the premise checkable.
         /// </summary>
         /// <summary>
-        /// Whether MIL can encode video on this installation, decided once at startup.
+        /// Whether MIL accepts a compression context on this installation, asked once at startup.
         ///
-        /// The recording path needs a yes or no, not a diagnosis: with a yes it can offer the MIL
-        /// sink, with a no it falls through to ffmpeg, and either way the log says which and why so
-        /// a disabled button is never unexplained. Why the answer is what it is belongs to whoever
-        /// supplies the board - see docs/adr/0001-ffmpeg-for-all-encoding.md.
+        /// One of the two facts behind MilReadiness, and not the same as whether a MIL sink exists:
+        /// a sink written for this machine has to be runnable here even while the licence refuses,
+        /// or it can never be tested. Why the answer is what it is belongs to whoever supplies the
+        /// board - see docs/adr/0001-ffmpeg-for-all-encoding.md.
         /// </summary>
-        public static bool MilVideoAvailable { get; private set; }
+        public static bool MilContextAvailable { get; private set; }
 
-        private static string _milVideoReason = "not probed";
+        /// <summary>MIL's own reason when a context is refused, for the settings window to show.</summary>
+        public static string MilContextReason { get; private set; } = "not probed";
 
         private void ProbeVideoSinks()
         {
@@ -165,27 +166,14 @@ namespace MatroxFrameGrabber.Mil
                     ? MIL.MsysInquire(_sysId, MIL.M_BOARD_TYPE, MIL.M_NULL)
                     : 0;
 
-                MIL_ID seq = MIL.M_NULL;
-                try
-                {
-                    MIL.MseqAlloc(MIL.M_DEFAULT, MIL.M_DEFAULT, MIL.M_SEQ_COMPRESS,
-                                  unchecked((uint)MIL.M_DEFAULT), MIL.M_DEFAULT, ref seq);
-                    MilVideoAvailable = seq != MIL.M_NULL;
-                    // MseqAlloc returns M_NULL rather than throwing, and errors are print-disabled
-                    // process-wide, so the reason has to be read out deliberately or it is lost.
-                    _milVideoReason = MilVideoAvailable ? "ok" : CurrentMilError();
-                }
-                catch (MILException e)
-                {
-                    MilVideoAvailable = false;
-                    _milVideoReason = e.Message.Trim();
-                }
-                finally
-                {
-                    try { if (seq != MIL.M_NULL) MIL.MseqFree(seq); } catch { }
-                }
+                // Asked of the sink rather than here: the allocation it probes with is the one it
+                // would use, so the two cannot drift apart as the implementation changes.
+                MilContextAvailable = Video.MilSeqVideoSink.Probe(out string reason);
+                MilContextReason = reason;
 
-                MilErrorLog.Note($"board type 0x{(long)boardType:x}; MIL video sink {(MilVideoAvailable ? "available" : "unavailable - " + _milVideoReason)}");
+                MilErrorLog.Note($"board type 0x{(long)boardType:x}; "
+                               + $"MIL compression context {(MilContextAvailable ? "available" : "refused - " + reason)}; "
+                               + $"MIL sink {(Video.MilSeqVideoSink.Implemented ? "implemented" : "not implemented")}");
             }
             catch (MILException e)
             {

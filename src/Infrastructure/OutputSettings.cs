@@ -33,6 +33,7 @@ namespace MatroxFrameGrabber.Infrastructure
 
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
+        private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
 
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
@@ -145,6 +146,17 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
+        /// <summary>
+        /// Which backend records. Auto uses MIL when it is known to work here and ffmpeg otherwise;
+        /// an explicit choice is honoured with no fallback, which is what makes a delivered MIL sink
+        /// testable - see VideoSinkPolicy.
+        /// </summary>
+        public VideoSinkPreference VideoSink
+        {
+            get => _videoSink;
+            set { if (_videoSink != value) { _videoSink = value; RaiseChanged(nameof(VideoSink)); Save(); } }
+        }
+
         /// <summary>Target height in pixels for the preset (0 = keep original).</summary>
         [JsonIgnore]
         public int TargetHeight => _resolution switch
@@ -184,6 +196,10 @@ namespace MatroxFrameGrabber.Infrastructure
             public string FfmpegPath { get; set; }
             public RoiDto[] ChannelRois { get; set; }
             public int DisplayUpdateFps { get; set; } = 30;
+
+            // A name, not the enum's number: an unrecognised string falls back to Auto, where an
+            // out-of-range index would select a backend nobody asked for.
+            public string VideoSink { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -218,6 +234,9 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
+                        s._videoSink =
+                            Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
+                                ? pref : VideoSinkPreference.Auto;
                         s._displayUpdateFps = dto.DisplayUpdateFps <= 0
                             ? 0
                             : (dto.DisplayUpdateFps < 5 ? 5 : (dto.DisplayUpdateFps > 120 ? 120 : dto.DisplayUpdateFps));
@@ -289,6 +308,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     FfmpegPath = _ffmpegPath,
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
+                    VideoSink = _videoSink.ToString(),
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelThresholds = _channelThresholds
                 };
