@@ -11,9 +11,10 @@ namespace MatroxFrameGrabber.Tests
     public class ChannelHealthTests
     {
         static ChannelHealth H(bool present = true, bool grabbing = true, long missed = 0,
-                               long reductions = 1000, long grids = 1000, bool calibrated = true,
+                               long reductions = 1000, long grids = 1000, long clipSkipped = 0,
+                               bool calibrated = true,
                                double luma = 65.0, double clip = 0.0, double black = 0.0)
-            => ChannelHealthRule.Evaluate(present, grabbing, missed, reductions, grids,
+            => ChannelHealthRule.Evaluate(present, grabbing, missed, reductions, grids, clipSkipped,
                                           calibrated, luma, clip, black);
 
         [Fact]
@@ -110,6 +111,35 @@ namespace MatroxFrameGrabber.Tests
         public void Out_of_band_optics_outrank_an_unmeasured_threshold()
         {
             Assert.Equal(ChannelHealth.OpticsOutOfBand, H(calibrated: false, clip: 2.0));
+        }
+
+        // ----- a clip with holes in it -----
+
+        /// <summary>
+        /// The encoder falling behind means the segments an anomaly clip is cut from are missing
+        /// frames, and the clip that results is a file that plays and says nothing about it.
+        /// </summary>
+        [Fact]
+        public void An_event_tier_that_skipped_a_frame_is_a_fault()
+        {
+            Assert.Equal(ChannelHealth.ClipIncomplete, H(clipSkipped: 1));
+            Assert.True(ChannelHealthRule.IsFault(ChannelHealth.ClipIncomplete));
+        }
+
+        /// <summary>
+        /// Ranked above the optics because it is silent: luma and clipping are on screen already.
+        /// </summary>
+        [Fact]
+        public void A_gappy_clip_outranks_a_clipped_picture()
+        {
+            Assert.Equal(ChannelHealth.ClipIncomplete, H(clipSkipped: 1, clip: 50.0));
+        }
+
+        /// <summary>But a lost acquisition frame still outranks it: nothing saw those at all.</summary>
+        [Fact]
+        public void A_lost_acquisition_frame_outranks_a_gappy_clip()
+        {
+            Assert.Equal(ChannelHealth.FramesMissed, H(missed: 1, clipSkipped: 99));
         }
 
         [Fact]

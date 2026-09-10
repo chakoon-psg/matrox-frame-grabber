@@ -62,14 +62,19 @@ src/
     Video/                     MatroxFrameGrabber.Mil.Video
                                  IVideoSink, VideoStreamSpec, VideoSinkStats,
                                  VideoSinkFactory, FfmpegVideoSink, MilSeqVideoSink
+  Mil/Stills/                    StillRing (무손실 PNG. MbufExport는 압축 라이선스가 필요 없다)
   Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
                                  OutputSettings, RelayCommand, NativeMethods,
                                  BrightnessHistory, ChannelRoi, RoiGesture,
                                  DisplayMapping, BrightnessSamplePlan, PwmSweep,
                                  TileGrid, TileBounds, TileHistory, FrameMetrics,
                                  AnomalyDetector, BrightnessLog, MilErrorLog
-    Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy
-tests/                         MatroxFrameGrabber.Tests (263개). csproj가 `Infrastructure/**`를
+    Detection/                   AnomalyKind(+Catalog), DetectionSettings(+KindSettings),
+                                 AnomalyClipPolicy(+ClipScheduler)
+    Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
+    Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
+                                 VideoSinkPolicy, SegmentRing, ClipExtractor
+tests/                         MatroxFrameGrabber.Tests (359개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -102,6 +107,21 @@ research.md                    src/ 심층 분석
 
 `MilSeqVideoSink`는 **이 장비에서 한 번도 실행된 적 없는 골격**이다. `tools/MilVideoSink/`가
 그것을 개발·계측할 독립 하네스이며 납품사에 넘기는 슬라이스다.
+
+## 사건 증거 (±5초 클립 + 무손실 정지화면)
+
+grab이 도는 동안 **사건 tier**가 2초 세그먼트를 링으로 쓴다(`SegmentRing`, 로컬 폴더).
+상태이상이 확정되면 `ClipScheduler`가 창(전후 N초)과 due 시각을 잡고, due가 지나면
+`FfmpegClipExtractor`가 `-c copy`로 잘라낸다. **Rec이 아니라 grab과 함께 도는 이유**는 녹화를
+누르지 않은 동안 난 사건은 잘라낼 파일이 없기 때문이고, 세션 파일과 수명이 달라 프로세스 하나에
+출력 둘로는 안 된다 — 싱크 둘이 각자 MIL 버퍼에서 추출한다(각 약 400 µs).
+
+`StillRing`은 검출기의 프레임별 판정(`EnteredThisFrame` / `DeepenedThisFrame` /
+`RecoveredThisFrame`)에 따라 네 프레임을 MIL 버퍼에 보관하고, 틱에서 PNG로 쓴다. **클립은 x264
+CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면은 된다** — 그게 둘 다 있는 이유다.
+
+실측 한계 둘: 인코더가 3채널 **124.3·132.6 fps에서는 유실 0, 247 fps에서는 세그먼트 목록이 15초
+뒤처졌다.** 그리고 클립이 뒤쪽에서 약 2% 짧게 나온 사례가 있고 원인은 규명되지 않았다.
 
 무손실 RAW-Bayer 녹화(`◆ RAW`)가 있었고 제거했다. `M_BAYER_CONVERSION`을 끄는 유일한
 코드였는데, **그 설정은 보드에 남으므로 복원 규율은 그대로 필요하다** — 아래 함정 참고.

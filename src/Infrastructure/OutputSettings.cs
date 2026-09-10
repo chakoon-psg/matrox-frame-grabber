@@ -37,6 +37,7 @@ namespace MatroxFrameGrabber.Infrastructure
         private int _recordingRateFps = DefaultRecordingRateFps;   // 0 = every frame
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
+        private bool _keepStills = true;
 
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
@@ -149,6 +150,20 @@ namespace MatroxFrameGrabber.Infrastructure
                 int v = value <= 0 ? 0 : (value < 5 ? 5 : (value > 120 ? 120 : value));
                 if (_displayUpdateFps != v) { _displayUpdateFps = v; RaiseChanged(nameof(DisplayUpdateFps)); Save(); }
             }
+        }
+
+        /// <summary>
+        /// Whether to keep four lossless stills per anomaly beside its clip.
+        ///
+        /// Separate from the clip: the stills need no ffmpeg and no segments, and cost a MIL copy
+        /// of about 149 us three or four times per event. They answer what the clip cannot - the
+        /// clip is x264 at CRF 23, so re-running the detector over it would not reproduce the
+        /// deviation that was reported, while a lossless still of the extreme frame would.
+        /// </summary>
+        public bool KeepStills
+        {
+            get => _keepStills;
+            set { if (_keepStills != value) { _keepStills = value; RaiseChanged(nameof(KeepStills)); Save(); } }
         }
 
         /// <summary>
@@ -295,6 +310,7 @@ namespace MatroxFrameGrabber.Infrastructure
             public int? RecordingRateFps { get; set; }
             public double? AnomalyClipSeconds { get; set; }
             public string SegmentFolder { get; set; }
+            public bool? KeepStills { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -337,6 +353,7 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
+                        s._keepStills = dto.KeepStills ?? true;
                         s._segmentFolder = string.IsNullOrWhiteSpace(dto.SegmentFolder)
                             ? DefaultSegmentFolder : dto.SegmentFolder;
 
@@ -455,6 +472,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     RecordingRateFps = _recordingRateFps,
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,
+                    KeepStills = _keepStills,
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelDetection = _channelDetection
                 };

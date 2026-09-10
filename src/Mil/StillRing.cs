@@ -41,8 +41,13 @@ namespace MatroxFrameGrabber.Mil
             Reference = 0,
             /// <summary>The frame that entered the event.</summary>
             Onset = 1,
-            /// <summary>The deepest frame seen while the event was open.</summary>
-            Worst = 2,
+            /// <summary>
+            /// The frame that moved furthest from the baseline while the event was open.
+            ///
+            /// Named for the extreme rather than the worst because a rising kind has no depth: the
+            /// same 0.12 is a fall on a Dropout and a rise on a Washout.
+            /// </summary>
+            Extreme = 2,
             /// <summary>The first normal frame after recovery.</summary>
             Recovered = 3,
         }
@@ -226,7 +231,7 @@ namespace MatroxFrameGrabber.Mil
             lock (_lock)
             {
                 _filled[(int)Slot.Onset] = false;
-                _filled[(int)Slot.Worst] = false;
+                _filled[(int)Slot.Extreme] = false;
                 _filled[(int)Slot.Recovered] = false;
             }
         }

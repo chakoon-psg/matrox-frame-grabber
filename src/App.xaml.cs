@@ -81,20 +81,6 @@ namespace MatroxFrameGrabber
         /// <summary>Seconds to hold each exposure, from <c>--dwell 30</c>.</summary>
         public static int DwellSeconds { get; private set; } = DefaultDwellSeconds;
 
-        private const string StillsSwitch = "--stills";
-
-        /// <summary>
-        /// <c>--stills</c>: keep frames in MIL buffers during an <c>--autostart</c> run and write
-        /// them as PNG, to measure what a lossless still costs.
-        ///
-        /// MbufExport with M_PNG already runs in this app for snapshots, so the question is not
-        /// whether it works but what it costs and whether the picture survives the round trip:
-        /// how long a MIL-to-MIL keep takes inside the acquisition hook, how long the PNG write
-        /// takes on the stats tick, and whether the file's mean luma matches what the brightness
-        /// meter reported for the same run.
-        /// </summary>
-        public static bool StillProbe { get; private set; }
-
         private const string RecordSwitch = "--rec";
 
         /// <summary>
@@ -160,7 +146,6 @@ namespace MatroxFrameGrabber
             BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
             DetectionOff = HasSwitch(e.Args, NoDetectSwitch);
             RecordDuringAutoRun = HasSwitch(e.Args, RecordSwitch);
-            StillProbe = HasSwitch(e.Args, StillsSwitch);
             ExposureScan = ParseExposures(ParseSwitchValue(e.Args, ExposureScanSwitch));
             DwellSeconds = ParseDwellSeconds(e.Args);
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,

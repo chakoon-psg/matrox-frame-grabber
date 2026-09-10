@@ -34,16 +34,25 @@ namespace MatroxFrameGrabber.Infrastructure
         OpticsOutOfBand = 4,
 
         /// <summary>
+        /// The event tier could not keep up, so the segments an anomaly clip is cut from are
+        /// missing frames.
+        ///
+        /// Ranked above the optics because it is silent: luma and clipping are on screen, while a
+        /// clip with holes is a file that exists, plays, and says nothing about what is not in it.
+        /// </summary>
+        ClipIncomplete = 5,
+
+        /// <summary>
         /// The reducer produced grids the detector did not judge. Whatever the cause, frames are
         /// going past unexamined - the failure that looks most like a quiet panel.
         /// </summary>
-        DetectorBlind = 5,
+        DetectorBlind = 6,
 
         /// <summary>
         /// Frames were lost in acquisition. Anything that happened in them is unrecoverable, and
         /// the strip must not imply the record is complete.
         /// </summary>
-        FramesMissed = 6,
+        FramesMissed = 7,
     }
 
     /// <summary>
@@ -80,6 +89,7 @@ namespace MatroxFrameGrabber.Infrastructure
         public static ChannelHealth Evaluate(bool present, bool grabbing,
                                              long framesMissed,
                                              long reductions, long gridsAccepted,
+                                             long clipFramesSkipped,
                                              bool calibrated,
                                              double luma, double clipPercent, double blackPercent)
         {
@@ -88,6 +98,7 @@ namespace MatroxFrameGrabber.Infrastructure
 
             if (framesMissed > 0) return ChannelHealth.FramesMissed;
             if (reductions > 0 && gridsAccepted < reductions) return ChannelHealth.DetectorBlind;
+            if (clipFramesSkipped > 0) return ChannelHealth.ClipIncomplete;
 
             if (clipPercent > MaxClipPercent || blackPercent > MaxBlackPercent ||
                 luma < MinLuma || luma > MaxLuma)
@@ -98,7 +109,9 @@ namespace MatroxFrameGrabber.Infrastructure
 
         /// <summary>Whether this state needs someone's attention now.</summary>
         public static bool IsFault(ChannelHealth h) =>
-            h == ChannelHealth.DetectorBlind || h == ChannelHealth.FramesMissed;
+            h == ChannelHealth.DetectorBlind ||
+            h == ChannelHealth.FramesMissed ||
+            h == ChannelHealth.ClipIncomplete;
 
         /// <summary>One line for the lane's tooltip, in the operator's terms.</summary>
         public static string Describe(ChannelHealth h)
@@ -110,6 +123,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 case ChannelHealth.Healthy: return "정상";
                 case ChannelHealth.Uncalibrated: return "임계값이 실측된 적 없음";
                 case ChannelHealth.OpticsOutOfBand: return "광학 범위 밖 — 밝기가 센서 한계를 재고 있습니다";
+                case ChannelHealth.ClipIncomplete: return "사건 클립에 구멍 — 인코더가 프레임을 놓쳤습니다";
                 case ChannelHealth.DetectorBlind: return "검지기 실명 — 판정되지 않은 프레임이 있습니다";
                 case ChannelHealth.FramesMissed: return "프레임 유실 — 그 사이 일은 복구할 수 없습니다";
                 default: return string.Empty;

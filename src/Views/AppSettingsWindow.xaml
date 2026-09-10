@@ -132,6 +132,20 @@
                 </StackPanel>
             </Grid>
             <TextBlock Text="the ring keeps this window plus the event cap and one segment; it runs with the grab, not with Rec"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,6" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Stills" />
+                <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                          Content="4 lossless PNG per anomaly"
+                          IsChecked="{Binding Output.KeepStills}"
+                          ToolTip="reference / onset / extreme / recovered&#x0a;클립은 x264 CRF 23이라 그 파일로는 보고된 편차를 재현할 수 없습니다. 무손실 정지화면은 됩니다" />
+            </Grid>
+            <TextBlock Text="the clip is lossy, so the numbers cannot be re-measured from it — these can"
                        Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
 
             <!-- ============ DISPLAY ============ -->

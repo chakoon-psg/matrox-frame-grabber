@@ -175,8 +175,6 @@ namespace MatroxFrameGrabber.Mil
         private string _segmentPattern;        // ..._seg_%05d.mp4, for the sweep at stop
         private string _segmentList;
         private StillRing _stills;
-        private long _stillProbeKept;
-        private bool _stillsExported;
 
         private long _framesMissed;
         private long _missedAtGrabStart;   // cumulative counter when this grab started
@@ -616,9 +614,14 @@ namespace MatroxFrameGrabber.Mil
             get
             {
                 BrightnessSample latest = _brightness.History.Latest;
+                // The event tier's skips, because a clip cut from segments missing frames is a
+                // file that plays and says nothing about the holes in it.
+                VideoSinkStats tier = _eventSink?.Stats ?? default;
+
                 return ChannelHealthRule.Evaluate(
                     CameraPresent, _isGrabbing, FramesMissed,
                     Reductions, GridsAccepted,
+                    tier.FramesSkipped + tier.FramesDropped,
                     !string.IsNullOrEmpty(Detection.For(AnomalyKind.Dropout).CalibratedAt),
                     latest.Luma, latest.ClippedPct, latest.BlackPct);
             }
@@ -1318,7 +1321,7 @@ namespace MatroxFrameGrabber.Mil
             // A fresh detector per run. Carrying a baseline across a stop would judge the opening
             // frames of the new run against the light of the old one, and the exposure or the
             // region may well have changed in between -- during the exposure scan both did.
-            if (App.StillProbe && _stills == null && _dispBufId != MIL.M_NULL)
+            if ((Output?.KeepStills ?? false) && _stills == null && _dispBufId != MIL.M_NULL)
             {
                 var ring = new StillRing();
                 if (ring.Allocate(_sysId, _dispBufId, out string stillErr))
@@ -1326,9 +1329,6 @@ namespace MatroxFrameGrabber.Mil
                 else
                     MilErrorLog.Note($"{Name}: still buffers not allocated - {stillErr}");
             }
-            _stillProbeKept = 0;
-            _stillsExported = false;
-
             StartEventTier();
 
             _detector = new AnomalyDetector(DetectionThresholds);
@@ -1482,15 +1482,6 @@ namespace MatroxFrameGrabber.Mil
                 // This run's losses, not the digitizer's lifetime total (see StartGrab).
                 _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
 
-                StillRing stills = _stills;
-                if (stills != null && !_stillsExported && _stillProbeKept >= 4 && Output != null)
-                {
-                    _stillsExported = true;
-                    int n = stills.ExportAll(Output.EnsureFolder(), SafeName(), out string sErr);
-                    MilErrorLog.Note($"{Name}: stills exported - {n} files"
-                                   + (sErr != null ? $", error: {sErr}" : string.Empty));
-                }
-
                 // Anomalies are surfaced here rather than from the hook: a handler running on the
                 // acquisition thread would put the grab behind whatever it decides to do, and the
                 // whole reason the reduction is kept small is to stay out of that budget.
@@ -1502,6 +1493,7 @@ namespace MatroxFrameGrabber.Mil
                     raised = true;
                     RecentAnomalies.Add(found, rejected: false);
                     _clips?.Offer(found);
+                    ExportStills(found);
                     MilErrorLog.Note($"{Name}: anomaly {found}");
                     WriteEventWindow(found);
                     AnomalyDetected?.Invoke(this, found);
@@ -1525,6 +1517,12 @@ namespace MatroxFrameGrabber.Mil
                                    + $"(rejected {_rejectedSeen} so far)");
                     WriteEventWindow(turned, rejected: true);
                     RecentAnomalies.Add(turned, rejected: true);
+
+                    // A rejected run's frames are not evidence - that is what the rejection means -
+                    // and leaving its onset in place freezes the reference for the rest of the run.
+                    // Measured: kept frames fell from 400 to 133 over 70 s after one rejection.
+                    // After the detections above, so a tick carrying both still exports first.
+                    _stills?.ClearEvent();
                 }
                 if (anyRejected)
                     RaisePropertyChanged(nameof(EventsRejectedForSpread));
@@ -1626,15 +1624,6 @@ namespace MatroxFrameGrabber.Mil
             if (copyToDisplay)
                 MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
-            // ---- Lossless stills (probe: rotate every slot rather than wait for an event) ----
-            StillRing stills = _stills;
-            if (stills != null && frameNumber % StillRing.ReferenceEveryFrames == 0)
-            {
-                stills.Keep((StillRing.Slot)(_stillProbeKept % 4), grabbedBuffer,
-                            frameNumber, timeStampSec, 0.0);
-                _stillProbeKept++;
-            }
-
             // ---- Event tier: every frame, so a window can be cut out of it later ----
             IVideoSink events = _eventSink;
             if (events != null)
@@ -1686,6 +1675,34 @@ namespace MatroxFrameGrabber.Mil
             // thread, so draining it needs no lock, and the queue below is what crosses over.
             while (detector.TryTakeRejected(out AnomalyEvent turned))
                 _rejections.Enqueue(turned);
+
+            // ---- Lossless stills: the detector says which frame each slot wants ----
+            //
+            // Kept here rather than when the event is reported, because by then the picture has
+            // recovered - a snapshot taken at the report shows a healthy screen. One MIL-to-MIL
+            // copy of about 149 us, three or four times per event.
+            StillRing stills = _stills;
+            if (stills != null)
+            {
+                double dev = detector.LastDepth;
+                if (detector.EnteredThisFrame)
+                    stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec, dev);
+                if (detector.DeepenedThisFrame)
+                    stills.Keep(StillRing.Slot.Extreme, grabbedBuffer, frameNumber, timeStampSec, dev);
+                if (detector.RecoveredThisFrame)
+                    stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec, dev);
+
+                // A healthy frame from up to 258 ms back, so the pair shows what changed.
+                //
+                // Frozen from the onset until the export clears the slots, not merely while the
+                // event is open: measured, an event over frames 8140-8142 was still unexported when
+                // frame 8192 came round and refreshed the reference, so the "frame from before the
+                // fall" was one from 52 frames after it. The tick can be up to 500 ms behind.
+                if (!detector.InEvent
+                    && !stills.Has(StillRing.Slot.Onset)
+                    && frameNumber % StillRing.ReferenceEveryFrames == 0)
+                    stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);
+            }
         }
 
         /// <summary>
@@ -1960,6 +1977,32 @@ namespace MatroxFrameGrabber.Mil
         }
 
         #endregion
+
+        /// <summary>
+        /// Writes the kept frames as PNG, if this kind is one that stills say anything about.
+        ///
+        /// On the stats tick, never in the hook: a PNG write measured 6.4 to 8.0 ms, which is a
+        /// whole frame period. Flicker asks for none - four frames out of an oscillation say
+        /// nothing the tile history does not say better, and the tile history already exists.
+        /// </summary>
+        private void ExportStills(AnomalyEvent found)
+        {
+            StillRing stills = _stills;
+            if (stills == null || !stills.IsAllocated || Output == null) return;
+            if (!AnomalyClipPolicy.For(found.Kind).Stills) { stills.ClearEvent(); return; }
+
+            string stem = $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{found.Kind}";
+            int written = stills.ExportAll(Output.EnsureFolder(), stem, out string err);
+            MilErrorLog.Note(written > 0
+                ? $"{Name}: {written} still(s) written for {found.Kind} at frame {found.StartFrame}, "
+                  + $"{stills.MaxExportMs:F1} ms worst"
+                : $"{Name}: no stills written for {found.Kind}"
+                  + (err != null ? $" - {err}" : string.Empty));
+
+            // Forgotten so the next event does not inherit this one's frames. The reference slot
+            // survives: it is refreshed while nothing is open and belongs to whatever comes next.
+            stills.ClearEvent();
+        }
 
         #region Anomaly clips (segments while grabbing, cut when one falls due)
 

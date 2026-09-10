@@ -63,6 +63,7 @@ namespace MatroxFrameGrabber.Views
             { ChannelHealth.Healthy,         Color.FromRgb(0x81, 0xC7, 0x84) },
             { ChannelHealth.Uncalibrated,    Color.FromRgb(0xFF, 0xB7, 0x4D) },
             { ChannelHealth.OpticsOutOfBand, Color.FromRgb(0xFF, 0xB7, 0x4D) },
+            { ChannelHealth.ClipIncomplete,  Color.FromRgb(0xFF, 0x6E, 0x6E) },
             { ChannelHealth.DetectorBlind,   Color.FromRgb(0xFF, 0x6E, 0x6E) },
             { ChannelHealth.FramesMissed,    Color.FromRgb(0xFF, 0x6E, 0x6E) },
         };
