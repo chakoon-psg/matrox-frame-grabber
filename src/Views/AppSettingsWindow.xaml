@@ -48,34 +48,16 @@
                        TextWrapping="Wrap"
                        ToolTip="다음 시작부터 적용됩니다 — 싱크는 카메라를 할당할 때 정해집니다" />
 
-            <Grid Margin="0,0,0,4">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Label Grid.Column="0" Content="Rate" />
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <TextBox Width="52" VerticalContentAlignment="Center"
-                             Text="{Binding Output.RecordingRateFps, UpdateSourceTrigger=LostFocus}"
-                             ToolTip="녹화할 프레임레이트. 0 = 취득한 모든 프레임&#x0a;요청값은 나눗수가 됩니다 — 124.316의 1/4은 31.079이고, 30이라고 적으면 파일이 3.6% 느려집니다" />
-                    <TextBlock Text="fps  ·  0 = every frame; a wanted rate becomes a divisor"
-                               Margin="6,0,0,0" VerticalAlignment="Center"
-                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
-                </StackPanel>
-            </Grid>
-
             <Grid Margin="0,0,0,10">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <Label Grid.Column="0" Content="Resolution" />
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <ComboBox Width="120" VerticalContentAlignment="Center"
-                              ItemsSource="{Binding ResolutionOptions}"
-                              SelectedItem="{Binding Output.Resolution}"
-                              ToolTip="녹화·스냅샷의 출력 크기. 취득 해상도와는 무관합니다" />
-                </StackPanel>
+                <Label Grid.Column="0" Content="Source" />
+                <TextBlock Grid.Column="1" Text="{Binding RecordingSourceText}"
+                           VerticalAlignment="Center" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           ToolTip="녹화는 취득을 따릅니다 — 가장 빠른 것이 카메라가 주는 레이트이고, 크기도 카메라가 주는 크기입니다" />
             </Grid>
 
             <!-- ============ FOLDERS ============ -->
@@ -166,20 +148,6 @@
                                Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
                 </StackPanel>
             </Grid>
-
-            <Grid Margin="0,0,0,4">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Label Grid.Column="0" Content="ffmpeg" />
-                <TextBlock Grid.Column="1" Text="{Binding FfmpegPathText}"
-                           ToolTip="{Binding FfmpegPathText}"
-                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
-                           Foreground="{StaticResource MutedTextBrush}" FontSize="11" />
-            </Grid>
-            <TextBlock Text="found by search, not a setting — see the README for the search order"
-                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,4" TextWrapping="Wrap" />
 
         </StackPanel>
     </ScrollViewer>

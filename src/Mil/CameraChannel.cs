@@ -1897,18 +1897,11 @@ namespace MatroxFrameGrabber.Mil
                 string path = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.png");
 
                 MIL_INT srcH = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
-                double scale = settings.ScaleFactorFor(srcH);
-                if (scale < 0.999)
-                {
-                    MIL_ID tmp = AllocScaledBuffer(_dispBufId, scale);
-                    MIL.MimResize(_dispBufId, tmp, scale, scale, MIL.M_BILINEAR);
-                    MIL.MbufExport(path, MIL.M_PNG, tmp);
-                    MIL.MbufFree(tmp);
-                }
-                else
-                {
-                    MIL.MbufExport(path, MIL.M_PNG, _dispBufId);
-                }
+                // The acquired frame, at the size it was acquired. The resolution preset that
+                // used to scale this is gone: ScaleFactorFor never upscaled, so against 1024x772
+                // the 1080p option did nothing at all and 720p was a 0.932 scale - a result being
+                // offered as a choice.
+                MIL.MbufExport(path, MIL.M_PNG, _dispBufId);
                 return path;
             }
             catch (MILException)
@@ -1938,13 +1931,12 @@ namespace MatroxFrameGrabber.Mil
             double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
                        ? resulting
                        : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
-            // The wanted rate becomes a divisor of what the camera delivers, so the file
-            // declares 31.079 rather than the 30 that was asked for - see VideoRatePolicy.
-            int everyNth = VideoRatePolicy.EveryNthFor(fps, Output?.RecordingRateFps ?? 0);
+            // Every frame, at the acquisition geometry. Both were settings once and neither was
+            // a choice: the maximum rate is what the camera delivers, and the frame size is what it
+            // delivers it at. The sink can still scale - the contract keeps it - this caller does not.
             var spec = new VideoStreamSpec(
-                _dispBufId, fps, Output.EnsureFolder(), SafeName(),
-                Output.ScaleFactorFor(MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL)),
-                new[] { new VideoOutputSpec(string.Empty, everyNth) });
+                _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
+                new[] { VideoOutputSpec.SingleFile() });
             bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -2328,21 +2320,6 @@ namespace MatroxFrameGrabber.Mil
         #endregion
 
         #region Output helpers
-
-        /// <summary>Allocates a destination buffer scaled from <paramref name="src"/> by <paramref name="scale"/>.</summary>
-        private MIL_ID AllocScaledBuffer(MIL_ID src, double scale, bool evenDims = false)
-        {
-            MIL_INT band = MIL.MbufInquire(src, MIL.M_SIZE_BAND, MIL.M_NULL);
-            MIL_INT type = MIL.MbufInquire(src, MIL.M_TYPE, MIL.M_NULL);
-            long srcW = MIL.MbufInquire(src, MIL.M_SIZE_X, MIL.M_NULL);
-            long srcH = MIL.MbufInquire(src, MIL.M_SIZE_Y, MIL.M_NULL);
-            long dstW = Math.Max(2, (long)(srcW * scale));
-            long dstH = Math.Max(2, (long)(srcH * scale));
-            if (evenDims) { dstW &= ~1L; dstH &= ~1L; }   // H.264 needs even dimensions
-            MIL_ID dst = MIL.M_NULL;
-            MIL.MbufAllocColor(_sysId, band, dstW, dstH, type, MIL.M_IMAGE + MIL.M_PROC, ref dst);
-            return dst;
-        }
 
         private string SafeName()
         {
@@ -2800,7 +2777,7 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>Size of the frames actually arriving, which is what the ROI is clamped to.</summary>
-        private bool TryGetFrameSize(out int width, out int height)
+        internal bool TryGetFrameSize(out int width, out int height)
         {
             width = 0; height = 0;
             if (_dispBufId == MIL.M_NULL) return false;

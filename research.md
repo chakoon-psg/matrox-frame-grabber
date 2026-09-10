@@ -323,8 +323,9 @@ W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형�
 
 ### 2.8 `Mil/RecordingSession.cs` (234줄) — 컬러 라이브 녹화
 
-- `Start(sourceBuf, settings, baseName, fps)`가 소스 버퍼에서 **geometry/포맷을 추론**하고,
-  해상도 프리셋(`ScaleFactorFor`)을 적용한 뒤 폭·높이를 `&= ~1`로 짝수화(H.264 요구).
+- `Start(...)`가 소스 버퍼에서 **geometry/포맷을 추론**하고, 호출자가 준 배율(현재 항상 1.0)을
+  적용한 뒤 폭·높이를 `&= ~1`로 짝수화(H.264 요구). **배율과 레이트는 설정이 아니라 취득에서
+  나온다** — 계약에는 남아 있지만 앱은 언제나 원본 크기·매 프레임을 넘긴다.
 - fps는 `CameraChannel`이 넘긴다: 실측 `_frameRate > 1.0`이면 그것, 아니면
   `M_SELECTED_FRAME_RATE`, 그것도 없으면 30.0.
 - **컬러 프레임 추출 방식이 이 파일의 핵심 함정(커밋 `4db0b71`)**:
@@ -365,15 +366,16 @@ W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형�
 ### 2.10 `Infrastructure/OutputSettings.cs` (311줄)
 
 - 저장 위치: `%LocalAppData%\MatroxFrameGrabber\settings.json`
-- 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `Resolution`(Original / P1080 / P720),
-  `FfmpegPath`, `DisplayUpdateFps`, 채널별 `ChannelRois` / `ChannelDecimation` /
-  `ChannelThresholds`
+- 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `FfmpegPath`, `DisplayUpdateFps`,
+  `SinkPreference`, `SegmentFolder`, `KeepStills`, `AnomalyClipSeconds`, 채널별 `ChannelRois` /
+  `ChannelDecimation` / `ChannelThresholds`
 - **모든 setter가 값 변경 시 즉시 `Save()`** — 별도 저장 버튼이 없다.
 - 방어 장치 두 개가 핵심이다:
   1. **`_loading` 플래그**로 `Load()`가 값을 적용하는 동안 재저장을 억제
   2. (de)serialization이 **관찰 가능한 setter를 절대 거치지 않도록 별도 `Dto` 클래스**를 사용
 - `Load()` / `Save()` 모두 예외를 삼킨다("설정이 이번엔 저장 안 될 뿐" = 비치명적).
-- `ScaleFactorFor(h)`: 업스케일 금지, 원본이 목표보다 작으면 1.0. `TargetHeight`는 `[JsonIgnore]`.
+- 녹화 레이트와 해상도 프리셋은 **여기 없다**. 둘 다 선택이 아니라 결과였다 — 상한이 취득
+  레이트이고 크기가 취득 크기다. 설정 창은 그 사실을 읽기 전용 한 줄로 말한다.
 
 ### 2.11 `Infrastructure/NativeMethods.cs` (36줄) / `RelayCommand.cs` (38줄)
 

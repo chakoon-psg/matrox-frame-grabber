@@ -135,8 +135,6 @@ namespace MatroxFrameGrabber.ViewModels
         /// <summary>App-wide output folder + resolution settings.</summary>
         public OutputSettings Output => _manager.Output;
 
-        /// <summary>Resolution presets shown in the toolbar combo.</summary>
-        public Array ResolutionOptions => Enum.GetValues(typeof(OutputResolution));
 
         /// <summary>Board / system summary shown in the header.</summary>
         public string SystemStatus =>
@@ -259,18 +257,24 @@ namespace MatroxFrameGrabber.ViewModels
         }
 
         /// <summary>
-        /// The ffmpeg.exe actually resolved for this run, for the recording settings popup.
-        /// Bound once at load: the configured path has no editor, so this cannot change while
-        /// the window is open.
+        /// What the recording follows from, rather than what it can be set to.
+        ///
+        /// Both used to be settings and neither was a choice: the fastest a recording can go is the
+        /// rate the camera delivers, and the frame size is the size it delivers. Saying so once is
+        /// more use than two boxes whose only honest values are these.
         /// </summary>
-        public string FfmpegPathText
+        public string RecordingSourceText
         {
             get
             {
-                string path = FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath);
-                return string.IsNullOrEmpty(path)
-                    ? "not found — recording disabled"
-                    : path;
+                foreach (CameraChannel c in _manager.Channels)
+                {
+                    if (!c.CameraPresent) continue;
+                    return c.TryGetFrameSize(out int w, out int h) && c.DetectionFps > 1.0
+                        ? $"{w}x{h} at {c.DetectionFps:F3} fps, every frame"
+                        : "every frame, at the acquisition size";
+                }
+                return "no camera";
             }
         }
 

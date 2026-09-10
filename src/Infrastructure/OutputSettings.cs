@@ -6,16 +6,8 @@ using System.Text.Json.Serialization;
 
 namespace MatroxFrameGrabber.Infrastructure
 {
-    /// <summary>Output resolution preset applied to both snapshots and recordings.</summary>
-    public enum OutputResolution
-    {
-        Original,
-        P1080,
-        P720
-    }
-
     /// <summary>
-    /// App-wide output settings (folder + resolution), persisted to
+    /// App-wide output settings, persisted to
     /// %LocalAppData%\MatroxFrameGrabber\settings.json so they survive restarts.
     /// </summary>
     public class OutputSettings : INotifyPropertyChanged
@@ -34,13 +26,11 @@ namespace MatroxFrameGrabber.Infrastructure
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
-        private int _recordingRateFps = DefaultRecordingRateFps;   // 0 = every frame
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
 
         private string _outputFolder = DefaultFolder;
-        private OutputResolution _resolution = OutputResolution.Original;
         private string _ffmpegPath = "";
         private bool _loading;   // suppresses Save() while Load() applies persisted values
         private bool _migrated;  // set when Load() converted an older schema, so it is written once
@@ -60,12 +50,6 @@ namespace MatroxFrameGrabber.Infrastructure
                 string v = string.IsNullOrWhiteSpace(value) ? DefaultFolder : value;
                 if (_outputFolder != v) { _outputFolder = v; RaiseChanged(nameof(OutputFolder)); Save(); }
             }
-        }
-
-        public OutputResolution Resolution
-        {
-            get => _resolution;
-            set { if (_resolution != value) { _resolution = value; RaiseChanged(nameof(Resolution)); Save(); } }
         }
 
         /// <summary>
@@ -224,34 +208,6 @@ namespace MatroxFrameGrabber.Infrastructure
         public const double SegmentSeconds = 2.0;
 
         /// <summary>
-        /// Frames per second to record at. 0 records every frame, which is what this app did before
-        /// the setting existed.
-        ///
-        /// A wanted rate, not the rate written: it becomes a divisor, and a quarter of 124.316 fps
-        /// is 31.079. Declaring the 30 that was asked for would make the file 3.6% slow - the same
-        /// class of error as taking the camera's requested rate instead of its deliverable one,
-        /// which once made a 120 s recording read as 81 s.
-        ///
-        /// Clamped to 0 or 5..1000: a rate of one or two frames a second is not a recording of a
-        /// screen fault, and a typo must not produce one.
-        /// </summary>
-        /// <summary>
-        /// The rate a fresh install records at. Thirty because that is the requirement - the
-        /// full-rate tier is for the event clips, which are cut from their own files.
-        /// </summary>
-        public const int DefaultRecordingRateFps = 30;
-
-        public int RecordingRateFps
-        {
-            get => _recordingRateFps;
-            set
-            {
-                int v = value <= 0 ? 0 : (value < 5 ? 5 : (value > 1000 ? 1000 : value));
-                if (_recordingRateFps != v) { _recordingRateFps = v; RaiseChanged(nameof(RecordingRateFps)); Save(); }
-            }
-        }
-
-        /// <summary>
         /// Which backend records. Auto uses MIL when it is known to work here and ffmpeg otherwise;
         /// an explicit choice is honoured with no fallback, which is what makes a delivered MIL sink
         /// testable - see VideoSinkPolicy.
@@ -260,27 +216,6 @@ namespace MatroxFrameGrabber.Infrastructure
         {
             get => _videoSink;
             set { if (_videoSink != value) { _videoSink = value; RaiseChanged(nameof(VideoSink)); Save(); } }
-        }
-
-        /// <summary>Target height in pixels for the preset (0 = keep original).</summary>
-        [JsonIgnore]
-        public int TargetHeight => _resolution switch
-        {
-            OutputResolution.P1080 => 1080,
-            OutputResolution.P720 => 720,
-            _ => 0
-        };
-
-        /// <summary>
-        /// Uniform scale factor to apply to a source of the given height (aspect preserved,
-        /// never upscales). 1.0 means "no resize" (Original, or source already smaller).
-        /// </summary>
-        public double ScaleFactorFor(long sourceHeight)
-        {
-            int target = TargetHeight;
-            if (target <= 0 || sourceHeight <= 0 || sourceHeight <= target)
-                return 1.0;
-            return (double)target / sourceHeight;
         }
 
         /// <summary>Ensures the output folder exists; returns it.</summary>
@@ -297,7 +232,6 @@ namespace MatroxFrameGrabber.Infrastructure
         {
             public string OutputFolder { get; set; }
             [JsonConverter(typeof(JsonStringEnumConverter))]
-            public OutputResolution Resolution { get; set; }
             public string FfmpegPath { get; set; }
             public RoiDto[] ChannelRois { get; set; }
             public int DisplayUpdateFps { get; set; } = 30;
@@ -305,9 +239,6 @@ namespace MatroxFrameGrabber.Infrastructure
             // A name, not the enum's number: an unrecognised string falls back to Auto, where an
             // out-of-range index would select a backend nobody asked for.
             public string VideoSink { get; set; }
-            // Nullable so an absent key means "never chosen" and takes the default, where a
-            // plain int would read as 0 and silently mean "every frame".
-            public int? RecordingRateFps { get; set; }
             public double? AnomalyClipSeconds { get; set; }
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
@@ -351,7 +282,6 @@ namespace MatroxFrameGrabber.Infrastructure
                     if (dto != null)
                     {
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
-                        s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
                         s._keepStills = dto.KeepStills ?? true;
                         s._segmentFolder = string.IsNullOrWhiteSpace(dto.SegmentFolder)
@@ -362,10 +292,6 @@ namespace MatroxFrameGrabber.Infrastructure
                             ? 0.0
                             : (around < 1.0 ? 1.0 : (around > 60.0 ? 60.0 : around));
 
-                        int wanted = dto.RecordingRateFps ?? DefaultRecordingRateFps;
-                        s._recordingRateFps = wanted <= 0
-                            ? 0
-                            : (wanted < 5 ? 5 : (wanted > 1000 ? 1000 : wanted));
                         s._videoSink =
                             Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
                                 ? pref : VideoSinkPreference.Auto;
@@ -464,12 +390,10 @@ namespace MatroxFrameGrabber.Infrastructure
                 var dto = new Dto
                 {
                     OutputFolder = _outputFolder,
-                    Resolution = _resolution,
                     FfmpegPath = _ffmpegPath,
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
-                    RecordingRateFps = _recordingRateFps,
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,
