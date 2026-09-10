@@ -134,16 +134,18 @@ namespace MatroxFrameGrabber.Infrastructure
             return null;
         }
 
-        /// <summary>Launches ffmpeg for a raw-video pipe of the given geometry/format.</summary>
-        /// <param name="bands">Bands per pixel: 3 is fed planar as gbrp, 1 as gray.</param>
-        public bool Start(string ffmpegPath, string outPath, int width, int height, int bands, double fps, out string error)
+        /// <summary>
+        /// Launches ffmpeg with the given command line and opens the frame pipe.
+        ///
+        /// The arguments come from the caller because one process can serve several outputs at
+        /// different rates, which is how the event tier and the long session file share a single
+        /// pipe and a single extraction. Build them with <see cref="FfmpegArgs"/>, which is tested.
+        /// </summary>
+        public bool Start(string ffmpegPath, string args, out string error)
         {
             error = null;
             try
             {
-                string args = FfmpegArgs.Build(width, height, bands, fps,
-                    new[] { new FfmpegOutput(outPath, fps) });
-
                 var psi = new ProcessStartInfo(ffmpegPath, args)
                 {
                     RedirectStandardInput = true,

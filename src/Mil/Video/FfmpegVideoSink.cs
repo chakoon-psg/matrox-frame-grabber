@@ -1,22 +1,33 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
 using MatroxFrameGrabber.Infrastructure;
 
-namespace MatroxFrameGrabber.Mil
+namespace MatroxFrameGrabber.Mil.Video
 {
     /// <summary>
-    /// Owns one camera's MP4 recording: the ffmpeg process, the MIL capture/resize buffers,
-    /// a reusable frame-buffer pool, and the per-frame feed. All acquisition-thread and
-    /// UI-thread access is guarded so start/stop can't race the feed. Finalization runs on a
-    /// background task so stopping never freezes the UI.
+    /// Writes one camera's video through a single ffmpeg process: the MIL capture and resize
+    /// buffers, a reusable frame-buffer pool, and the per-frame extraction.
+    ///
+    /// One process serves every output. ffmpeg reads the pipe once and feeds each output's encoder
+    /// chain, so a segmented event tier at 124.316 fps and a long session file at 31.079 fps cost
+    /// one extraction between them and no shared-ownership problem - the frame buffer belongs to
+    /// exactly one writer. Two processes would need either a 2.26 MiB copy per frame or reference
+    /// counting, and would double the pipes and exit handlers for nothing. Measured 2026-09-10:
+    /// two outputs from one pipe kept 2486 of 2486 frames in the segments and wrote the session
+    /// file at 31079/1000 over the same 20.0 s.
+    ///
+    /// All acquisition-thread and UI-thread access is guarded so start/stop cannot race the feed.
+    /// Finalization runs on a background task so stopping never freezes the UI.
     /// </summary>
-    public sealed class RecordingSession
+    public sealed class FfmpegVideoSink : IVideoSink
     {
         private readonly MIL_ID _sysId;
+        private readonly string _ffmpegPath;
         private readonly object _lock = new object();
 
         private FfmpegRecorder _recorder;
@@ -31,62 +42,48 @@ namespace MatroxFrameGrabber.Mil
         private volatile bool _failed;
         private DateTime _start;
         private Task _finalizeTask;
-        private long _droppedAtStop;      // survives Stop(), which nulls the recorder
-        private double _elapsedAtStop;
-        private double _feedUsSum;
+        private long _fed, _skipped;
+        private long _droppedAtStop;               // survives Stop(), which nulls the recorder
+        private double _declaredFps, _elapsedAtStop, _feedUsSum, _maxFeedUs;
+        private string[] _paths = Array.Empty<string>();
 
-        public RecordingSession(MIL_ID sysId) { _sysId = sysId; }
+        public FfmpegVideoSink(MIL_ID sysId, string ffmpegPath)
+        {
+            _sysId = sysId;
+            _ffmpegPath = ffmpegPath;
+        }
 
+        public string Name => "ffmpeg/libx264";
         public bool IsActive => _active;
         public bool Failed => _failed;
-        public string FilePath { get; private set; }
         public string LastError { get; private set; }
+        public IReadOnlyList<string> FilePaths => _paths;
 
-        /// <summary>Frames extracted and handed to the encoder.</summary>
-        public long FramesFed { get; private set; }
+        public VideoSinkStats Stats => new VideoSinkStats(
+            _fed, _skipped, _recorder?.DroppedFrames ?? _droppedAtStop, _declaredFps,
+            _active ? (DateTime.Now - _start).TotalSeconds : _elapsedAtStop,
+            _fed > 0 ? _feedUsSum / _fed : 0.0, _maxFeedUs);
 
-        /// <summary>
-        /// Frames the feed skipped without extracting, because the encoder queue was already full.
-        /// This is the loss that actually happens under load, and until now nothing counted it -
-        /// the banner shows <see cref="FramesDropped"/>, a rarer path that only fires when the
-        /// queue fills between the HasRoom check and the write.
-        /// </summary>
-        public long FramesSkipped { get; private set; }
+        /// <summary>Status suffix like "  ● REC 01:23 (dropped 5)"; empty when not recording.</summary>
+        public string StatusSuffix()
+        {
+            if (!_active) return "";
+            int secs = (int)(DateTime.Now - _start).TotalSeconds;
+            long dropped = _recorder?.DroppedFrames ?? 0;
+            return $"  ● REC {secs / 60:00}:{secs % 60:00}" + (dropped > 0 ? $" (dropped {dropped})" : "");
+        }
 
-        /// <summary>Frames the encoder itself refused. Kept past Stop(), which nulls the recorder.</summary>
-        public long FramesDropped => _recorder?.DroppedFrames ?? _droppedAtStop;
-
-        /// <summary>
-        /// The frame rate written into the file's header. Reported separately from the measured rate
-        /// because the two disagreeing is exactly the failure worth catching: the file's time axis
-        /// is this number, whatever the camera was really doing.
-        /// </summary>
-        public double DeclaredFps { get; private set; }
-
-        /// <summary>Seconds recorded, frozen at Stop().</summary>
-        public double ElapsedSeconds => _active ? (DateTime.Now - _start).TotalSeconds : _elapsedAtStop;
-
-        /// <summary>Microseconds the last extraction took (MIL copy + per-band reads).</summary>
-        public double LastFeedUs { get; private set; }
-
-        /// <summary>Mean microseconds per extraction. The frame period at 124.3 fps is 8043 us.</summary>
-        public double MeanFeedUs => FramesFed > 0 ? _feedUsSum / FramesFed : 0.0;
-
-        /// <summary>Worst single extraction. One over the frame period is a missed frame.</summary>
-        public double MaxFeedUs { get; private set; }
-
-        /// <summary>
-        /// Starts recording <paramref name="sourceBuf"/>'s stream (geometry/format taken from it)
-        /// to {baseName}_{timestamp}.mp4 in the output folder, applying the resolution preset.
-        /// The buffers fed to <see cref="Feed"/> must have the same geometry as sourceBuf.
-        /// </summary>
-        public bool Start(MIL_ID sourceBuf, OutputSettings settings, string baseName, double fps, out string error)
+        public bool Start(VideoStreamSpec spec, out string error)
         {
             error = null;
             if (_active) return false;
 
-            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(settings?.FfmpegPath);
-            if (ffmpeg == null) { error = "ffmpeg was not found. Install it or set the ffmpeg path in settings."; LastError = error; return false; }
+            if (string.IsNullOrEmpty(_ffmpegPath))
+            {
+                error = "ffmpeg was not found. Install it or set the ffmpeg path in settings.";
+                LastError = error;
+                return false;
+            }
 
             LastError = null;
             _failed = false;
@@ -96,15 +93,13 @@ namespace MatroxFrameGrabber.Mil
             FfmpegRecorder recorder = null;
             try
             {
-                string path = Path.Combine(settings.EnsureFolder(), $"{baseName}_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
+                MIL_INT band = MIL.MbufInquire(spec.Like, MIL.M_SIZE_BAND, MIL.M_NULL);
+                MIL_INT srcType = MIL.MbufInquire(spec.Like, MIL.M_TYPE, MIL.M_NULL);
+                MIL_INT srcBit = MIL.MbufInquire(spec.Like, MIL.M_SIZE_BIT, MIL.M_NULL);
+                long srcW = MIL.MbufInquire(spec.Like, MIL.M_SIZE_X, MIL.M_NULL);
+                long srcH = MIL.MbufInquire(spec.Like, MIL.M_SIZE_Y, MIL.M_NULL);
 
-                MIL_INT band = MIL.MbufInquire(sourceBuf, MIL.M_SIZE_BAND, MIL.M_NULL);
-                MIL_INT srcType = MIL.MbufInquire(sourceBuf, MIL.M_TYPE, MIL.M_NULL);
-                MIL_INT srcBit = MIL.MbufInquire(sourceBuf, MIL.M_SIZE_BIT, MIL.M_NULL);
-                long srcW = MIL.MbufInquire(sourceBuf, MIL.M_SIZE_X, MIL.M_NULL);
-                long srcH = MIL.MbufInquire(sourceBuf, MIL.M_SIZE_Y, MIL.M_NULL);
-
-                double scale = settings.ScaleFactorFor(srcH);
+                double scale = spec.Scale;
                 long w = scale < 0.999 ? (long)(srcW * scale) : srcW;
                 long h = scale < 0.999 ? (long)(srcH * scale) : srcH;
                 w &= ~1L; h &= ~1L;
@@ -114,6 +109,25 @@ namespace MatroxFrameGrabber.Mil
                 // Planar G,B,R fed band by band, never packed - see the MbufGetColor trap.
                 int bpp = color ? 3 : 1;
                 int shift = (long)srcBit > 8 ? (int)((long)srcBit - 8) : 0;
+
+                string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                var outputs = new List<FfmpegOutput>(spec.Outputs.Length);
+                var paths = new List<string>(spec.Outputs.Length);
+                foreach (VideoOutputSpec o in spec.Outputs)
+                {
+                    double fileFps = VideoRatePolicy.FileFps(spec.SourceFps, o.EveryNthFrame);
+                    string stem = string.IsNullOrEmpty(o.Label)
+                        ? $"{spec.BaseName}_{stamp}"
+                        : $"{spec.BaseName}_{stamp}_{o.Label}";
+                    string path = Path.Combine(spec.Folder,
+                        o.IsSegmented ? stem + "_%05d.mp4" : stem + ".mp4");
+                    string list = o.IsSegmented ? Path.Combine(spec.Folder, stem + ".csv") : null;
+
+                    outputs.Add(new FfmpegOutput(path, fileFps,
+                        VideoRatePolicy.KeyframeInterval(fileFps, o.KeyframeSeconds),
+                        o.SegmentSeconds, list));
+                    paths.Add(path);
+                }
 
                 // Planar capture buffer. Color frames are read out one band at a time (MbufGet on a
                 // single-band child) and fed to ffmpeg as planar gbrp — MbufGetColor's packing paths
@@ -129,10 +143,12 @@ namespace MatroxFrameGrabber.Mil
                 if (scale < 0.999)
                     MIL.MbufAllocColor(_sysId, band, w, h, srcType, MIL.M_IMAGE + MIL.M_PROC, ref resizeBuf);
 
+                string args = FfmpegArgs.Build((int)w, (int)h, color ? 3 : 1, spec.SourceFps, outputs);
+
                 recorder = new FfmpegRecorder();
                 recorder.FrameReturned = ReturnFrameBuffer;
                 recorder.Failed += OnRecorderFailed;
-                if (!recorder.Start(ffmpeg, path, (int)w, (int)h, color ? 3 : 1, fps, out string err))
+                if (!recorder.Start(_ffmpegPath, args, out string err))
                 {
                     error = string.IsNullOrEmpty(err) ? "ffmpeg failed to launch." : err;
                     LastError = error;
@@ -143,7 +159,7 @@ namespace MatroxFrameGrabber.Mil
 
                 lock (_lock)
                 {
-                    FilePath = path;
+                    _paths = paths.ToArray();
                     _captureBuf = captureBuf;
                     _resizeBuf = resizeBuf;
                     _b0 = b0; _b1 = b1; _b2 = b2;
@@ -154,14 +170,13 @@ namespace MatroxFrameGrabber.Mil
                     _pool = new ConcurrentQueue<byte[]>();
                     _recorder = recorder;
                     _start = DateTime.Now;
-                    DeclaredFps = fps;
-                    FramesFed = 0;
-                    FramesSkipped = 0;
+                    _declaredFps = spec.SourceFps;
+                    _fed = 0;
+                    _skipped = 0;
                     _droppedAtStop = 0;
                     _elapsedAtStop = 0.0;
                     _feedUsSum = 0.0;
-                    LastFeedUs = 0.0;
-                    MaxFeedUs = 0.0;
+                    _maxFeedUs = 0.0;
                     _active = true;
                 }
                 return true;
@@ -175,8 +190,14 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
-        /// <summary>Feeds one grabbed frame to the encoder (called on the acquisition thread).</summary>
-        public void Feed(MIL_ID grabbedBuffer)
+        /// <summary>
+        /// Extracts one frame and hands it to ffmpeg. On the acquisition thread.
+        ///
+        /// Every frame goes in whatever the outputs asked for: one pipe serves them all, and each
+        /// output's -r makes ffmpeg select the frames it wants. So EveryNthFrame reaches this
+        /// backend only as the rate a file declares, never as a frame this method should skip.
+        /// </summary>
+        public void Feed(MIL_ID buffer, long frameNumber)
         {
             if (!_active) return;
             lock (_lock)
@@ -185,16 +206,16 @@ namespace MatroxFrameGrabber.Mil
                     return;
                 if (!_recorder.HasRoom)   // encoder behind: skip extraction, keep the live view fast
                 {
-                    FramesSkipped++;
+                    _skipped++;
                     return;
                 }
                 long t0 = Stopwatch.GetTimestamp();
                 try
                 {
-                    MIL_ID src = grabbedBuffer;
+                    MIL_ID src = buffer;
                     if (_resizeBuf != MIL.M_NULL)
                     {
-                        MIL.MimResize(grabbedBuffer, _resizeBuf, _scaleX, _scaleY, MIL.M_BILINEAR);
+                        MIL.MimResize(buffer, _resizeBuf, _scaleX, _scaleY, MIL.M_BILINEAR);
                         src = _resizeBuf;
                     }
                     if (_shift > 0)
@@ -215,10 +236,9 @@ namespace MatroxFrameGrabber.Mil
                     _recorder.WriteFrame(frame);
 
                     double us = (Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency;
-                    LastFeedUs = us;
                     _feedUsSum += us;
-                    if (us > MaxFeedUs) MaxFeedUs = us;
-                    FramesFed++;
+                    if (us > _maxFeedUs) _maxFeedUs = us;
+                    _fed++;
                 }
                 catch
                 {
@@ -227,7 +247,6 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
-        /// <summary>Stops recording; finalization (ffmpeg flush + buffer free) runs asynchronously.</summary>
         public void Stop()
         {
             FfmpegRecorder recorder;
@@ -256,16 +275,12 @@ namespace MatroxFrameGrabber.Mil
             });
         }
 
-        /// <summary>Blocks until a pending async finalize completes (used before freeing the MIL system).</summary>
         public void WaitFinalize(int ms) { try { _finalizeTask?.Wait(ms); } catch { } }
 
-        /// <summary>Status suffix like "  ● REC 01:23 (dropped 5)"; empty when not recording.</summary>
-        public string StatusSuffix()
+        public void Dispose()
         {
-            if (!_active) return "";
-            int secs = (int)(DateTime.Now - _start).TotalSeconds;
-            long dropped = _recorder?.DroppedFrames ?? 0;
-            return $"  ● REC {secs / 60:00}:{secs % 60:00}" + (dropped > 0 ? $" (dropped {dropped})" : "");
+            Stop();
+            WaitFinalize(15000);
         }
 
         private void ReturnFrameBuffer(byte[] buf)

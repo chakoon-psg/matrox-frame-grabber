@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
 using MatroxFrameGrabber.Infrastructure;
+using MatroxFrameGrabber.Mil.Video;
 
 namespace MatroxFrameGrabber.Mil
 {
@@ -143,9 +144,10 @@ namespace MatroxFrameGrabber.Mil
         private string _blueRatioInput = "";
         private string _cameraInfo = "";
 
-        // Output naming + recording (delegated to RecordingSession).
+        // Output naming + recording (delegated to an IVideoSink).
         private string _outputName;
-        private RecordingSession _recording;
+        private IVideoSink _recording;
+        private FfmpegVideoSink _ffmpegSink;   // the same object when ffmpeg is the backend, for its status line
         private StillRing _stills;
         private long _stillProbeKept;
         private bool _stillsExported;
@@ -228,7 +230,7 @@ namespace MatroxFrameGrabber.Mil
             get
             {
                 if (IsRecording)
-                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_recording?.StatusSuffix()}";
+                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_ffmpegSink?.StatusSuffix()}";
                 return "";
             }
         }
@@ -588,7 +590,11 @@ namespace MatroxFrameGrabber.Mil
         public string LastRecordError => _recording?.LastError;
 
         /// <summary>Path of the file being written, or the last one written. Null before the first.</summary>
-        public string RecordingFilePath => _recording?.FilePath;
+        public string RecordingFilePath =>
+            _recording != null && _recording.FilePaths.Count > 0 ? _recording.FilePaths[0] : null;
+
+        /// <summary>What is doing the encoding, or why nothing can. Shown on the Rec button.</summary>
+        public string RecordBackend { get; private set; } = "not probed";
 
         /// <summary>Whether recording is possible (ffmpeg available).</summary>
         public bool CanRecord { get; private set; }
@@ -610,7 +616,7 @@ namespace MatroxFrameGrabber.Mil
                     return "No camera";
                 if (_cameraLost)
                     return "⚠ Camera disconnected — press Stop";
-                string rec = _recording?.StatusSuffix() ?? "";
+                string rec = _ffmpegSink?.StatusSuffix() ?? "";
                 if (_isGrabbing)
                     return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
                          + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
@@ -827,7 +833,12 @@ namespace MatroxFrameGrabber.Mil
             MIL.MdispAlloc(_sysId, MIL.M_DEFAULT, "M_DEFAULT", MIL.M_WPF, ref _dispId);
             MIL.MdispControl(_dispId, MIL.M_TITLE, Name);
             MIL.MgraAlloc(_sysId, ref _graId);
-            _recording = new RecordingSession(_sysId);
+            // Which backend is decided here, once, and reported. Nothing downstream knows or
+            // cares which one it got.
+            _recording = VideoSinkFactory.Create(_sysId, Output, VideoSinkPreference.Auto,
+                                                 out string backend);
+            _ffmpegSink = _recording as FfmpegVideoSink;
+            RecordBackend = backend;
 
             AllocateCamera();
 
@@ -889,8 +900,12 @@ namespace MatroxFrameGrabber.Mil
                     try { MIL.MdigControl(_digId, MIL.M_BAYER_CONVERSION, MIL.M_ENABLE); }
                     catch (MILException e) { MilErrorLog.Write($"{Name}: re-assert M_BAYER_CONVERSION", e); }
 
-                    // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
-                    CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
+                    // Enable Rec only if something can encode, and keep the reason: a greyed-out
+                    // button with nothing to read was the old behaviour.
+                    CanRecord = VideoSinkFactory.CanRecord(Output, VideoSinkPreference.Auto,
+                                                           out string why);
+                    RecordBackend = why;
+                    RaisePropertyChanged(nameof(RecordBackend));
                     RaisePropertyChanged(nameof(CanRecord));
 
                     // Decimation before AllocateBuffers: the buffer sizes come from
@@ -1059,8 +1074,12 @@ namespace MatroxFrameGrabber.Mil
         {
             StopGrab();   // also stops recording (kicks off async finalize)
 
-            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
+            // Wait for any in-flight recording finalize before freeing MIL buffers/system:
+            // finalization touches the sink's MIL buffers.
             _recording?.WaitFinalize(15000);
+            _recording?.Dispose();
+            _recording = null;
+            _ffmpegSink = null;
             _stills?.Free();
             _stills = null;
 
@@ -1429,7 +1448,7 @@ namespace MatroxFrameGrabber.Mil
             // ---- Per-frame processing / display update ----
             // The display copy is 2.3 MB (cropped colour) and triggers a UI-thread update, so it
             // runs at DisplayUpdateFps rather than every frame. Recording is unaffected:
-            // RecordingSession.Feed works from the grab buffer, never the display buffer.
+            // the sink is fed from the grab buffer, never the display buffer.
             int dispFps = Output?.DisplayUpdateFps ?? 0;
             bool copyToDisplay = true;
             if (dispFps > 0)
@@ -1453,8 +1472,8 @@ namespace MatroxFrameGrabber.Mil
                 _stillProbeKept++;
             }
 
-            // ---- Recording feed (RecordingSession guards start/stop vs feed internally) ----
-            _recording?.Feed(grabbedBuffer);
+            // ---- Recording feed (the sink guards start/stop vs feed internally) ----
+            _recording?.Feed(grabbedBuffer, frameNumber);
         }
 
         /// <summary>
@@ -1702,7 +1721,7 @@ namespace MatroxFrameGrabber.Mil
 
         #endregion
 
-        #region Recording (delegated to RecordingSession)
+        #region Recording (delegated to an IVideoSink)
 
         /// <summary>
         /// Starts recording this camera to {OutputName}_{timestamp}.mp4 in the output folder,
@@ -1721,7 +1740,11 @@ namespace MatroxFrameGrabber.Mil
             double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
                        ? resulting
                        : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
-            bool ok = _recording.Start(_dispBufId, Output, SafeName(), fps, out _);
+            var spec = new VideoStreamSpec(
+                _dispBufId, fps, Output.EnsureFolder(), SafeName(),
+                Output.ScaleFactorFor(MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL)),
+                new[] { VideoOutputSpec.SingleFile() });
+            bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
@@ -2198,14 +2221,13 @@ namespace MatroxFrameGrabber.Mil
             // it runs in the acquisition hook - so this is also the measurement for whether a
             // preroll ring of frames is affordable at all, since such a ring would have to pay the
             // same extraction on every frame whether or not an event ever follows.
-            RecordingSession rec = _recording;
-            if (rec != null && (rec.FramesFed > 0 || rec.FramesSkipped > 0))
+            VideoSinkStats rec = _recording?.Stats ?? default;
+            if (rec.FramesFed > 0 || rec.FramesSkipped > 0)
             {
-                double secs = rec.ElapsedSeconds;
-                MilErrorLog.Note($"{Name}: recording - {rec.FramesFed} fed, {rec.FramesSkipped} skipped "
-                               + $"(encoder full), {rec.FramesDropped} dropped, "
-                               + $"{(secs > 0 ? rec.FramesFed / secs : 0):F1} fps written vs "
-                               + $"{rec.DeclaredFps:F2} fps declared over {secs:F1} s, "
+                MilErrorLog.Note($"{Name}: recording ({_recording.Name}) - {rec.FramesFed} fed, "
+                               + $"{rec.FramesSkipped} skipped (encoder full), {rec.FramesDropped} dropped, "
+                               + $"{rec.WrittenFps:F1} fps written vs {rec.DeclaredFps:F2} fps declared "
+                               + $"over {rec.ElapsedSeconds:F1} s, "
                                + $"extract mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period");
             }

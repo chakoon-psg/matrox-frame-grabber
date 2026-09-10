@@ -47,7 +47,7 @@
                 <ToggleButton Content="● Rec" Style="{StaticResource RecToggle}" FontSize="11"
                               Click="Record_Click" IsChecked="{Binding IsRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
-                              ToolTip="Live color H.264 recording — may drop frames at high fps" />
+                              ToolTip="{Binding RecordBackend, StringFormat='라이브 H.264 녹화 · {0}'}" />
                 <!-- IsGrabbing, not CameraPresent: while stopped the display buffer still holds the
                      previous run's last frame, so a snapshot of it looks fresh but is not. -->
                 <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding IsGrabbing}" Margin="10,0,3,0" />
