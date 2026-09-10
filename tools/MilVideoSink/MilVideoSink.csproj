@@ -31,6 +31,9 @@
     <Compile Include="..\..\src\Mil\Video\VideoSinkStats.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Mil\Video\MilSeqVideoSink.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Mil\Video\FfmpegVideoSink.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Mil\Video\FrameExtractor.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Mil\Video\IHostFrameSink.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Video\SharedFramePool.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Mil\GenICamFeatures.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Infrastructure\MilErrorLog.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Infrastructure\FfmpegRecorder.cs" LinkBase="Shared" />

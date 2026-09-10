@@ -167,6 +167,15 @@ namespace MatroxFrameGrabber.Mil
         // The event tier: rolling segments while the grab runs, so a clip can be cut for something
         // that happened before anybody pressed Rec.
         private IVideoSink _eventSink;
+
+        /// <summary>
+        /// The one host read per frame that every ffmpeg sink on this channel shares.
+        ///
+        /// Made on demand and freed with the buffers it reads from. Two sinks each reading for
+        /// themselves cost 60-67 frames of 37,300 per channel over five minutes, measured
+        /// 2026-09-10; with one of them off, nothing was lost. See FrameExtractor.
+        /// </summary>
+        private FrameExtractor _frames;
         private SegmentRing _segments;
         private ClipScheduler _clips;
         private IClipExtractor _clipper;
@@ -254,7 +263,11 @@ namespace MatroxFrameGrabber.Mil
             get
             {
                 if (IsRecording)
-                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_ffmpegSink?.StatusSuffix()}";
+                    // The codec from the sink, not the word H.264: the encoding is the operator's
+                    // choice now, and a banner that always said H.264 would be wrong on two of the
+                    // three options.
+                    return $"● 라이브 녹화 중 ({_recording?.Name ?? "recording"}, 고fps 시 프레임 드랍)"
+                         + _ffmpegSink?.StatusSuffix();
                 return "";
             }
         }
@@ -1215,12 +1228,42 @@ namespace MatroxFrameGrabber.Mil
             _reducer.Bind(_grabBuffers);
         }
 
+        /// <summary>
+        /// The shared frame reader, made the first time a sink needs one.
+        ///
+        /// Lazy because a channel that never records should not hold 45 MiB of paged host memory,
+        /// and tied to the display buffer's lifetime because that is what it is shaped from - a
+        /// decimation change reallocates both.
+        /// </summary>
+        private FrameExtractor EnsureFrames()
+        {
+            FrameExtractor frames = _frames;
+            if (frames != null && frames.IsReady) return frames;
+            if (_dispBufId == MIL.M_NULL) return null;
+
+            frames = new FrameExtractor(_sysId);
+            if (!frames.Prepare(_dispBufId, 1.0, out string err))
+            {
+                MilErrorLog.Note($"{Name}: frame extraction not prepared - {err}");
+                frames.Dispose();
+                return null;
+            }
+            _frames = frames;
+            return frames;
+        }
+
         /// <summary>Frees the grab ring + display buffer, keeping the digitizer and display alive.</summary>
         private void FreeBuffers()
         {
             // Before the ring, not after: a band child outliving its parent is a failure this
             // codebase already documents.
             _reducer.Unbind();
+
+            // Same discipline: the extractor holds a buffer and its band children, and it is
+            // shaped from the display buffer being freed below.
+            FrameExtractor frames = _frames;
+            _frames = null;
+            frames?.Dispose();
 
             foreach (MIL_ID buf in _grabBuffers)
             {
@@ -1662,19 +1705,44 @@ namespace MatroxFrameGrabber.Mil
 
             // ---- Event tier: every frame, so a window can be cut out of it later ----
             IVideoSink events = _eventSink;
+            // ---- One host read, however many sinks want it ----
+            //
+            // Both ffmpeg sinks used to read the frame out for themselves, and that cost frames:
+            // 60-67 of 37,300 per channel over five minutes, with the extract peaking at 11549 us
+            // against an 8197 us period. Measured 2026-09-10, and with the session recording off
+            // the same run lost none. A sink that wants the MIL buffer instead - the MIL backend -
+            // is still fed it below.
+            IVideoSink session = _recording;
+            var eventsHost = events as IHostFrameSink;
+            var sessionHost = session as IHostFrameSink;
+
+            if (eventsHost != null || sessionHost != null)
+            {
+                FrameExtractor frames = _frames;
+                // Nothing is read out while every encoder is behind: the live view comes first,
+                // and each sink counts the frame it did not get.
+                bool room = (eventsHost?.Accepting ?? false) || (sessionHost?.Accepting ?? false);
+                byte[] frame = room && frames != null ? frames.Extract(grabbedBuffer) : null;
+
+                eventsHost?.FeedShared(frame, frameNumber);
+                sessionHost?.FeedShared(frame, frameNumber);
+
+                // The caller's own hold, last: each sink added its own before queueing, so the
+                // array cannot go back to the pool while either writer is still reading it.
+                if (frame != null) frames.Release(frame);
+            }
+
+            if (eventsHost == null) events?.Feed(grabbedBuffer, frameNumber);
+            if (sessionHost == null) session?.Feed(grabbedBuffer, frameNumber);
+
             if (events != null)
             {
-                events.Feed(grabbedBuffer, frameNumber);
-
                 // Anchored on the first frame the encoder actually took, so board time and
                 // position in the recording line up exactly.
                 SegmentRing ring = _segments;
                 if (ring != null && !ring.Anchored && events.Stats.FramesFed >= 1)
                     ring.Anchor(timeStampSec);
             }
-
-            // ---- Recording feed (the sink guards start/stop vs feed internally) ----
-            _recording?.Feed(grabbedBuffer, frameNumber);
         }
 
         /// <summary>
@@ -1976,6 +2044,11 @@ namespace MatroxFrameGrabber.Mil
             var spec = new VideoStreamSpec(
                 _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
                 new[] { VideoOutputSpec.SingleFile(encoding: Output.RecordingEncoding) });
+
+            // Before Start, because that is when the sink decides whether to make its own reader.
+            if (_recording is IHostFrameSink host)
+                host.SharedFrames = EnsureFrames();
+
             bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -2086,6 +2159,7 @@ namespace MatroxFrameGrabber.Mil
                                         encoding: VideoEncoding.H264),
                 });
 
+            sink.SharedFrames = EnsureFrames();
             if (!sink.Start(spec, out string err))
             {
                 MilErrorLog.Note($"{Name}: anomaly clips off - {err}");
@@ -2227,7 +2301,7 @@ namespace MatroxFrameGrabber.Mil
                 sink.Dispose();
                 if (st.FramesFed > 0)
                     MilErrorLog.Note($"{Name}: event tier - {st.FramesFed} fed, {st.FramesSkipped} skipped, "
-                                   + $"{st.FramesDropped} dropped, extract mean {st.MeanFeedUs:F0} us / "
+                                   + $"{st.FramesDropped} dropped, queue mean {st.MeanFeedUs:F0} us / "
                                    + $"max {st.MaxFeedUs:F0} us"
                                    + (clips != null
                                       ? $"; clips {clips.Emitted} cut, {clips.Merged} merged, "
@@ -2718,6 +2792,16 @@ namespace MatroxFrameGrabber.Mil
             MilErrorLog.Note($"{Name}: grab stopped - {FrameCount} frames, {_frameRate:F1} fps, "
                            + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
 
+            // The one read every sink shared, reported once rather than per sink. Its worst case is
+            // what to compare against the frame period: one read over that is a missed frame, and
+            // two reads per frame is what used to put it there.
+            FrameExtractor frames = _frames;
+            if (frames != null && frames.Fed > 0)
+                MilErrorLog.Note($"{Name}: frames read out - {frames.Fed}, "
+                               + $"read mean {frames.MeanUs:F0} us / max {frames.MaxUs:F0} us, "
+                               + $"pool dry {frames.Exhausted}x, {frames.Failures} failed, "
+                               + $"{frames.InUse} still out");
+
             // What detection cost and what it found, on the same line as the losses it must not
             // have caused. The worst reduction matters more than the average: the frame period at
             // 124 fps is 8045 us, and one reduction over that is a missed frame.
@@ -2750,7 +2834,7 @@ namespace MatroxFrameGrabber.Mil
                                + $"fed at {rec.WrittenFps:F1}/s over {rec.ElapsedSeconds:F1} s "
                                + $"(source {rec.DeclaredFps:F2} fps), "
                                + $"file declares {fileRates} fps, "
-                               + $"extract mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
+                               + $"queue mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period");
             }
 

@@ -61,8 +61,9 @@ src/
                                  MilApplicationManager, CameraChannel,
                                  GenICamFeatures, TileReducer, BrightnessMeter, StillRing
     Video/                     MatroxFrameGrabber.Mil.Video
-                                 IVideoSink, VideoStreamSpec, VideoSinkStats,
-                                 VideoSinkFactory, FfmpegVideoSink, MilSeqVideoSink
+                                 IVideoSink, IHostFrameSink, VideoStreamSpec,
+                                 VideoSinkStats, VideoSinkFactory, FrameExtractor,
+                                 FfmpegVideoSink, MilSeqVideoSink
   Mil/Stills/                    StillRing (무손실 PNG. MbufExport는 압축 라이선스가 필요 없다)
   Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
                                  OutputSettings, RelayCommand, NativeMethods,
@@ -76,8 +77,8 @@ src/
     Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
                                  VideoEncoding(+VideoCodecs), VideoSinkPolicy,
-                                 SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (396개). csproj가 `Infrastructure/**`를
+                                 SharedFramePool, SegmentRing, ClipExtractor
+tests/                         MatroxFrameGrabber.Tests (406개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -145,20 +146,33 @@ CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면
 실측 한계 둘: 인코더가 3채널 **124.3·132.6 fps에서는 유실 0, 247 fps에서는 세그먼트 목록이 15초
 뒤처졌다.** 그리고 클립이 뒤쪽에서 약 2% 짧게 나온 사례가 있고 원인은 규명되지 않았다.
 
-**세 번째 한계 — 프레임을 두 번 꺼내면 유실이 생긴다(2026-09-10 실측).** 3채널 · 1024×772 ·
-124.3 fps로 5분씩 두 번 돌렸다.
+**프레임은 한 번만 꺼낸다 — 두 번 꺼내면 유실이 생겼다(2026-09-10 실측·해결).**
+3채널 · 1024×772 · 124.3 fps로 5분씩 재고, 고친 뒤 다시 5분을 쟀다.
 
-| | 유실 | 세션 추출 평균/최대 | tier 추출 평균/최대 |
-|---|---|---|---|
-| 녹화 + 사건 tier | **채널당 60~67** (0.16%) | 1440~1827 / **11549 µs** | 1416~1668 / 9972 µs |
-| 사건 tier만 | **0** | — | 354~469 / 3279 µs |
+| | 유실/채널 | 실효 fps | 추출 평균 | 추출 최대 |
+|---|---|---|---|---|
+| 싱크마다 각자 꺼냄 | **60~67** (0.16%) | 119~122 | 세션 1440~1827 + tier 1416~1668 µs | **11549 µs** |
+| 사건 tier만 (녹화 끔) | 0 | 124.3 | 354~469 µs | 3279 µs |
+| **한 번 꺼내 공유** | **0** | **124.3** | **470~898 µs** | 7859~9946 µs |
 
-추출 최대값이 프레임 주기(8197 µs)를 넘고, 그때 보드가 프레임을 버린다. 주목할 점은 두 번째
-싱크를 붙였을 때 각 추출이 두 배가 아니라 **네 배** 느려진 것이다 — 단순 중복이 아니라 메모리
-경합이다. 프레임당 호스트 읽기가 2 × 2.26 MiB × 124.3 × 3채널 = **1.68 GB/s**이고, 취득 DMA가
-같은 경로에 0.85 GB/s를 쓰고 있다(천장 3.68 GB/s).
-**고칠 방향은 프레임을 한 번만 꺼내 두 싱크가 같은 바이트를 쓰는 것이다** — `IVideoSink`가
-`MIL_ID`를 받는 이유가 그것을 가능하게 하는 것인데, 지금은 각자 꺼내고 있다.
+추출 최대가 프레임 주기(8043 µs)를 넘으면 보드가 프레임을 버린다. 두 번째 싱크를 붙였을 때 각
+추출이 2배가 아니라 **4배** 느려졌다는 것이 핵심이었다 — 단순 중복이 아니라 메모리 경합이다
+(프레임당 호스트 읽기 2 × 2.26 MiB × 124.3 × 3채널 = 1.68 GB/s, 취득 DMA가 같은 경로에
+0.85 GB/s). 한 번으로 줄이자 **남은 한 번도 2~3배 빨라졌다.**
+
+`FrameExtractor`가 그 한 번을 하고, `SharedFramePool`이 누가 아직 들고 있는지 센다. 규약은
+`Take`가 호출자에게 hold 1을 주고, 프레임을 받는 싱크가 **큐에 넣기 전에** hold를 더하고, 모두가
+정확히 한 번 `Release`하는 것이다 — 순서가 반대면 writer 하나가 먼저 끝났을 때 다른 싱크가 읽는
+중에 버퍼가 재사용된다. 그 계수는 `Infrastructure`에 있고 테스트가 지킨다.
+
+호스트 바이트를 받는 것은 `IVideoSink`가 아니라 **`IHostFrameSink`** 다. `IVideoSink`가 `MIL_ID`를
+받는 이유는 MIL 백엔드가 호스트 읽기 비용을 내지 않게 하는 것이고, 그 계약은 납품사에 넘기는
+슬라이스다 — 쓰지도 않을 메서드를 그쪽 계약에 넣지 않는다.
+
+검증: 파일 3개를 전부 디코딩해 경고 0에 프레임 수가 먹인 수와 정확히 일치(37303/37310/37314),
+`pool dry 0회`, `still out 0`. 그리고 **무손실 20초 녹화의 2487프레임이 모두 서로 다른 해시**였다 —
+센서 잡음 때문에 실제 프레임 둘이 같을 수 없으므로, 중복이 없다는 것은 버퍼가 두 번 나가지
+않았다는 뜻이다.
 
 **그리고 이 방의 이상 대부분은 패널이 아니라 사람이다(같은 실측).** 5분 동안 세 채널이 *같은
 프레임 번호*에서 depth 0.39~0.69의 사건을 봤다 — 무손실 정지화면에 팔이 들어오고 다음 장에는
