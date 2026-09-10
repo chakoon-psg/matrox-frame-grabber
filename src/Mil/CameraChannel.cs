@@ -107,6 +107,21 @@ namespace MatroxFrameGrabber.Mil
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
         private readonly ConcurrentQueue<AnomalyEvent> _anomalies = new ConcurrentQueue<AnomalyEvent>();
+
+        /// <summary>
+        /// Rejections, drained from the detector in the hook and read on the stats tick.
+        ///
+        /// A queue rather than the detector's single LastRejectedEvent slot, because the strip
+        /// draws every one of them: on the measured 30-minute run five fell inside six seconds
+        /// against a 500 ms tick, so the slot was already close to losing them.
+        /// </summary>
+        private readonly ConcurrentQueue<AnomalyEvent> _rejections = new ConcurrentQueue<AnomalyEvent>();
+
+        /// <summary>
+        /// Recent anomalies of both verdicts, in one order, for the strip to draw. Filled from the
+        /// stats tick as the queues above are drained, and read from the same tick.
+        /// </summary>
+        public AnomalyTimeline RecentAnomalies { get; } = new AnomalyTimeline();
         private long _anomalyCount;
         private AnomalyEvent _lastAnomaly;
         private bool _hasLastAnomaly;
@@ -556,6 +571,35 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Reductions attempted, and those that produced a grid. A gap is a fault.</summary>
         public long Reductions => _reducer.Reductions;
         public long GridsAccepted => _reducer.Accepted;
+
+        /// <summary>
+        /// The board's stamp on the newest frame, in seconds. Zero before the first frame.
+        ///
+        /// The clock anomalies are timestamped in, and the only one every channel shares - the
+        /// cameras free-run, so a strip drawn against DateTime.Now would put the same event at
+        /// different places on different lanes.
+        /// </summary>
+        public double LastBoardTimeSec => _hookData?.LastTimeStampSec ?? 0.0;
+
+        /// <summary>
+        /// The worst thing true of this channel, for the lane's status dot.
+        ///
+        /// Needed because the lane's marks cannot show the two worst problems: a channel losing
+        /// frames and a channel whose detector never judges them both draw an empty lane, which is
+        /// also what a healthy panel draws.
+        /// </summary>
+        public ChannelHealth Health
+        {
+            get
+            {
+                BrightnessSample latest = _brightness.History.Latest;
+                return ChannelHealthRule.Evaluate(
+                    CameraPresent, _isGrabbing, FramesMissed,
+                    Reductions, GridsAccepted,
+                    !string.IsNullOrEmpty(Detection.For(AnomalyKind.Dropout).CalibratedAt),
+                    latest.Luma, latest.ClippedPct, latest.BlackPct);
+            }
+        }
 
         /// <summary>
         /// What the detector measured on the last frame it judged. Exposed because the thresholds
@@ -1270,6 +1314,8 @@ namespace MatroxFrameGrabber.Mil
             _rejectedSeen = 0;
             _rejectedAtStop = 0;
             while (_anomalies.TryDequeue(out _)) { }
+            while (_rejections.TryDequeue(out _)) { }
+            RecentAnomalies.Clear();
             Interlocked.Exchange(ref _anomalyCount, 0);
             _hasLastAnomaly = false;
 
@@ -1425,6 +1471,7 @@ namespace MatroxFrameGrabber.Mil
                     _lastAnomaly = found;
                     _hasLastAnomaly = true;
                     raised = true;
+                    RecentAnomalies.Add(found, rejected: false);
                     MilErrorLog.Note($"{Name}: anomaly {found}");
                     WriteEventWindow(found);
                     AnomalyDetected?.Invoke(this, found);
@@ -1439,21 +1486,18 @@ namespace MatroxFrameGrabber.Mil
                 // Rejections are surfaced on the same tick. Only the last one is kept, so a tick
                 // that turned away several leaves one window and a count - which is why the count
                 // is logged rather than inferred from the files.
-                AnomalyDetector detector = _detector;
-                if (detector != null && detector.EventsRejectedForSpread > _rejectedSeen)
+                bool anyRejected = false;
+                while (_rejections.TryDequeue(out AnomalyEvent turned))
                 {
-                    long now = detector.EventsRejectedForSpread;
-                    AnomalyEvent? turned = detector.LastRejectedEvent;
-                    if (turned.HasValue)
-                    {
-                        MilErrorLog.Note(
-                            $"{Name}: swept, not dimmed - {turned.Value} "
-                          + $"(rejected {now} so far)");
-                        WriteEventWindow(turned.Value, rejected: true);
-                    }
-                    _rejectedSeen = now;
-                    RaisePropertyChanged(nameof(EventsRejectedForSpread));
+                    _rejectedSeen++;
+                    anyRejected = true;
+                    MilErrorLog.Note($"{Name}: swept, not dimmed - {turned} "
+                                   + $"(rejected {_rejectedSeen} so far)");
+                    WriteEventWindow(turned, rejected: true);
+                    RecentAnomalies.Add(turned, rejected: true);
                 }
+                if (anyRejected)
+                    RaisePropertyChanged(nameof(EventsRejectedForSpread));
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -1592,6 +1636,11 @@ namespace MatroxFrameGrabber.Mil
             AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
             if (closed.HasValue)
                 RecordAnomaly(closed.Value);
+
+            // Taken here rather than on the tick: the detector is only ever touched from this
+            // thread, so draining it needs no lock, and the queue below is what crosses over.
+            while (detector.TryTakeRejected(out AnomalyEvent turned))
+                _rejections.Enqueue(turned);
         }
 
         /// <summary>

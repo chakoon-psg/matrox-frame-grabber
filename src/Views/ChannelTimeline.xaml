@@ -1,0 +1,41 @@
+<UserControl x:Class="MatroxFrameGrabber.Views.ChannelTimeline"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource PanelBrush}">
+    <!--
+      Replaces the brightness curve. The curve was 76 px of a flat line: drift on a healthy panel
+      measured ±0.06% over fifteen minutes, so what those pixels showed was flatness, while the 57
+      rejections and 2 detections in the same window appeared nowhere.
+
+      So brightness becomes a sparkline in the legend - 60 points instead of 240, a quarter of the
+      cost - and the space goes to a lane per camera. Three dimensions in one strip: the lane says
+      which device, the mark's colour says which item, and solid against outline says whether it
+      was believed or turned away.
+
+      Everything is built once in code-behind and updated in place. The old renderer cleared and
+      rebuilt the legend on every 500 ms tick, about 40 elements a second, which is the cost this
+      panel had least reason to pay.
+    -->
+    <Grid Margin="6,4,6,3">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="14" />
+        </Grid.RowDefinitions>
+
+        <!-- Legend: swatch, name, luma, clip, and the brightness sparkline. -->
+        <WrapPanel x:Name="Legend" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,3" />
+
+        <!-- One row per present camera, filled in code: a name cell and a canvas of marks. -->
+        <Grid x:Name="Lanes" Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="116" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+        </Grid>
+
+        <!-- Board time, and only under the lanes: brightness spans two minutes and the lanes ten,
+             so the two must not appear to share an axis. -->
+        <Canvas x:Name="Axis" Grid.Row="2" Grid.Column="1" Margin="116,0,0,0" ClipToBounds="True" />
+    </Grid>
+</UserControl>

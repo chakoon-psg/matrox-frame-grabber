@@ -78,7 +78,7 @@ namespace MatroxFrameGrabber.Views
         /// </summary>
         private void OnStatsRefreshed()
         {
-            RedrawBrightness();
+            RedrawTimeline();
             Pane0?.RefreshRoiOverlay();
             Pane1?.RefreshRoiOverlay();
             Pane2?.RefreshRoiOverlay();
@@ -811,200 +811,20 @@ namespace MatroxFrameGrabber.Views
             }
         }
 
-        // ----- Brightness strip -----
-
-        /// <summary>Clipping above this share of sampled pixels is called out in the legend.</summary>
-        private const double ClipWarnPercent = 1.0;
-
-        private static readonly string[] ChannelBrushKeys = { "Ch0Brush", "Ch1Brush", "Ch2Brush", "Ch3Brush" };
-        private readonly Polyline[] _brightnessLines = new Polyline[4];
-        private readonly BrightnessSample[] _sampleScratch = new BrightnessSample[BrightnessHistory.Capacity];
-
-        // Static axis chrome (gridlines + labels), built once and repositioned on every redraw as
-        // the canvas resizes. Recreating these every tick would grow the visual tree without bound.
-        // The gridlines belong to the plot canvas; the labels belong to the gutter beside it.
-        private static readonly double[] GridLumaLevels = { 64, 128, 192 };
-        private readonly Line[] _brightnessGridLines = new Line[GridLumaLevels.Length];
-        private readonly TextBlock[] _yAxisLabels = new TextBlock[3];   // "255" / "128" / "0"
+        // ----- Anomaly lane strip -----
 
         /// <summary>
-        /// Redraws the brightness strip. The vertical axis is pinned to 0-255 rather than scaled to
-        /// the data: an auto-scaled axis hides the slow drift the graph exists to reveal.
-        /// </summary>
-        private void RedrawBrightness()
-        {
-            var vm = DataContext as MainViewModel;
-            // Cleared before the early-return guard: a strip whose canvas hasn't been laid out yet
-            // must never keep showing labels from a previous state.
-            BrightnessLegend.Children.Clear();
-            if (vm == null || BrightnessCanvas.ActualWidth <= 0)
-                return;
-
-            double w = BrightnessCanvas.ActualWidth;
-            double h = BrightnessCanvas.ActualHeight;
-
-            EnsureAxisElements();
-            RepositionAxisElements(w, h);
-
-            for (int i = 0; i < _brightnessLines.Length; i++)
-            {
-                if (_brightnessLines[i] == null)
-                {
-                    _brightnessLines[i] = new Polyline
-                    {
-                        Stroke = (Brush)FindResource(ChannelBrushKeys[i]),
-                        StrokeThickness = 1.5
-                    };
-                    BrightnessCanvas.Children.Add(_brightnessLines[i]);
-                }
-            }
-
-            for (int i = 0; i < vm.Channels.Count && i < _brightnessLines.Length; i++)
-            {
-                var channel = vm.Channels[i];
-                // A channel with no camera, or one that is stopped, has no valid display buffer —
-                // drawing a flat zero for it would read as "this camera is completely dark". A
-                // stopped channel also must not keep asserting its last (now stale) reading, so
-                // its line is explicitly emptied rather than merely left unassigned this tick.
-                if (!channel.IsGrabbing || !channel.Brightness.HasData)
-                {
-                    _brightnessLines[i].Points = new PointCollection();
-                    continue;
-                }
-
-                // Points are built into a fresh collection and assigned once, instead of appending
-                // to the live PointCollection already bound to the Polyline — the latter fires a
-                // change notification per point (~960/tick across 4 channels), which is exactly the
-                // kind of avoidable cost this branch exists to eliminate.
-                int n = channel.Brightness.CopyTo(_sampleScratch);
-                var points = new PointCollection(n);
-                for (int p = 0; p < n; p++)
-                {
-                    // Right-aligned: "now" is always the right edge, so every running channel's
-                    // samples line up on the same shared time axis regardless of when it started
-                    // (a channel with fewer samples simply has a shorter line, growing from the right).
-                    double x = w - (n - 1 - p) * w / (BrightnessHistory.Capacity - 1);
-                    double y = h - (h * _sampleScratch[p].Luma / 255.0);
-                    points.Add(new Point(x, y));
-                }
-                _brightnessLines[i].Points = points;
-
-                BrightnessLegend.Children.Add(BuildLegendEntry(channel, i));
-            }
-
-            // Diagnostic tooltip on the strip itself (it used to hang off the Brightness toggle,
-            // which no longer exists): makes the 500 ms budget check (spec verification 3) and a
-            // permanently-failing channel (F6) both readable at a glance, instead of requiring a
-            // debugger.
-            var diag = new StringBuilder();
-            for (int i = 0; i < vm.Channels.Count; i++)
-            {
-                if (diag.Length > 0) diag.Append("  ");
-                var channel = vm.Channels[i];
-                diag.Append($"ch{i} ");
-                diag.Append(channel.BrightnessFailures > 0
-                    ? $"FAIL x{channel.BrightnessFailures}"
-                    : $"{channel.LastBrightnessSampleMs:F1} ms");
-            }
-            BrightnessStrip.ToolTip = diag.ToString();
-        }
-
-        /// <summary>
-        /// Builds one legend entry: a colour swatch followed by neutral-coloured readings.
+        /// Redraws the strip from the channels.
         ///
-        /// The swatch reuses the polyline's own <see cref="Brush"/> instance, so the legend colour
-        /// cannot drift from the line it labels. It exists because colouring the *text* was not
-        /// enough to tell four pastel 1.5 px lines apart, and because the clipping warning used to
-        /// repaint the whole entry red — losing the channel's identity at exactly the moment the
-        /// reader needs to know which channel is clipping. Only the clip figure carries the
-        /// warning colour now.
+        /// The renderer that used to live here drew a brightness curve and rebuilt its legend on
+        /// every 500 ms tick, about 40 elements a second. ChannelTimeline builds once and updates
+        /// in place, and the placement rules it needs are in TimelineLayout, which is testable.
         /// </summary>
-        private FrameworkElement BuildLegendEntry(CameraChannel channel, int index)
+        private void RedrawTimeline()
         {
-            BrightnessSample latest = channel.Brightness.Latest;
-            var entry = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 16, 0) };
-
-            entry.Children.Add(new Rectangle
-            {
-                Width = 16,
-                Height = 3,
-                RadiusX = 1.5,
-                RadiusY = 1.5,
-                Fill = _brightnessLines[index].Stroke,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 5, 0)
-            });
-
-            var textBrush = (Brush)FindResource("TextBrush");
-            var mutedBrush = (Brush)FindResource("MutedTextBrush");
-
-            entry.Children.Add(new TextBlock
-            {
-                Text = $"{channel.Name}  {latest.Luma:F0}",
-                Foreground = textBrush,
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            entry.Children.Add(new TextBlock
-            {
-                Text = $"clip {latest.ClippedPct:F1}%",
-                Foreground = latest.ClippedPct >= ClipWarnPercent ? (Brush)FindResource("WarnBrush") : mutedBrush,
-                Margin = new Thickness(8, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            entry.Children.Add(new TextBlock
-            {
-                Text = $"blk {latest.BlackPct:F1}%",
-                Foreground = mutedBrush,
-                Margin = new Thickness(6, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            });
-
-            return entry;
+            if (DataContext is MainViewModel vm)
+                Timeline.Update(vm.Channels);
         }
 
-        /// <summary>Creates the gridlines/labels once (idempotent). Added before the data polylines
-        /// created in <see cref="RedrawBrightness"/> so the gridlines render behind the data.</summary>
-        private void EnsureAxisElements()
-        {
-            if (_brightnessGridLines[0] != null)
-                return;
-
-            var gridBrush = (Brush)FindResource("BorderBrushColor");
-            for (int i = 0; i < GridLumaLevels.Length; i++)
-            {
-                _brightnessGridLines[i] = new Line { Stroke = gridBrush, StrokeThickness = 0.5, Opacity = 0.5 };
-                BrightnessCanvas.Children.Add(_brightnessGridLines[i]);
-            }
-
-            // Labels go in the gutter canvas, not the plot canvas. Both live in the same Grid row,
-            // so they share a height and the y coordinates computed below line up with the gridlines.
-            var labelBrush = (Brush)FindResource("MutedTextBrush");
-            string[] yText = { "255", "128", "0" };
-            for (int i = 0; i < _yAxisLabels.Length; i++)
-            {
-                _yAxisLabels[i] = new TextBlock { Text = yText[i], Foreground = labelBrush, FontSize = 9 };
-                BrightnessAxisGutter.Children.Add(_yAxisLabels[i]);
-            }
-        }
-
-        /// <summary>Repositions the static axis chrome for the canvas's current size (called every redraw).</summary>
-        private void RepositionAxisElements(double w, double h)
-        {
-            for (int i = 0; i < GridLumaLevels.Length; i++)
-            {
-                double y = h - h * GridLumaLevels[i] / 255.0;
-                _brightnessGridLines[i].X1 = 0;
-                _brightnessGridLines[i].X2 = w;
-                _brightnessGridLines[i].Y1 = y;
-                _brightnessGridLines[i].Y2 = y;
-            }
-
-            // Right-aligned in the gutter so the numbers sit against the plot edge they annotate.
-            // "0" sits a full line-height up from the bottom so its baseline reads as the 0 line
-            // rather than hanging below it.
-            Canvas.SetRight(_yAxisLabels[0], 4); Canvas.SetTop(_yAxisLabels[0], 0);           // 255, top
-            Canvas.SetRight(_yAxisLabels[1], 4); Canvas.SetTop(_yAxisLabels[1], h / 2 - 6);   // 128, middle
-            Canvas.SetRight(_yAxisLabels[2], 4); Canvas.SetTop(_yAxisLabels[2], h - 12);      // 0, bottom
-        }
     }
 }

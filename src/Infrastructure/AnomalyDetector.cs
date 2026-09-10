@@ -726,11 +726,40 @@ namespace MatroxFrameGrabber.Infrastructure
 
             EventsRejectedForSpread++;
             LastRejectedEvent = candidate;
+
+            // Queued as well as kept, because the caller draws every one of them. Bounded: a
+            // reader that stops draining must not be able to grow this without limit, and the
+            // count above is the record that survives either way.
+            if (_rejectedQueue.Count >= MaxQueuedRejections) _rejectedQueue.Dequeue();
+            _rejectedQueue.Enqueue(candidate);
             return null;
+        }
+
+        /// <summary>
+        /// Rejections held for a reader. Small on purpose - the strip drains this twice a second,
+        /// and the worst burst measured was five in six seconds.
+        /// </summary>
+        private const int MaxQueuedRejections = 64;
+
+        private readonly System.Collections.Generic.Queue<AnomalyEvent> _rejectedQueue =
+            new System.Collections.Generic.Queue<AnomalyEvent>();
+
+        /// <summary>
+        /// Takes the oldest rejection not yet read. Call until it returns false.
+        ///
+        /// Every one, not the last one: <see cref="LastRejectedEvent"/> holds a single slot and a
+        /// tick that turned away several would leave the rest invisible.
+        /// </summary>
+        public bool TryTakeRejected(out AnomalyEvent rejected)
+        {
+            if (_rejectedQueue.Count == 0) { rejected = default; return false; }
+            rejected = _rejectedQueue.Dequeue();
+            return true;
         }
 
         public void Reset()
         {
+            _rejectedQueue.Clear();
             Array.Clear(_window, 0, _window.Length);
             _windowCount = 0;
             _windowNext = 0;
