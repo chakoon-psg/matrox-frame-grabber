@@ -26,7 +26,6 @@ namespace MatroxFrameGrabber.Infrastructure
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
-        private VideoEncoding _recordingEncoding = VideoEncoding.H264;
         private VideoContainer _sessionContainer = VideoContainer.MpegTs;
         private int _sessionRateFps = DefaultSessionRateFps;
         private double _sessionSegmentSeconds = DefaultSessionSegmentSeconds;
@@ -252,29 +251,24 @@ namespace MatroxFrameGrabber.Infrastructure
         public const double SegmentSeconds = 2.0;
 
         /// <summary>
-        /// What a session recording does to the pixels.
+        /// What the continuous recording does to the pixels. Fixed, not a setting.
         ///
-        /// H.264 by default because a session recording is normally watched, and because the two
-        /// bit-exact options cost between 100 and 500 times the bytes: measured, 17.7 GB per minute
-        /// at 1024x772 and 71 GB per minute at 2064x1544, against 188-261 kb/s for the H.264 clips
-        /// from the same run. The drive matters more than the disk here - 3 channels of raw is
-        /// 884 MB/s, which is 76 TB a day, and a 1 TB TLC SSD is rated for about 750 TB in total.
+        /// It was offered as a choice of three and the measurements closed it. Over 24 hours on
+        /// three channels: uncompressed is 19 TB a day and 221 MB/s, which is twice what 1 GbE
+        /// carries; lossless is 5.8 TB a day and would sit on 60% of the link forever; H.264 is
+        /// 1.9-3.2 GB a day measured here, or about 0.26 TB on lit moving content. Neither
+        /// bit-exact option is defensible for a recording that never stops.
         ///
-        /// This is the session file only. An anomaly's evidence does not follow it: see KeepStills
-        /// and CLAUDE.md - the clip is context and the stills are the measurement, and neither is
-        /// a choice made here.
+        /// It also collided with the container. MPEG-TS carries H.264 and nothing else we write,
+        /// so choosing lossless silently dropped the session back to Matroska - and with it the
+        /// only reason the container was chosen, which is that a file killed mid-write still
+        /// reads back. Two settings quietly overriding each other is worse than one fewer setting.
+        ///
+        /// The capability stays: VideoEncoding and the per-output plumbing in FfmpegArgs are what
+        /// the anomaly evidence will use, and that tier is bit-exact by design rather than by
+        /// preference. What is gone is only the choice on the continuous file.
         /// </summary>
-        public VideoEncoding RecordingEncoding
-        {
-            get => _recordingEncoding;
-            set
-            {
-                if (_recordingEncoding == value) return;
-                _recordingEncoding = value;
-                RaiseChanged(nameof(RecordingEncoding));
-                Save();
-            }
-        }
+        public const VideoEncoding SessionEncoding = VideoEncoding.H264;
 
         /// <summary>
         /// Frames per second wanted from the continuous recording. 0 takes every frame.
@@ -389,7 +383,6 @@ namespace MatroxFrameGrabber.Infrastructure
             // Also a name rather than the number, for the same reason: an unrecognised value must
             // fall back to H.264, where an out-of-range index could select the one that writes
             // 71 GB a minute.
-            public string RecordingEncoding { get; set; }
             public string SessionContainer { get; set; }
             public int? SessionRateFps { get; set; }
             public double? SessionSegmentSeconds { get; set; }
@@ -455,7 +448,6 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._videoSink =
                             Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
                                 ? pref : VideoSinkPreference.Auto;
-                        s._recordingEncoding = VideoCodecs.Parse(dto.RecordingEncoding);
                         s._sessionContainer =
                             Enum.TryParse(dto.SessionContainer, ignoreCase: true, out VideoContainer sc)
                                 ? sc : VideoContainer.MpegTs;
@@ -597,7 +589,6 @@ namespace MatroxFrameGrabber.Infrastructure
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
-                    RecordingEncoding = _recordingEncoding.ToString(),
                     SessionContainer = _sessionContainer.ToString(),
                     SessionRateFps = _sessionRateFps,
                     SessionSegmentSeconds = _sessionSegmentSeconds,

@@ -2066,13 +2066,15 @@ namespace MatroxFrameGrabber.Mil
             // Segments, in a container that survives a kill: an MP4 killed mid-write gave back 0
             // frames, measured. The frame size is still the acquisition's - that one really is a
             // result rather than a choice.
-            VideoContainer container = VideoCodecs.Supports(Output.RecordingEncoding, Output.SessionContainer)
+            // The pairing is fixed and valid - H.264 is what MPEG-TS carries - but checked
+            // rather than assumed, because a bad pairing surfaces as "recording did not start".
+            VideoContainer container = VideoCodecs.Supports(OutputSettings.SessionEncoding, Output.SessionContainer)
                 ? Output.SessionContainer
                 : VideoContainer.Default;
             var spec = new VideoStreamSpec(
                 _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
                 new[] { VideoOutputSpec.Session(everyNth, Output.SessionSegmentSeconds,
-                                                Output.RecordingEncoding, container) });
+                                                OutputSettings.SessionEncoding, container) });
 
             // Before Start, because that is when the sink decides whether to make its own reader.
             if (_recording is IHostFrameSink host)
@@ -2090,7 +2092,7 @@ namespace MatroxFrameGrabber.Mil
                                + $"of {fps:F3} delivered = every {everyNth} frame(s), "
                                + $"file declares {fileFps:F3} fps, "
                                + $"{Output.SessionSegmentSeconds:0.#} s segments, "
-                               + $".{VideoCodecs.Extension(Output.RecordingEncoding, container)}");
+                               + $".{VideoCodecs.Extension(OutputSettings.SessionEncoding, container)}");
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
@@ -2147,7 +2149,7 @@ namespace MatroxFrameGrabber.Mil
                     FramesSkipped = st.FramesSkipped,
                     FramesDropped = st.FramesDropped,
                     FramesNotWanted = st.FramesNotWanted,
-                    Encoding = Output?.RecordingEncoding.ToString() ?? string.Empty,
+                    Encoding = OutputSettings.SessionEncoding.ToString(),
                     Container = Output?.SessionContainer.ToString() ?? string.Empty,
                     SegmentSeconds = Output?.SessionSegmentSeconds ?? 0.0,
                     Files = _recording.FilePaths.Count > 0 ? _recording.FilePaths[0] : string.Empty,
