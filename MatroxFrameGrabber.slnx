@@ -8,4 +8,7 @@
   <Project Path="tests/MatroxFrameGrabber.Tests.csproj">
     <Platform Project="x64" />
   </Project>
+  <Project Path="tools/MilVideoSink/MilVideoSink.csproj">
+    <Platform Project="x64" />
+  </Project>
 </Solution>

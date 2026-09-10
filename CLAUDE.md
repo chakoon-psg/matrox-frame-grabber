@@ -58,34 +58,50 @@ src/
   ViewModels/                  MatroxFrameGrabber.ViewModels (MainViewModel)
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
-                                 GenICamFeatures, RecordingSession, BrightnessMeter
+                                 GenICamFeatures, TileReducer, BrightnessMeter, StillRing
+    Video/                     MatroxFrameGrabber.Mil.Video
+                                 IVideoSink, VideoStreamSpec, VideoSinkStats,
+                                 VideoSinkFactory, FfmpegVideoSink, MilSeqVideoSink
   Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
-                                 OutputSettings, FfmpegRecorder,
-                                 RelayCommand, NativeMethods,
+                                 OutputSettings, RelayCommand, NativeMethods,
                                  BrightnessHistory, ChannelRoi, RoiGesture,
                                  DisplayMapping, BrightnessSamplePlan, PwmSweep,
-                                 TileGrid, FrameMetrics, AnomalyDetector,
-                                 BrightnessLog
-tests/                         MatroxFrameGrabber.Tests (165개). csproj가 위 파일들을
+                                 TileGrid, TileBounds, TileHistory, FrameMetrics,
+                                 AnomalyDetector, BrightnessLog, MilErrorLog
+    Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy
+tests/                         MatroxFrameGrabber.Tests (263개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
-                               MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다.
+                               MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
+                               아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
 docs/
 LICENSES/                       동봉 서드파티 라이선스 고지
 tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
+  MilVideoSink/                 MIL 인코딩용 독립 하네스 — 납품사에 넘기는 슬라이스.
+                                도메인 로직 0. README.md / ACCEPTANCE.md 참고
 research.md                    src/ 심층 분석
 ```
 
 핵심은 `CameraChannel`이다. 채널마다 `MdigAlloc(M_DEV0+i)` + `MdispAlloc(M_WPF)` +
 디스플레이 버퍼 + grab 링 + `MdigProcess` 훅을 잡고, GenICam 피처 제어까지 한다.
 이 클래스는 **모델이자 뷰모델**이다(`INotifyPropertyChanged`를 구현하고 `RelayCommand`를
-노출하며 pane의 `DataContext`로 직접 바인딩된다) — 그래서 약 1400줄이다.
+노출하며 pane의 `DataContext`로 직접 바인딩된다) — 그래서 약 2400줄이다. 검출을 붙이면서
+1400줄에서 늘었고, 그 배선을 `Infrastructure`로 내리는 것이 다음 정리 대상이다.
 `MilApplicationManager`는 공유 앱·시스템을 소유하고 채널마다 `CameraChannel`을 하나씩 만든다.
 
 ## 녹화
 
-`● Rec` 하나뿐이다. `RecordingSession`이 grab 버퍼(3밴드 컬러)를 메모리를 거쳐 ffmpeg
-**stdin 파이프**로 보내고, 픽셀 포맷은 플래나 `gbrp`(또는 1밴드일 때 `gray`)다. 부하가 걸리면
-**프레임을 버린다** — 라이브 뷰가 우선이다. 해상도 프리셋이 적용된다.
+`● Rec` 하나뿐이고, 무엇이 인코딩하는지는 **`IVideoSink`** 뒤에 있다. `VideoSinkFactory`가
+시작할 때 고르고 그 이유를 로그와 Rec 버튼 툴팁에 남긴다 — 현재는 `FfmpegVideoSink`가 grab
+버퍼(3밴드 컬러)를 메모리를 거쳐 ffmpeg **stdin 파이프**로 보내고, 픽셀 포맷은 플래나
+`gbrp`(또는 1밴드일 때 `gray`)다. 부하가 걸리면 **프레임을 버린다** — 라이브 뷰가 우선이다.
+
+`Feed`가 `byte[]`가 아니라 **`MIL_ID`** 를 받는 것이 이 계약의 핵심이다. ffmpeg 경로는 프레임을
+호스트로 읽어내야 하지만(실측 462 µs) `MseqFeed`는 버퍼를 그대로 받는다 — 바이트로 받는 계약은
+두 번째 백엔드에 첫 번째의 비용을 강요한다. **명령줄과 레이트 산술은 `Infrastructure/Video/`에
+있고 테스트된다**(`FfmpegArgs`, `VideoRatePolicy`) — 녹화 결함 두 건이 거기 살았다.
+
+`MilSeqVideoSink`는 **이 장비에서 한 번도 실행된 적 없는 골격**이다. `tools/MilVideoSink/`가
+그것을 개발·계측할 독립 하네스이며 납품사에 넘기는 슬라이스다.
 
 무손실 RAW-Bayer 녹화(`◆ RAW`)가 있었고 제거했다. `M_BAYER_CONVERSION`을 끄는 유일한
 코드였는데, **그 설정은 보드에 남으므로 복원 규율은 그대로 필요하다** — 아래 함정 참고.
