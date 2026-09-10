@@ -26,6 +26,7 @@ namespace MatroxFrameGrabber.Infrastructure
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
+        private VideoEncoding _recordingEncoding = VideoEncoding.H264;
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
@@ -208,6 +209,31 @@ namespace MatroxFrameGrabber.Infrastructure
         public const double SegmentSeconds = 2.0;
 
         /// <summary>
+        /// What a session recording does to the pixels.
+        ///
+        /// H.264 by default because a session recording is normally watched, and because the two
+        /// bit-exact options cost between 100 and 500 times the bytes: measured, 17.7 GB per minute
+        /// at 1024x772 and 71 GB per minute at 2064x1544, against 188-261 kb/s for the H.264 clips
+        /// from the same run. The drive matters more than the disk here - 3 channels of raw is
+        /// 884 MB/s, which is 76 TB a day, and a 1 TB TLC SSD is rated for about 750 TB in total.
+        ///
+        /// This is the session file only. An anomaly's evidence does not follow it: see KeepStills
+        /// and CLAUDE.md - the clip is context and the stills are the measurement, and neither is
+        /// a choice made here.
+        /// </summary>
+        public VideoEncoding RecordingEncoding
+        {
+            get => _recordingEncoding;
+            set
+            {
+                if (_recordingEncoding == value) return;
+                _recordingEncoding = value;
+                RaiseChanged(nameof(RecordingEncoding));
+                Save();
+            }
+        }
+
+        /// <summary>
         /// Which backend records. Auto uses MIL when it is known to work here and ffmpeg otherwise;
         /// an explicit choice is honoured with no fallback, which is what makes a delivered MIL sink
         /// testable - see VideoSinkPolicy.
@@ -231,7 +257,9 @@ namespace MatroxFrameGrabber.Infrastructure
         private class Dto
         {
             public string OutputFolder { get; set; }
-            [JsonConverter(typeof(JsonStringEnumConverter))]
+            // No converter on this one. It is a string, and a JsonStringEnumConverter that was
+            // once attached here made System.Text.Json refuse the whole Dto contract - which the
+            // catch below turned into "no settings file", silently, for every value in it.
             public string FfmpegPath { get; set; }
             public RoiDto[] ChannelRois { get; set; }
             public int DisplayUpdateFps { get; set; } = 30;
@@ -239,6 +267,11 @@ namespace MatroxFrameGrabber.Infrastructure
             // A name, not the enum's number: an unrecognised string falls back to Auto, where an
             // out-of-range index would select a backend nobody asked for.
             public string VideoSink { get; set; }
+
+            // Also a name rather than the number, for the same reason: an unrecognised value must
+            // fall back to H.264, where an out-of-range index could select the one that writes
+            // 71 GB a minute.
+            public string RecordingEncoding { get; set; }
             public double? AnomalyClipSeconds { get; set; }
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
@@ -295,6 +328,7 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._videoSink =
                             Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
                                 ? pref : VideoSinkPreference.Auto;
+                        s._recordingEncoding = VideoCodecs.Parse(dto.RecordingEncoding);
                         s._displayUpdateFps = dto.DisplayUpdateFps <= 0
                             ? 0
                             : (dto.DisplayUpdateFps < 5 ? 5 : (dto.DisplayUpdateFps > 120 ? 120 : dto.DisplayUpdateFps));
@@ -353,9 +387,14 @@ namespace MatroxFrameGrabber.Infrastructure
                     }
                 }
             }
-            catch
+            catch (Exception e)
             {
-                // Corrupt/unreadable settings — keep defaults.
+                // Corrupt/unreadable settings - keep defaults. Logged, because the failure is
+                // otherwise indistinguishable from a first run: a JsonStringEnumConverter left on a
+                // string property made this catch discard every setting in the file, and the app
+                // ran on defaults for as long as it took to notice that a decimation of 2 was not
+                // being applied. If it cannot be read, that has to be said out loud.
+                MilErrorLog.Write("settings: load failed - running on defaults", e);
             }
             s._loading = false;
 
@@ -394,6 +433,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
+                    RecordingEncoding = _recordingEncoding.ToString(),
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,
@@ -402,9 +442,12 @@ namespace MatroxFrameGrabber.Infrastructure
                 };
                 File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }
-            catch
+            catch (Exception e)
             {
-                // Non-fatal: settings just won't persist this time.
+                // Non-fatal: settings just won't persist this time. Logged for the same reason as
+                // the load - a save that cannot happen looks exactly like a setting that was never
+                // changed, and the same contract error broke both halves at once.
+                MilErrorLog.Write("settings: save failed", e);
             }
         }
 

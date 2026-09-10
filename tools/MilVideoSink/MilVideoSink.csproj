@@ -36,6 +36,7 @@
     <Compile Include="..\..\src\Infrastructure\FfmpegRecorder.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Infrastructure\Video\FfmpegArgs.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Infrastructure\Video\VideoRatePolicy.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Video\VideoEncoding.cs" LinkBase="Shared" />
   </ItemGroup>
 
 </Project>

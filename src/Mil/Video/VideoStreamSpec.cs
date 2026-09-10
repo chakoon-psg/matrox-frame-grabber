@@ -1,5 +1,6 @@
 using System;
 using Matrox.MatroxImagingLibrary;
+using MatroxFrameGrabber.Infrastructure;
 
 namespace MatroxFrameGrabber.Mil.Video
 {
@@ -36,8 +37,17 @@ namespace MatroxFrameGrabber.Mil.Video
         /// <summary>Segments to keep before deleting the oldest; 0 keeps everything.</summary>
         public readonly int RetainSegments;
 
+        /// <summary>
+        /// What this file does to the pixels. Per output, because the two tiers answer different
+        /// questions: the session file is for watching or for measuring, whichever the operator
+        /// chose, while the segment ring is H.264 regardless - it is written continuously for the
+        /// life of the drive, and lossless would be 100 to 500 times the bytes.
+        /// </summary>
+        public readonly VideoEncoding Encoding;
+
         public VideoOutputSpec(string label, int everyNthFrame = 1, double segmentSeconds = 0.0,
-                               double keyframeSeconds = 0.0, int retainSegments = 0)
+                               double keyframeSeconds = 0.0, int retainSegments = 0,
+                               VideoEncoding encoding = VideoEncoding.H264)
         {
             if (everyNthFrame < 1) throw new ArgumentOutOfRangeException(nameof(everyNthFrame));
             Label = label ?? string.Empty;
@@ -45,12 +55,15 @@ namespace MatroxFrameGrabber.Mil.Video
             SegmentSeconds = segmentSeconds;
             KeyframeSeconds = keyframeSeconds;
             RetainSegments = retainSegments;
+            Encoding = encoding;
         }
 
         public bool IsSegmented => SegmentSeconds > 0.0;
 
         /// <summary>Every frame at the source rate, in one file. What "● Rec" has always done.</summary>
-        public static VideoOutputSpec SingleFile(string label = "") => new VideoOutputSpec(label);
+        public static VideoOutputSpec SingleFile(string label = "",
+                                                 VideoEncoding encoding = VideoEncoding.H264) =>
+            new VideoOutputSpec(label, encoding: encoding);
     }
 
     /// <summary>

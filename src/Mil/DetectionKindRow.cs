@@ -8,10 +8,10 @@ namespace MatroxFrameGrabber.Mil
     /// One anomaly kind as the settings window shows it: a checkbox, what it is set to, and whether
     /// anything implements it.
     ///
-    /// All five are listed, four of them switched off and un-tickable. A checkbox that can be
-    /// ticked and does nothing is worse than one that cannot, and leaving the four out entirely is
-    /// worse still: a quiet panel would read as "nothing wrong" when one of five things is being
-    /// looked at.
+    /// Every kind is listed and all but Dropout are switched off and un-tickable. A checkbox that
+    /// can be ticked and does nothing is worse than one that cannot, and leaving the unimplemented
+    /// ones out entirely is worse still: a quiet panel would read as "nothing wrong" when one of
+    /// seven things is being looked at.
     /// </summary>
     public sealed class DetectionKindRow : INotifyPropertyChanged
     {
@@ -77,7 +77,7 @@ namespace MatroxFrameGrabber.Mil
             Raise(nameof(StatusText));
         }
 
-        /// <summary>The five rows for one channel, in the order the catalog lists them.</summary>
+        /// <summary>One row per kind for one channel, in the order the catalog lists them.</summary>
         internal static IReadOnlyList<DetectionKindRow> BuildFor(CameraChannel channel)
         {
             var rows = new List<DetectionKindRow>(AnomalyCatalog.Count);

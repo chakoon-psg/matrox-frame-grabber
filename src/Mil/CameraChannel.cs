@@ -1915,8 +1915,11 @@ namespace MatroxFrameGrabber.Mil
         #region Recording (delegated to an IVideoSink)
 
         /// <summary>
-        /// Starts recording this camera to {OutputName}_{timestamp}.mp4 in the output folder,
-        /// at the configured resolution preset. Requires <see cref="CanRecord"/> (ffmpeg present).
+        /// Starts recording this camera to {OutputName}_{timestamp} in the output folder, at the
+        /// acquisition size and rate. Requires <see cref="CanRecord"/> (ffmpeg present).
+        ///
+        /// The extension follows the chosen encoding - .mp4, .mkv or .avi - and nothing else about
+        /// the call changes with it.
         /// </summary>
         public bool StartRecording()
         {
@@ -1936,7 +1939,7 @@ namespace MatroxFrameGrabber.Mil
             // delivers it at. The sink can still scale - the contract keeps it - this caller does not.
             var spec = new VideoStreamSpec(
                 _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
-                new[] { VideoOutputSpec.SingleFile() });
+                new[] { VideoOutputSpec.SingleFile(encoding: Output.RecordingEncoding) });
             bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -1945,7 +1948,7 @@ namespace MatroxFrameGrabber.Mil
             return ok;
         }
 
-        /// <summary>Stops recording and finalizes the .mp4 file (finalization runs asynchronously).</summary>
+        /// <summary>Stops recording and finalizes the file (finalization runs asynchronously).</summary>
         public void StopRecording()
         {
             if (_recording == null || !_recording.IsActive)
@@ -2036,9 +2039,15 @@ namespace MatroxFrameGrabber.Mil
                 {
                     // Every frame, and a keyframe several times a segment so a boundary can land
                     // where the muxer wants it. Never scaled: a shrunken clip is weak evidence.
+                    //
+                    // H.264 whatever the session recording is set to, and not for want of asking:
+                    // this ring is written for as long as the grab runs, and 3 channels of raw is
+                    // 884 MB/s - 76 TB a day against an SSD rated for 750 TB in total. The clip is
+                    // context; the measurement is the lossless stills beside it.
                     new VideoOutputSpec("seg", 1,
                                         segmentSeconds: OutputSettings.SegmentSeconds,
-                                        keyframeSeconds: OutputSettings.SegmentSeconds / 4.0),
+                                        keyframeSeconds: OutputSettings.SegmentSeconds / 4.0,
+                                        encoding: VideoEncoding.H264),
                 });
 
             if (!sink.Start(spec, out string err))
@@ -2777,6 +2786,27 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>Size of the frames actually arriving, which is what the ROI is clamped to.</summary>
+        /// <summary>
+        /// The frame size plus how many bands it carries, which is what a size-per-minute estimate
+        /// needs: 3 bands is three times the bytes of 1, and the Bayer-conversion state decides
+        /// which it is.
+        /// </summary>
+        internal bool TryGetFrameShape(out int width, out int height, out int bands)
+        {
+            bands = 3;
+            if (!TryGetFrameSize(out width, out height)) return false;
+            try
+            {
+                bands = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
+                if (bands < 1) bands = 1;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read band count", e);
+            }
+            return true;
+        }
+
         internal bool TryGetFrameSize(out int width, out int height)
         {
             width = 0; height = 0;

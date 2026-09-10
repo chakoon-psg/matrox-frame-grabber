@@ -267,16 +267,121 @@ namespace MatroxFrameGrabber.ViewModels
         {
             get
             {
-                foreach (CameraChannel c in _manager.Channels)
-                {
-                    if (!c.CameraPresent) continue;
-                    return c.TryGetFrameSize(out int w, out int h) && c.DetectionFps > 1.0
-                        ? $"{w}x{h} at {c.DetectionFps:F3} fps, every frame"
-                        : "every frame, at the acquisition size";
-                }
-                return "no camera";
+                return TryAcquisition(out int w, out int h, out _, out double fps)
+                    ? $"{w}x{h} at {fps:F3} fps, every frame"
+                    : AnyCameraPresent ? "every frame, at the acquisition size" : "no camera";
             }
         }
+
+        /// <summary>
+        /// The first present camera's frame shape and rate, which is what the whole-app recording
+        /// settings are described against. Channels can differ in principle; the settings window
+        /// speaks about the recording in general, so it takes the first one that exists.
+        /// </summary>
+        private bool TryAcquisition(out int width, out int height, out int bands, out double fps)
+        {
+            width = height = 0; bands = 3; fps = 0.0;
+            foreach (CameraChannel c in _manager.Channels)
+            {
+                if (!c.CameraPresent) continue;
+                fps = c.DetectionFps;
+                return c.TryGetFrameShape(out width, out height, out bands) && fps > 1.0;
+            }
+            return false;
+        }
+
+        private bool AnyCameraPresent
+        {
+            get
+            {
+                foreach (CameraChannel c in _manager.Channels)
+                    if (c.CameraPresent) return true;
+                return false;
+            }
+        }
+
+        // ----- Encoding: what a session recording does to the pixels -----
+
+        public bool EncodingIsH264
+        {
+            get => Output.RecordingEncoding == VideoEncoding.H264;
+            set { if (value) SetEncoding(VideoEncoding.H264); }
+        }
+
+        public bool EncodingIsLossless
+        {
+            get => Output.RecordingEncoding == VideoEncoding.Lossless;
+            set { if (value) SetEncoding(VideoEncoding.Lossless); }
+        }
+
+        public bool EncodingIsUncompressed
+        {
+            get => Output.RecordingEncoding == VideoEncoding.Uncompressed;
+            set { if (value) SetEncoding(VideoEncoding.Uncompressed); }
+        }
+
+        /// <summary>
+        /// What the chosen encoding writes, per minute, at the geometry actually being acquired.
+        ///
+        /// Shown because the three options are three orders of magnitude apart and nothing else on
+        /// screen would say so: the H.264 clips from the 2026-09-10 run were 188-261 kb/s, while
+        /// uncompressed at the same geometry is 295 MB/s. An operator picking the third radio
+        /// deserves to see 18 GB/min before the disk fills, not after.
+        /// </summary>
+        public string RecordingCostText
+        {
+            get
+            {
+                VideoEncoding e = Output.RecordingEncoding;
+                if (!TryAcquisition(out int w, out int h, out int bands, out double fps))
+                    return VideoCodecs.IsLossless(e)
+                        ? "bit-exact, and large - the size depends on the acquisition"
+                        : "compressed, and small";
+
+                string size = VideoCodecs.SizePerMinute(e, w, h, bands, fps);
+                switch (e)
+                {
+                    case VideoEncoding.Lossless:
+                        return $"{VideoCodecs.Name(e, bands)}, bit-exact - {size}, "
+                             + "and real frames measured 4.2x smaller than that";
+                    case VideoEncoding.Uncompressed:
+                        return $"rawvideo, bit-exact - {size}, whatever the picture is";
+                    default:
+                        return "libx264 CRF 23, lossy - small, and the deviation cannot be "
+                             + "measured again from it";
+                }
+            }
+        }
+
+        private void SetEncoding(VideoEncoding encoding)
+        {
+            if (Output.RecordingEncoding == encoding) return;
+            Output.RecordingEncoding = encoding;   // persists
+            RaiseChanged(nameof(EncodingIsH264));
+            RaiseChanged(nameof(EncodingIsLossless));
+            RaiseChanged(nameof(EncodingIsUncompressed));
+            RaiseChanged(nameof(RecordingCostText));
+            MilErrorLog.Note($"settings: recording encoding set to {encoding}"
+                           + $" ({VideoCodecs.Name(encoding, 3)}, .{VideoCodecs.Extension(encoding)})"
+                           + " - takes effect on the next Rec");
+        }
+
+        /// <summary>
+        /// Whether to show the backend row at all.
+        ///
+        /// Hidden while the MIL sink does not exist, because then the row is a radio group with one
+        /// option: it says "ffmpeg" and offers nothing. It comes back by itself the moment the
+        /// supplier's code makes Readiness anything other than NotImplemented, which is exactly
+        /// when there is a second answer to give - and the preference stays in settings.json
+        /// meanwhile, so nothing is lost by not showing it.
+        ///
+        /// Except when nothing can record at all. Then the row carries the only explanation of why
+        /// the Rec buttons are dead, and hiding it would leave an encoding choice on screen for a
+        /// recording that cannot start.
+        /// </summary>
+        public bool SinkRowVisible =>
+            VideoSinkFactory.Readiness(out _) != MilReadiness.NotImplemented ||
+            EffectiveSink() == SinkChoice.None;
 
         /// <summary>Raised on the UI thread after every stats tick, so the view can redraw.</summary>
         public event Action StatsRefreshed;

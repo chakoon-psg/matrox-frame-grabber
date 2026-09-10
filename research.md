@@ -367,8 +367,11 @@ W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형�
 
 - 저장 위치: `%LocalAppData%\MatroxFrameGrabber\settings.json`
 - 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `FfmpegPath`, `DisplayUpdateFps`,
-  `SinkPreference`, `SegmentFolder`, `KeepStills`, `AnomalyClipSeconds`, 채널별 `ChannelRois` /
-  `ChannelDecimation` / `ChannelThresholds`
+  `VideoSink`, `RecordingEncoding`, `SegmentFolder`, `KeepStills`, `AnomalyClipSeconds`, 채널별
+  `ChannelRois` / `ChannelDecimation` / `ChannelDetection`
+- **열거형은 숫자가 아니라 이름으로 저장한다**(`VideoSink`, `RecordingEncoding`). 못 알아보는
+  이름은 가장 싼 기본값으로 떨어진다 — 인덱스로 저장하면 범위를 벗어난 값이 분당 71 GB를 쓰는
+  인코딩을 고를 수 있다.
 - **모든 setter가 값 변경 시 즉시 `Save()`** — 별도 저장 버튼이 없다.
 - 방어 장치 두 개가 핵심이다:
   1. **`_loading` 플래그**로 `Load()`가 값을 적용하는 동안 재저장을 억제

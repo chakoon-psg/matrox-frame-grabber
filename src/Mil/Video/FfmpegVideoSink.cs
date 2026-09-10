@@ -48,6 +48,7 @@ namespace MatroxFrameGrabber.Mil.Video
         private string[] _paths = Array.Empty<string>();
         private double[] _rates = Array.Empty<double>();
         private string[] _lists = Array.Empty<string>();
+        private string _codecName = "ffmpeg";
 
         public FfmpegVideoSink(MIL_ID sysId, string ffmpegPath)
         {
@@ -55,7 +56,12 @@ namespace MatroxFrameGrabber.Mil.Video
             _ffmpegPath = ffmpegPath;
         }
 
-        public string Name => "ffmpeg/libx264";
+        /// <summary>
+        /// ffmpeg plus whichever encoder the spec asked for. Not fixed any more: the operator
+        /// chooses between H.264 and two bit-exact encodings, and a name that always said libx264
+        /// would be the one place the log disagreed with what was written.
+        /// </summary>
+        public string Name => "ffmpeg/" + _codecName;
         public bool IsActive => _active;
         public bool Failed => _failed;
         public string LastError { get; private set; }
@@ -125,13 +131,16 @@ namespace MatroxFrameGrabber.Mil.Video
                     string stem = string.IsNullOrEmpty(o.Label)
                         ? $"{spec.BaseName}_{stamp}"
                         : $"{spec.BaseName}_{stamp}_{o.Label}";
+                    // The extension picks the muxer, so it comes from the encoding: utvideo
+                    // into .mp4 is refused and rawvideo into .mkv too.
+                    string ext = VideoCodecs.Extension(o.Encoding);
                     string path = Path.Combine(spec.Folder,
-                        o.IsSegmented ? stem + "_%05d.mp4" : stem + ".mp4");
+                        o.IsSegmented ? $"{stem}_%05d.{ext}" : $"{stem}.{ext}");
                     string list = o.IsSegmented ? Path.Combine(spec.Folder, stem + ".csv") : null;
 
                     outputs.Add(new FfmpegOutput(path, fileFps,
                         VideoRatePolicy.KeyframeInterval(fileFps, o.KeyframeSeconds),
-                        o.SegmentSeconds, list));
+                        o.SegmentSeconds, list, o.Encoding));
                     paths.Add(path);
                     rates.Add(fileFps);
                     lists.Add(list);
@@ -181,6 +190,7 @@ namespace MatroxFrameGrabber.Mil.Video
                     _recorder = recorder;
                     _start = DateTime.Now;
                     _declaredFps = spec.SourceFps;
+                    _codecName = VideoCodecs.Name(spec.Outputs[0].Encoding, color ? 3 : 1);
                     _fed = 0;
                     _skipped = 0;
                     _droppedAtStop = 0;

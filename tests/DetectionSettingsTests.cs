@@ -1,3 +1,4 @@
+using System;
 using MatroxFrameGrabber.Infrastructure;
 using Xunit;
 
@@ -211,6 +212,53 @@ namespace MatroxFrameGrabber.Tests
             Assert.Equal(AnomalyCatalog.Count, s.PerKind.Length);
         }
 
+        /// <summary>
+        /// The migration that adding a kind needs, and the reason this is not just repair: a
+        /// settings file written when there were five kinds is *not* corrupt, it is one version old,
+        /// and the array used to be thrown away whenever its length disagreed. That would have
+        /// dropped a depth measured over 8713 frames back to the default while the detector kept
+        /// running - a change with nothing on screen to announce it.
+        /// </summary>
+        [Fact]
+        public void A_file_written_before_a_kind_was_added_keeps_what_it_had()
+        {
+            var s = new DetectionSettings();
+            var five = new KindSettings[5];
+            for (int i = 0; i < five.Length; i++) five[i] = new KindSettings();
+            five[0].Enabled = true;
+            five[0].Deviation = 0.15;               // the dim channel's measured depth
+            five[0].CalibratedAt = "2026-09-10";
+            five[0].CalibrationFrames = 8713;
+            five[2].Enabled = true;                 // and someone had switched Washout on
+            s.PerKind = five;
+
+            KindSettings dropout = s.For(AnomalyKind.Dropout);
+
+            Assert.Equal(AnomalyCatalog.Count, s.PerKind.Length);
+            Assert.Equal(0.15, dropout.Deviation, 6);
+            Assert.Equal("2026-09-10", dropout.CalibratedAt);
+            Assert.Equal(8713, dropout.CalibrationFrames);
+            Assert.True(s.For(AnomalyKind.Washout).Enabled);
+
+            // And the appended kinds arrive off, so an uncalibrated detector cannot switch itself
+            // on behind an update.
+            Assert.False(s.For(AnomalyKind.Freeze).Enabled);
+            Assert.False(s.For(AnomalyKind.ColorShift).Enabled);
+        }
+
+        [Fact]
+        public void A_file_from_a_later_version_is_truncated_rather_than_refused()
+        {
+            var s = new DetectionSettings();
+            var many = new KindSettings[AnomalyCatalog.Count + 3];
+            for (int i = 0; i < many.Length; i++) many[i] = new KindSettings();
+            many[0].Deviation = 0.2;
+            s.PerKind = many;
+
+            Assert.Equal(0.2, s.For(AnomalyKind.Dropout).Deviation, 6);
+            Assert.Equal(AnomalyCatalog.Count, s.PerKind.Length);
+        }
+
         [Fact]
         public void CopyFrom_carries_every_kind_and_the_shared_values()
         {
@@ -241,10 +289,54 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
-        public void All_five_kinds_are_listed_so_the_settings_window_can_show_what_is_not_checked()
+        public void Every_kind_is_listed_so_the_settings_window_can_show_what_is_not_checked()
         {
             Assert.Equal(AnomalyCatalog.Count, AnomalyCatalog.All.Length);
-            Assert.Contains(AnomalyKind.Flip, AnomalyCatalog.All);
+            foreach (AnomalyKind k in (AnomalyKind[])Enum.GetValues(typeof(AnomalyKind)))
+                Assert.Contains(k, AnomalyCatalog.All);
+        }
+
+        /// <summary>
+        /// Every kind has to describe itself, because the description is the tooltip on a checkbox
+        /// nobody can tick - it is the only thing on screen that says what is not being watched.
+        /// </summary>
+        [Fact]
+        public void Every_kind_says_what_it_looks_like()
+        {
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+                Assert.False(string.IsNullOrWhiteSpace(AnomalyCatalog.Describe(k)), k.ToString());
+        }
+
+        /// <summary>
+        /// Freeze compares the other way round, and this is where that is written down: its number
+        /// is how much change still counts as no change. A detector built to the shape of the other
+        /// six would report a fault whenever the picture was alive.
+        /// </summary>
+        [Fact]
+        public void Freeze_is_the_one_kind_whose_threshold_is_a_ceiling()
+        {
+            Assert.True(AnomalyCatalog.DeviationIsCeiling(AnomalyKind.Freeze));
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+                if (k != AnomalyKind.Freeze)
+                    Assert.False(AnomalyCatalog.DeviationIsCeiling(k), k.ToString());
+
+            Assert.Equal("delta", AnomalyCatalog.DeviationWord(AnomalyKind.Freeze));
+        }
+
+        /// <summary>
+        /// Appended, never renumbered: the numbers are the settings file's keys, so changing one
+        /// would hand a channel another kind's threshold.
+        /// </summary>
+        [Fact]
+        public void The_kind_numbers_are_the_settings_files_keys()
+        {
+            Assert.Equal(0, (int)AnomalyKind.Dropout);
+            Assert.Equal(1, (int)AnomalyKind.Blackout);
+            Assert.Equal(2, (int)AnomalyKind.Washout);
+            Assert.Equal(3, (int)AnomalyKind.Flicker);
+            Assert.Equal(4, (int)AnomalyKind.Flip);
+            Assert.Equal(5, (int)AnomalyKind.Freeze);
+            Assert.Equal(6, (int)AnomalyKind.ColorShift);
         }
 
         /// <summary>

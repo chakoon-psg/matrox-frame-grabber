@@ -73,7 +73,8 @@ src/
                                  AnomalyClipPolicy(+ClipScheduler)
     Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
-                                 VideoSinkPolicy, SegmentRing, ClipExtractor
+                                 VideoEncoding(+VideoCodecs), VideoSinkPolicy,
+                                 SegmentRing, ClipExtractor
 tests/                         MatroxFrameGrabber.Tests (359개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
@@ -105,6 +106,14 @@ research.md                    src/ 심층 분석
 프리셋은 1024×772 앞에서 1080p가 아무 일도 하지 않고 720p가 0.932배였다. `IVideoSink` 계약에는
 배율과 everyNth가 남아 있지만 **앱은 언제나 1.0과 매 프레임을 넘긴다**.
 
+**인코딩은 설정이다** — 세션 파일에 한해서. `VideoEncoding` 셋(`H264` / `Lossless` /
+`Uncompressed`)이 코덱·컨테이너·크롭 여부를 정하고, 확장자가 컨테이너를 고른다(`.mp4` /
+`.mkv` / `.mov`). 세 가지를 두는 이유는 "압축이냐"가 축이 아니기 때문이다 — **무손실 압축은
+픽셀이 무압축과 같으면서 더 작고 느리지 않다**(실측 1024×772 3밴드: utvideo 1089 fps·3.2~4.2배
+작음, rawvideo 1416 fps). 실제 축은 *이 파일로 다시 측정할 수 있어야 하는가*이고, 무압축은
+코덱이 없는 도구를 위한 선택지다. 컨테이너 함정은 `VideoEncoding.cs`에 실측과 함께 적어 두었다
+(특히 **큰 raw AVI는 기본 probe가 120 fps로 읽어 3.4%를 잃는다** — 그래서 `.mov`다).
+
 `Feed`가 `byte[]`가 아니라 **`MIL_ID`** 를 받는 것이 이 계약의 핵심이다. ffmpeg 경로는 프레임을
 호스트로 읽어내야 하지만(실측 462 µs) `MseqFeed`는 버퍼를 그대로 받는다 — 바이트로 받는 계약은
 두 번째 백엔드에 첫 번째의 비용을 강요한다. **명령줄과 레이트 산술은 `Infrastructure/Video/`에
@@ -125,6 +134,12 @@ grab이 도는 동안 **사건 tier**가 2초 세그먼트를 링으로 쓴다(`
 `RecoveredThisFrame`)에 따라 네 프레임을 MIL 버퍼에 보관하고, 틱에서 PNG로 쓴다. **클립은 x264
 CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면은 된다** — 그게 둘 다 있는 이유다.
 
+**사건 클립은 세션 녹화의 인코딩 설정을 따르지 않고 항상 H.264다.** 링에서 `-c copy`로 잘라내기
+때문에 링이 곧 클립의 인코딩이고, 링은 그랩이 도는 동안 계속 쓰인다 — 무손실 링은 채널당
+295 MB/s(3채널 884 MB/s = **하루 76 TB**, 1 TB TLC SSD 총 수명이 약 750 TB)다. 그래서 **클립은
+문맥, 정지화면은 측정**으로 역할을 갈랐고, 설정 창도 그렇게 두 섹션으로 말한다. 무압축 사건
+증거가 필요하면 그것은 링이 아니라 **RAM 링(짧은 창)** 이어야 한다 — 아직 없다.
+
 실측 한계 둘: 인코더가 3채널 **124.3·132.6 fps에서는 유실 0, 247 fps에서는 세그먼트 목록이 15초
 뒤처졌다.** 그리고 클립이 뒤쪽에서 약 2% 짧게 나온 사례가 있고 원인은 규명되지 않았다.
 
@@ -133,6 +148,14 @@ CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면
 
 ## 함정 (겪고 나서 알게 된 것들)
 
+- **설정 파일이 안 읽히고 있는데 아무도 몰랐다.** `Dto`의 `string FfmpegPath`에 붙어 있던
+  `[JsonStringEnumConverter]` 하나 때문에 System.Text.Json이 **Dto 계약 전체를 거부**했고,
+  `Load()`의 `catch`가 그것을 삼켜 앱이 **모든 값을 기본값으로** 돌았다. `Save()`도 같은 이유로
+  전부 실패했다. 증상은 "설정 창에서 바꿔도 안 먹는다"가 아니라 **decimation 2를 저장해 뒀는데
+  2064×1544로 돌면서 프레임을 509개 놓치는 것**이었다 — 원인이 설정 로드라고 생각할 이유가
+  전혀 없는 증상이다. 고친 뒤 같은 조건이 1024×772 · 124.3 fps · 유실 0이 됐다.
+  **`Load()`/`Save()`의 실패는 이제 로그에 남는다.** 설정을 삼키는 `catch`를 새로 쓰지 말 것 —
+  "파일이 없는 첫 실행"과 구별할 수 없게 된다.
 - 보드는 **연결된 카메라가 더 적어도 디지타이저 4개를 보고한다.** 비어 있는 포트에
   `MdigAlloc`을 하면 `M_THROW_EXCEPTION` 아래에서도 모달 MIL 오류 대화상자가 뜬다. 그래서 탐지
   구간을 `MappControl(M_ERROR, M_PRINT_DISABLE/ENABLE)`로 감쌌다 — 이걸 유지하고, 반드시

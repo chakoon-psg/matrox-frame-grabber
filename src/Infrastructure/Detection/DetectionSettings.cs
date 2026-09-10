@@ -109,8 +109,8 @@ namespace MatroxFrameGrabber.Infrastructure
     /// Shared because they describe the measurement rather than a fault: the running baseline is
     /// computed once from the tile grid and every kind compares against it, and the false-positive
     /// budget is a property of the whole channel. Splitting the budget per kind is the point -
-    /// five detectors each allowed one false positive an hour is five an hour, so enabling a fifth
-    /// kind would quietly quintuple the rate unless the total is divided.
+    /// seven detectors each allowed one false positive an hour is seven an hour, so switching on
+    /// another kind would quietly multiply the rate unless the total is divided.
     /// </summary>
     public sealed class DetectionSettings
     {
@@ -129,7 +129,7 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Per-kind settings, indexed by <see cref="AnomalyKind"/>.</summary>
         public KindSettings[] PerKind { get; set; } = Defaults();
 
-        /// <summary>Defaults: Dropout on because it is measured, the other four off.</summary>
+        /// <summary>Defaults: Dropout on because it is measured, every other kind off.</summary>
         public static KindSettings[] Defaults()
         {
             var a = new KindSettings[AnomalyCatalog.Count];
@@ -142,9 +142,37 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>This kind's settings, creating the array if a hand-edited file lost it.</summary>
         public KindSettings For(AnomalyKind kind)
         {
-            if (PerKind == null || PerKind.Length != AnomalyCatalog.Count)
-                PerKind = Defaults();
+            Normalize();
             return PerKind[AnomalyCatalog.Index(kind)] ?? (PerKind[AnomalyCatalog.Index(kind)] = new KindSettings());
+        }
+
+        /// <summary>
+        /// Makes the array exactly as long as the catalog, keeping whatever is already in it.
+        ///
+        /// Grown rather than replaced, and that is the whole point of the method: this code used to
+        /// throw the array away whenever its length disagreed, so appending a sixth kind would have
+        /// silently reset every channel to the default depth - discarding a threshold measured over
+        /// 8713 frames - while the detector kept running and only the numbers changed. Adding a
+        /// kind is exactly when that would have happened, and it has now happened twice.
+        ///
+        /// A longer array is truncated, which loses nothing this build can name.
+        /// </summary>
+        private void Normalize()
+        {
+            if (PerKind != null && PerKind.Length == AnomalyCatalog.Count)
+            {
+                for (int i = 0; i < PerKind.Length; i++)
+                    if (PerKind[i] == null) PerKind[i] = new KindSettings();
+                return;
+            }
+
+            KindSettings[] grown = Defaults();
+            if (PerKind != null)
+            {
+                for (int i = 0; i < PerKind.Length && i < grown.Length; i++)
+                    if (PerKind[i] != null) grown[i] = PerKind[i];
+            }
+            PerKind = grown;
         }
 
         /// <summary>How many kinds are switched on and implemented - the detectors that will run.</summary>
@@ -162,8 +190,8 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>
         /// The share of the budget each running detector gets.
         ///
-        /// Split rather than handed out whole because five detectors each allowed one false
-        /// positive an hour is five an hour: switching on a fifth kind would quietly quintuple the
+        /// Split rather than handed out whole because seven detectors each allowed one false
+        /// positive an hour is seven an hour: switching on another kind would quietly multiply the
         /// rate the operator was told to expect.
         /// </summary>
         public double BudgetPerEnabledKind => BudgetShare(FalsePositiveBudgetPerHour, EnabledCount);
@@ -239,7 +267,7 @@ namespace MatroxFrameGrabber.Infrastructure
             FalsePositiveBudgetPerHour = other.FalsePositiveBudgetPerHour;
             BaselineWindowMs = other.BaselineWindowMs;
             BaselineWarmupMs = other.BaselineWarmupMs;
-            if (PerKind == null || PerKind.Length != AnomalyCatalog.Count) PerKind = Defaults();
+            Normalize();
             foreach (AnomalyKind k in AnomalyCatalog.All)
                 For(k).CopyFrom(other.For(k));
             Clamp();
@@ -283,6 +311,9 @@ namespace MatroxFrameGrabber.Infrastructure
         /// The only value that was ever tuned by hand is the depth - 0.05 on two channels and 0.15
         /// on the dim one - and it carries over unchanged. Everything else in service sat at its
         /// default, so the conversion has nothing to distort.
+        ///
+        /// Growing the per-kind array is a different migration and lives in Normalize: this one
+        /// changes the shape of a kind's settings, that one changes how many kinds there are.
         /// </summary>
         public static DetectionSettings FromLegacy(AnomalyThresholds legacy)
         {

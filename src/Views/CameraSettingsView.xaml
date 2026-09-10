@@ -130,10 +130,10 @@
                         ToolTip="Measure the whole frame" />
             </StackPanel>
 
-            <!-- Every kind, four of them without a detector. Listed rather than hidden: a panel
-                 with nothing to report must not read as "nothing wrong" when one of five things is
-                 being checked. The checkbox writes straight through and saves, so there is no
-                 Apply for it - a checkbox that needs confirming reads as broken. -->
+            <!-- Every kind, all but Dropout without a detector. Listed rather than hidden: a
+                 panel with nothing to report must not read as "nothing wrong" when one of seven
+                 things is being checked. The checkbox writes straight through and saves, so there
+                 is no Apply for it - a checkbox that needs confirming reads as broken. -->
             <ItemsControl Grid.Row="1" Grid.ColumnSpan="2" Margin="0,2,0,5"
                           ItemsSource="{Binding DetectionKinds}">
                 <ItemsControl.ItemTemplate>
@@ -230,7 +230,7 @@
                     <TextBox Width="140" FontSize="11" VerticalContentAlignment="Center"
                              Text="{Binding OutputName, UpdateSourceTrigger=LostFocus}"
                              ToolTip="File name prefix for snapshots/recordings" />
-                    <TextBlock Text="_yyyyMMdd_HHmmss.png / .mp4" Margin="6,0,0,0"
+                    <TextBlock Text="_yyyyMMdd_HHmmss.png / .mp4·.mkv·.mov" Margin="6,0,0,0"
                                VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
                 </StackPanel>
 

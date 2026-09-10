@@ -36,7 +36,7 @@ namespace MatroxFrameGrabber.Tests
             SinkChoice c = VideoSinkPolicy.Choose(VideoSinkPreference.Auto, MilReadiness.Untested,
                                                   ffmpegFound: true, out string reason);
             Assert.Equal(SinkChoice.Ffmpeg, c);
-            Assert.Equal("ffmpeg/libx264", reason);
+            Assert.Equal("ffmpeg", reason);
         }
 
         /// <summary>
