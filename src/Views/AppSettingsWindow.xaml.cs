@@ -51,6 +51,20 @@ namespace MatroxFrameGrabber.Views
             }
         }
 
+        private void BrowseSegments_Click(object sender, RoutedEventArgs e)
+        {
+            if (_viewModel == null) return;
+            using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
+            {
+                dialog.Description = "Select the folder for rolling anomaly segments (local disk)";
+                dialog.UseDescriptionForTitle = true;
+                if (Directory.Exists(_viewModel.Output.SegmentFolder))
+                    dialog.SelectedPath = _viewModel.Output.SegmentFolder;
+                if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                    _viewModel.Output.SegmentFolder = dialog.SelectedPath;
+            }
+        }
+
         private void OpenOutput_Click(object sender, RoutedEventArgs e)
         {
             try

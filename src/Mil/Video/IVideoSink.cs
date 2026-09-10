@@ -47,6 +47,16 @@ namespace MatroxFrameGrabber.Mil.Video
         /// </summary>
         IReadOnlyList<double> FileRates { get; }
 
+        /// <summary>
+        /// The segment list of each output, in the same order as <see cref="FilePaths"/>, and null
+        /// for an output written as one file.
+        ///
+        /// The list is how a reader learns which segments are closed and what span each holds -
+        /// measured, they came out 1.994 to 2.019 s long against a nominal 2, so the boundaries
+        /// cannot be derived from the file names.
+        /// </summary>
+        IReadOnlyList<string> SegmentListPaths { get; }
+
         /// <summary>What it did and what it lost.</summary>
         VideoSinkStats Stats { get; }
 

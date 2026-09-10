@@ -163,6 +163,17 @@ namespace MatroxFrameGrabber.Mil
         private string _outputName;
         private IVideoSink _recording;
         private FfmpegVideoSink _ffmpegSink;   // the same object when ffmpeg is the backend, for its status line
+
+        // The event tier: rolling segments while the grab runs, so a clip can be cut for something
+        // that happened before anybody pressed Rec.
+        private IVideoSink _eventSink;
+        private SegmentRing _segments;
+        private ClipScheduler _clips;
+        private IClipExtractor _clipper;
+        private int _clipBusy;                 // Interlocked: one cut at a time per channel
+        private double _extractingFromSec = double.MaxValue;
+        private string _segmentPattern;        // ..._seg_%05d.mp4, for the sweep at stop
+        private string _segmentList;
         private StillRing _stills;
         private long _stillProbeKept;
         private bool _stillsExported;
@@ -460,6 +471,18 @@ namespace MatroxFrameGrabber.Mil
             MilErrorLog.Note($"{Name}: detection thresholds resolve at {_detectionFps:F3} fps");
             RaisePropertyChanged(nameof(DetectionHint));
             RaisePropertyChanged(nameof(CalibrationText));
+
+            // The event tier declared the old rate, so every segment it writes from here would be
+            // mis-timed: measured, 8000 to 4000 us doubles the rate and the segment list fell 15 s
+            // behind real time. Restarting discards the ring, which is right twice over - the
+            // timeline is correct again, and a fall measured across an exposure change is an
+            // artefact rather than a fault, so its window was never evidence.
+            if (_eventSink != null && _isGrabbing)
+            {
+                MilErrorLog.Note($"{Name}: exposure changed - restarting the event tier, "
+                               + "the window before the change is discarded");
+                StartEventTier();
+            }
         }
 
         /// <summary>Editable copies of the two thresholds an operator tunes, as typed.</summary>
@@ -1306,6 +1329,8 @@ namespace MatroxFrameGrabber.Mil
             _stillProbeKept = 0;
             _stillsExported = false;
 
+            StartEventTier();
+
             _detector = new AnomalyDetector(DetectionThresholds);
             _reducer.ResetCost();
             _history.Clear();
@@ -1352,6 +1377,10 @@ namespace MatroxFrameGrabber.Mil
                 return;
 
             StopRecording();   // no frames will be fed once the grab stops
+
+            // Before MdigProcess stops: the tier flushes what is pending, and a clip cut here still
+            // needs the segments that are about to be swept.
+            StopEventTier();
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
@@ -1472,6 +1501,7 @@ namespace MatroxFrameGrabber.Mil
                     _hasLastAnomaly = true;
                     raised = true;
                     RecentAnomalies.Add(found, rejected: false);
+                    _clips?.Offer(found);
                     MilErrorLog.Note($"{Name}: anomaly {found}");
                     WriteEventWindow(found);
                     AnomalyDetected?.Invoke(this, found);
@@ -1519,6 +1549,8 @@ namespace MatroxFrameGrabber.Mil
                     _lostPolls = 0;
                 }
             }
+
+            ServiceClips();
 
             // If ffmpeg died mid-recording, finalize and surface the error to the UI.
             if (_recording != null && _recording.Failed && _recording.IsActive)
@@ -1601,6 +1633,19 @@ namespace MatroxFrameGrabber.Mil
                 stills.Keep((StillRing.Slot)(_stillProbeKept % 4), grabbedBuffer,
                             frameNumber, timeStampSec, 0.0);
                 _stillProbeKept++;
+            }
+
+            // ---- Event tier: every frame, so a window can be cut out of it later ----
+            IVideoSink events = _eventSink;
+            if (events != null)
+            {
+                events.Feed(grabbedBuffer, frameNumber);
+
+                // Anchored on the first frame the encoder actually took, so board time and
+                // position in the recording line up exactly.
+                SegmentRing ring = _segments;
+                if (ring != null && !ring.Anchored && events.Stats.FramesFed >= 1)
+                    ring.Anchor(timeStampSec);
             }
 
             // ---- Recording feed (the sink guards start/stop vs feed internally) ----
@@ -1912,6 +1957,269 @@ namespace MatroxFrameGrabber.Mil
                 return false;
             }
             return StartRecording();
+        }
+
+        #endregion
+
+        #region Anomaly clips (segments while grabbing, cut when one falls due)
+
+        /// <summary>
+        /// Starts the rolling segment recording, if anomaly clips are switched on.
+        ///
+        /// With the grab rather than with Rec: a clip cannot be cut for an event that happened
+        /// while nothing was recording, which is the whole point of keeping the window. Its
+        /// lifetime therefore differs from the session file's, so this is a second sink rather than
+        /// a second output on the first - two extractions of about 400 us each out of the 8043 us
+        /// frame period, and no byte ownership to arbitrate between them.
+        /// </summary>
+        private void StartEventTier()
+        {
+            StopEventTier();
+
+            double around = Output?.AnomalyClipSeconds ?? 0.0;
+            if (around <= 0.0 || !CameraPresent || _dispBufId == MIL.M_NULL || Output == null)
+                return;
+
+            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath);
+            if (string.IsNullOrEmpty(ffmpeg))
+            {
+                MilErrorLog.Note($"{Name}: anomaly clips off - ffmpeg was not found");
+                return;
+            }
+
+            var clipSettings = new AnomalyClipSettings(around, OutputSettings.SegmentSeconds);
+            double retention = clipSettings.RequiredRingSec(
+                DetectionThresholds.MaxEventFrames / Math.Max(1.0, _detectionFps));
+
+            double fps = VideoRatePolicy.Declared(
+                TryGetResultingFps(out double r) ? r : 0.0, _frameRate, 0.0);
+
+            var sink = new FfmpegVideoSink(_sysId, ffmpeg);
+            var spec = new VideoStreamSpec(
+                _dispBufId, fps, Output.EnsureSegmentFolder(), SafeName(), 1.0,
+                new[]
+                {
+                    // Every frame, and a keyframe several times a segment so a boundary can land
+                    // where the muxer wants it. Never scaled: a shrunken clip is weak evidence.
+                    new VideoOutputSpec("seg", 1,
+                                        segmentSeconds: OutputSettings.SegmentSeconds,
+                                        keyframeSeconds: OutputSettings.SegmentSeconds / 4.0),
+                });
+
+            if (!sink.Start(spec, out string err))
+            {
+                MilErrorLog.Note($"{Name}: anomaly clips off - {err}");
+                sink.Dispose();
+                return;
+            }
+
+            _eventSink = sink;
+            _segmentPattern = sink.FilePaths.Count > 0 ? sink.FilePaths[0] : null;
+            _segmentList = sink.SegmentListPaths.Count > 0 ? sink.SegmentListPaths[0] : null;
+            _segments = new SegmentRing(
+                sink.SegmentListPaths.Count > 0 ? sink.SegmentListPaths[0] : null, retention);
+            _clips = new ClipScheduler(clipSettings);
+            _clipper = new FfmpegClipExtractor(ffmpeg);
+            _extractingFromSec = double.MaxValue;
+
+            MilErrorLog.Note($"{Name}: anomaly clips on - {around:0.#} s either side, "
+                           + $"{OutputSettings.SegmentSeconds:0.#} s segments, "
+                           + $"ring {retention:0.#} s, at {fps:F3} fps");
+        }
+
+        /// <summary>
+        /// Polls the segment list, cuts anything due, and trims the ring.
+        ///
+        /// On the stats tick, and in that order: a clip cannot be cut from a file the muxer has not
+        /// closed, and a file a pending clip needs must not be deleted first.
+        /// </summary>
+        private void ServiceClips()
+        {
+            SegmentRing ring = _segments;
+            ClipScheduler clips = _clips;
+            if (ring == null || clips == null) return;
+
+            ring.Poll();
+
+            double now = LastBoardTimeSec;
+            if (now > 0.0 && Interlocked.CompareExchange(ref _clipBusy, 0, 0) == 0)
+            {
+                if (clips.TryTakeDue(now, out ClipRequest request))
+                    BeginExtract(request);
+            }
+
+            // Reserved from the oldest thing still wanted: the pending queue, and the cut in
+            // flight. ffmpeg cannot seek a concat input and reads from the first file's start, so
+            // a file deleted under it breaks the clip mid-read.
+            double reserve = Math.Min(clips.OldestPendingFromSec, _extractingFromSec);
+            ring.Trim(reserve);
+        }
+
+        /// <summary>
+        /// Cuts one clip on a background thread.
+        ///
+        /// Off the UI thread because the cut runs ffmpeg - under a second for ten seconds of stream
+        /// copy, but the stats tick must not wait for a process. One at a time per channel, and the
+        /// window stays reserved in the ring until it finishes.
+        /// </summary>
+        private void BeginExtract(ClipRequest request)
+        {
+            if (Interlocked.Exchange(ref _clipBusy, 1) != 0) return;
+
+            SegmentRing ring = _segments;
+            IClipExtractor clipper = _clipper;
+            if (ring == null || clipper == null) { Interlocked.Exchange(ref _clipBusy, 0); return; }
+
+            SegmentCoverage coverage = ring.Cover(request.FromSec, request.ToSec);
+            if (!coverage.Any)
+            {
+                MilErrorLog.Note($"{Name}: {request} - no segments hold that window, nothing cut "
+                               + $"(anchored {ring.Anchored} at {ring.AnchorBoardSec:F3} s, "
+                               + $"{ring.Count} segments {ring.OldestSec:F2}-{ring.NewestSec:F2} s, "
+                               + $"wanted {ring.ToRecordingSec(request.FromSec):F2}-"
+                               + $"{ring.ToRecordingSec(request.ToSec):F2} s)");
+                Interlocked.Exchange(ref _clipBusy, 0);
+                return;
+            }
+
+            _extractingFromSec = request.FromSec;
+            string path = System.IO.Path.Combine(
+                Output.EnsureFolder(),
+                $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{request.Kind}.mp4");
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    bool ok = clipper.Extract(coverage, path, out string err);
+                    long bytes = ok && System.IO.File.Exists(path)
+                        ? new System.IO.FileInfo(path).Length : 0;
+                    MilErrorLog.Note(ok
+                        ? $"{Name}: clip written - {request}, {coverage.Files.Count} segment(s), "
+                          + $"{coverage.LengthSec:F2} s, {bytes / 1024.0:F0} kB"
+                          + (coverage.ClippedAtStart ? ", short at the front" : string.Empty)
+                          + (coverage.ClippedAtEnd ? ", short at the end" : string.Empty)
+                          + $" -> {System.IO.Path.GetFileName(path)}"
+                        : $"{Name}: clip failed - {request}: {err}");
+                }
+                finally
+                {
+                    _extractingFromSec = double.MaxValue;
+                    Interlocked.Exchange(ref _clipBusy, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Stops the tier and clears the ring.
+        ///
+        /// Pending clips are flushed first, short of their trailing seconds: those frames never
+        /// arrived, which is the truth about a fault that was still running, and better than
+        /// discarding the evidence for being incomplete.
+        /// </summary>
+        private void StopEventTier()
+        {
+            ClipScheduler clips = _clips;
+            SegmentRing ring = _segments;
+            IVideoSink sink = _eventSink;
+
+            if (clips != null && ring != null && _clipper != null && Output != null)
+            {
+                foreach (ClipRequest r in clips.Flush())
+                {
+                    SegmentCoverage c = ring.Cover(r.FromSec, r.ToSec);
+                    if (!c.Any) { MilErrorLog.Note($"{Name}: {r} - nothing held, not cut"); continue; }
+                    string path = System.IO.Path.Combine(
+                        Output.EnsureFolder(),
+                        $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{r.Kind}.mp4");
+                    bool ok = _clipper.Extract(c, path, out string err);
+                    MilErrorLog.Note(ok
+                        ? $"{Name}: clip written at stop - {r} -> {System.IO.Path.GetFileName(path)}"
+                        : $"{Name}: clip failed at stop - {r}: {err}");
+                }
+            }
+
+            if (sink != null)
+            {
+                VideoSinkStats st = sink.Stats;
+                sink.Stop();
+                sink.WaitFinalize(15000);
+                sink.Dispose();
+                if (st.FramesFed > 0)
+                    MilErrorLog.Note($"{Name}: event tier - {st.FramesFed} fed, {st.FramesSkipped} skipped, "
+                                   + $"{st.FramesDropped} dropped, extract mean {st.MeanFeedUs:F0} us / "
+                                   + $"max {st.MaxFeedUs:F0} us"
+                                   + (clips != null
+                                      ? $"; clips {clips.Emitted} cut, {clips.Merged} merged, "
+                                        + $"{clips.Suppressed} in cooldown, {clips.Overflowed} overflowed"
+                                      : string.Empty));
+            }
+
+            if (ring != null && ring.PollFailures > 0)
+                MilErrorLog.Note($"{Name}: segment list unreadable on {ring.PollFailures} polls - "
+                               + $"{ring.LastPollError}. Every clip this run failed for that reason, "
+                               + $"not because its window was too old.");
+
+            // The ring is scratch: the clips that mattered are already in the output folder, and
+            // leaving tens of megabytes of segments behind after every run is not a recording.
+            //
+            // Swept by name as well as through the ring, because the ring only knows the files the
+            // list told it about - and when the list could not be read, that was none of them.
+            int cleared = ring?.DeleteAll() ?? 0;
+            cleared += SweepSegmentFiles();
+            if (cleared > 0)
+                MilErrorLog.Note($"{Name}: segments cleared - {cleared} file(s)");
+
+            _eventSink = null;
+            _segments = null;
+            _clips = null;
+            _clipper = null;
+            _segmentPattern = null;
+            _segmentList = null;
+            _extractingFromSec = double.MaxValue;
+            Interlocked.Exchange(ref _clipBusy, 0);
+        }
+
+        /// <summary>
+        /// Deletes this run's segment files and its list, by name.
+        ///
+        /// The pattern ffmpeg was given is "..._seg_%05d.mp4", so the files are "..._seg_" plus
+        /// digits - which is specific enough to sweep without a wildcard that could reach another
+        /// run's files.
+        /// </summary>
+        private int SweepSegmentFiles()
+        {
+            int removed = 0;
+            try
+            {
+                if (!string.IsNullOrEmpty(_segmentPattern))
+                {
+                    string dir = System.IO.Path.GetDirectoryName(_segmentPattern);
+                    string name = System.IO.Path.GetFileName(_segmentPattern);
+                    int marker = name.IndexOf("%", StringComparison.Ordinal);
+                    if (dir != null && marker > 0 && System.IO.Directory.Exists(dir))
+                    {
+                        string glob = name.Substring(0, marker) + "*.mp4";
+                        foreach (string f in System.IO.Directory.GetFiles(dir, glob))
+                        {
+                            try { System.IO.File.Delete(f); removed++; }
+                            catch (System.IO.IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(_segmentList) && System.IO.File.Exists(_segmentList))
+                {
+                    try { System.IO.File.Delete(_segmentList); removed++; }
+                    catch (System.IO.IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (Exception e)
+            {
+                MilErrorLog.Note($"{Name}: sweeping the segment files failed - {e.Message}");
+            }
+            return removed;
         }
 
         #endregion

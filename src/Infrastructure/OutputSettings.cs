@@ -35,6 +35,8 @@ namespace MatroxFrameGrabber.Infrastructure
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
         private int _recordingRateFps = DefaultRecordingRateFps;   // 0 = every frame
+        private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
+        private string _segmentFolder = DefaultSegmentFolder;
 
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
@@ -150,6 +152,63 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>
+        /// Where the rolling segments go, which is not where the keepers go.
+        ///
+        /// Local by default because the ring is written and deleted continuously while the output
+        /// folder may be a network share: a latency spike there becomes FramesSkipped, and a
+        /// skipped frame is a hole in the window a clip is cut from. The RAW recording this project
+        /// removed kept a scratch folder for the same reason.
+        ///
+        /// The clips and the stills themselves go to the output folder - those are the keepers.
+        /// </summary>
+        public string SegmentFolder
+        {
+            get => _segmentFolder;
+            set
+            {
+                string v = string.IsNullOrWhiteSpace(value) ? DefaultSegmentFolder : value;
+                if (_segmentFolder != v)
+                { _segmentFolder = v; RaiseChanged(nameof(SegmentFolder)); Save(); }
+            }
+        }
+
+        private static readonly string DefaultSegmentFolder = Path.Combine(SettingsDir, "segments");
+
+        /// <summary>Ensures the segment folder exists; returns it.</summary>
+        public string EnsureSegmentFolder()
+        {
+            Directory.CreateDirectory(_segmentFolder);
+            return _segmentFolder;
+        }
+
+        /// <summary>
+        /// Seconds kept either side of an anomaly, as its own clip. 0 turns the event tier off.
+        ///
+        /// One number, and the ring's retention is derived from it rather than set separately: a
+        /// ring shorter than the window makes clips quietly short, and there is no combination of
+        /// the two worth offering that the arithmetic cannot produce.
+        /// </summary>
+        public double AnomalyClipSeconds
+        {
+            get => _anomalyClipSeconds;
+            set
+            {
+                double v = value <= 0.0 ? 0.0 : (value < 1.0 ? 1.0 : (value > 60.0 ? 60.0 : value));
+                if (Math.Abs(_anomalyClipSeconds - v) > 1e-9)
+                { _anomalyClipSeconds = v; RaiseChanged(nameof(AnomalyClipSeconds)); Save(); }
+            }
+        }
+
+        /// <summary>Default seconds either side. Five was the figure the design was measured against.</summary>
+        public const double DefaultAnomalyClipSeconds = 5.0;
+
+        /// <summary>
+        /// Seconds per segment file. Short because a file the muxer is still writing cannot be
+        /// read, so this is how long a clip waits after its window closes.
+        /// </summary>
+        public const double SegmentSeconds = 2.0;
+
+        /// <summary>
         /// Frames per second to record at. 0 records every frame, which is what this app did before
         /// the setting existed.
         ///
@@ -234,6 +293,8 @@ namespace MatroxFrameGrabber.Infrastructure
             // Nullable so an absent key means "never chosen" and takes the default, where a
             // plain int would read as 0 and silently mean "every frame".
             public int? RecordingRateFps { get; set; }
+            public double? AnomalyClipSeconds { get; set; }
+            public string SegmentFolder { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -276,6 +337,14 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
+                        s._segmentFolder = string.IsNullOrWhiteSpace(dto.SegmentFolder)
+                            ? DefaultSegmentFolder : dto.SegmentFolder;
+
+                        double around = dto.AnomalyClipSeconds ?? DefaultAnomalyClipSeconds;
+                        s._anomalyClipSeconds = around <= 0.0
+                            ? 0.0
+                            : (around < 1.0 ? 1.0 : (around > 60.0 ? 60.0 : around));
+
                         int wanted = dto.RecordingRateFps ?? DefaultRecordingRateFps;
                         s._recordingRateFps = wanted <= 0
                             ? 0
@@ -384,6 +453,8 @@ namespace MatroxFrameGrabber.Infrastructure
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
                     RecordingRateFps = _recordingRateFps,
+                    AnomalyClipSeconds = _anomalyClipSeconds,
+                    SegmentFolder = _segmentFolder,
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelDetection = _channelDetection
                 };

@@ -97,6 +97,43 @@
                 <Button Grid.Column="3" Content="Open" Margin="4,0,0,0" Click="OpenOutput_Click" />
             </Grid>
 
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Segments" />
+                <TextBox Grid.Column="1" IsReadOnly="True" VerticalContentAlignment="Center"
+                         Text="{Binding Output.SegmentFolder, Mode=OneWay}"
+                         ToolTip="{Binding Output.SegmentFolder}" />
+                <Button Grid.Column="2" Content="Browse…" Margin="4,0,0,0" Click="BrowseSegments_Click"
+                        ToolTip="사건 클립을 잘라낼 롤링 세그먼트가 쓰이는 곳" />
+            </Grid>
+            <TextBlock Text="keep this local — a network share becomes skipped frames, and a skipped frame is a hole in the clip"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+
+            <!-- ============ ANOMALY CLIP ============ -->
+            <TextBlock Text="ANOMALY CLIP" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Around event" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.AnomalyClipSeconds, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="사건 전후로 남길 초. 0 = 사건 클립 끔&#x0a;링 보존 시간은 여기서 유도됩니다 — 따로 두면 창보다 짧은 링이 만들어져 클립이 조용히 짧아집니다" />
+                    <TextBlock Text="s before and after  ·  0 = off"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="the ring keeps this window plus the event cap and one segment; it runs with the grab, not with Rec"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+
             <!-- ============ DISPLAY ============ -->
             <TextBlock Text="DISPLAY" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
 

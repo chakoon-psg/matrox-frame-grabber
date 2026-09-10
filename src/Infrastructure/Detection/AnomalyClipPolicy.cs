@@ -215,6 +215,23 @@ namespace MatroxFrameGrabber.Infrastructure
         public int PendingCount => _pending.Count;
 
         /// <summary>
+        /// The earliest board time any pending clip still needs, or MaxValue when none.
+        ///
+        /// The segment ring reserves from here: cutting reads the files from the start of the first
+        /// one, so deleting one a pending clip needs breaks it mid-read.
+        /// </summary>
+        public double OldestPendingFromSec
+        {
+            get
+            {
+                double oldest = double.MaxValue;
+                foreach (Pending q in _pending)
+                    if (q.FromSec < oldest) oldest = q.FromSec;
+                return oldest;
+            }
+        }
+
+        /// <summary>
         /// Offers a confirmed event. Returns true when it started or extended a clip, false when
         /// it was suppressed or overflowed - the counters say which.
         /// </summary>

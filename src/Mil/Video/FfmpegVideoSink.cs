@@ -47,6 +47,7 @@ namespace MatroxFrameGrabber.Mil.Video
         private double _declaredFps, _elapsedAtStop, _feedUsSum, _maxFeedUs;
         private string[] _paths = Array.Empty<string>();
         private double[] _rates = Array.Empty<double>();
+        private string[] _lists = Array.Empty<string>();
 
         public FfmpegVideoSink(MIL_ID sysId, string ffmpegPath)
         {
@@ -60,6 +61,7 @@ namespace MatroxFrameGrabber.Mil.Video
         public string LastError { get; private set; }
         public IReadOnlyList<string> FilePaths => _paths;
         public IReadOnlyList<double> FileRates => _rates;
+        public IReadOnlyList<string> SegmentListPaths => _lists;
 
         public VideoSinkStats Stats => new VideoSinkStats(
             _fed, _skipped, _recorder?.DroppedFrames ?? _droppedAtStop, _declaredFps,
@@ -116,6 +118,7 @@ namespace MatroxFrameGrabber.Mil.Video
                 var outputs = new List<FfmpegOutput>(spec.Outputs.Length);
                 var paths = new List<string>(spec.Outputs.Length);
                 var rates = new List<double>(spec.Outputs.Length);
+                var lists = new List<string>(spec.Outputs.Length);
                 foreach (VideoOutputSpec o in spec.Outputs)
                 {
                     double fileFps = VideoRatePolicy.FileFps(spec.SourceFps, o.EveryNthFrame);
@@ -131,6 +134,7 @@ namespace MatroxFrameGrabber.Mil.Video
                         o.SegmentSeconds, list));
                     paths.Add(path);
                     rates.Add(fileFps);
+                    lists.Add(list);
                 }
 
                 // Planar capture buffer. Color frames are read out one band at a time (MbufGet on a
@@ -165,6 +169,7 @@ namespace MatroxFrameGrabber.Mil.Video
                 {
                     _paths = paths.ToArray();
                     _rates = rates.ToArray();
+                    _lists = lists.ToArray();
                     _captureBuf = captureBuf;
                     _resizeBuf = resizeBuf;
                     _b0 = b0; _b1 = b1; _b2 = b2;
