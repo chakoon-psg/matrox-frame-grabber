@@ -86,6 +86,9 @@ tests/                         MatroxFrameGrabber.Tests (425개). csproj가 `Inf
 docs/
 LICENSES/                       동봉 서드파티 라이선스 고지
 tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
+  move-to-nas.ps1               상시 녹화를 NAS로 옮기는 이동기. 앱 밖이고, 규칙은 전부 실측에서
+                                나왔다 — 한 번에 한 파일, 1 MB 조각에 간격, 1분 이상 지난 것만,
+                                해시 검증 후 삭제, 증거 기록 중에는 대기
   MilVideoSink/                 MIL 인코딩용 독립 하네스 — 납품사에 넘기는 슬라이스.
                                 도메인 로직 0. README.md / ACCEPTANCE.md 참고
 research.md                    src/ 심층 분석
