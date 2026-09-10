@@ -53,6 +53,14 @@ namespace MatroxFrameGrabber.Infrastructure
         /// the strip must not imply the record is complete.
         /// </summary>
         FramesMissed = 7,
+
+        /// <summary>
+        /// Running, and watching for nothing: every kind with a detector behind it is switched off.
+        ///
+        /// Not a fault - somebody chose it - but it cannot be reported as Healthy either. A quiet
+        /// lane on a channel that is not looking is the exact ambiguity this enum exists to remove.
+        /// </summary>
+        DetectionOff = 8,
     }
 
     /// <summary>
@@ -90,7 +98,7 @@ namespace MatroxFrameGrabber.Infrastructure
                                              long framesMissed,
                                              long reductions, long gridsAccepted,
                                              long clipFramesSkipped,
-                                             bool calibrated,
+                                             bool detecting, bool calibrated,
                                              double luma, double clipPercent, double blackPercent)
         {
             if (!present) return ChannelHealth.Absent;
@@ -99,6 +107,11 @@ namespace MatroxFrameGrabber.Infrastructure
             if (framesMissed > 0) return ChannelHealth.FramesMissed;
             if (reductions > 0 && gridsAccepted < reductions) return ChannelHealth.DetectorBlind;
             if (clipFramesSkipped > 0) return ChannelHealth.ClipIncomplete;
+
+            // Below the losses and above everything about the picture: what the optics are doing
+            // and whether a threshold was measured are both answers to "can it detect", and neither
+            // is worth saying while nothing is being detected.
+            if (!detecting) return ChannelHealth.DetectionOff;
 
             if (clipPercent > MaxClipPercent || blackPercent > MaxBlackPercent ||
                 luma < MinLuma || luma > MaxLuma)
@@ -126,6 +139,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 case ChannelHealth.ClipIncomplete: return "사건 클립에 구멍 — 인코더가 프레임을 놓쳤습니다";
                 case ChannelHealth.DetectorBlind: return "검지기 실명 — 판정되지 않은 프레임이 있습니다";
                 case ChannelHealth.FramesMissed: return "프레임 유실 — 그 사이 일은 복구할 수 없습니다";
+                case ChannelHealth.DetectionOff: return "검출 꺼짐 — 아무 종류도 감시하지 않습니다";
                 default: return string.Empty;
             }
         }

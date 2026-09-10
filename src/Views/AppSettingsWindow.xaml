@@ -34,6 +34,44 @@
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="14,12,14,14">
         <StackPanel Grid.IsSharedSizeScope="True">
 
+            <!-- ============ DETECTION ============ -->
+            <TextBlock Text="DETECTION" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,1" />
+            <TextBlock Text="which faults every camera watches for — the thresholds are per camera"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,5" />
+
+            <!-- Every kind, all but Dropout un-tickable. Listed rather than hidden: a rig with
+                 nothing to report must not read as "nothing wrong" when one of seven things is
+                 being checked. The checkbox writes through and saves - a checkbox that needs
+                 confirming reads as broken - and reaches the detector on the next Start.
+
+                 App-wide, not per camera. Which faults we look for is one policy for the rig;
+                 how sensitive one camera is had to be measured per optical path, and that is what
+                 stays in the camera window. -->
+            <ItemsControl Margin="0,0,0,4" ItemsSource="{Binding DetectionKinds}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="0,0,0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <CheckBox Grid.Column="0" Margin="6,0,0,0" VerticalAlignment="Center"
+                                      Content="{Binding Name}"
+                                      IsChecked="{Binding Enabled}"
+                                      IsEnabled="{Binding Implemented}"
+                                      ToolTip="{Binding Description}" />
+                            <TextBlock Grid.Column="1" Text="{Binding StatusText}"
+                                       VerticalAlignment="Center" FontSize="10"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding Description}" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock Text="thresholds, ROI and calibration are per camera — open a camera's own Settings"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+
             <!-- ============ RECORDING (the session file) ============ -->
             <TextBlock Text="RECORDING" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,1" />
             <TextBlock Text="what ● Rec writes, for as long as it is held down"

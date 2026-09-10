@@ -300,6 +300,20 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
+        // ----- Detection: which faults the rig watches for -----
+
+        /// <summary>
+        /// Every anomaly kind, with its checkbox. App-wide, which is where the switch belongs: the
+        /// thresholds under each camera had to be measured per optical path, but what the rig is
+        /// looking for is one policy.
+        ///
+        /// Built once and held, so the checkboxes keep their bindings.
+        /// </summary>
+        public IReadOnlyList<AnomalyKindToggle> DetectionKinds =>
+            _detectionKinds ??= AnomalyKindToggle.BuildFor(Output);
+
+        private IReadOnlyList<AnomalyKindToggle> _detectionKinds;
+
         // ----- Encoding: what a session recording does to the pixels -----
 
         public bool EncodingIsH264

@@ -130,32 +130,20 @@
                         ToolTip="Measure the whole frame" />
             </StackPanel>
 
-            <!-- Every kind, all but Dropout without a detector. Listed rather than hidden: a
-                 panel with nothing to report must not read as "nothing wrong" when one of seven
-                 things is being checked. The checkbox writes straight through and saves, so there
-                 is no Apply for it - a checkbox that needs confirming reads as broken. -->
-            <ItemsControl Grid.Row="1" Grid.ColumnSpan="2" Margin="0,2,0,5"
-                          ItemsSource="{Binding DetectionKinds}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Margin="0,0,0,1">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="104" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
-                            <CheckBox Grid.Column="0" FontSize="11" VerticalAlignment="Center"
-                                      Content="{Binding Name}"
-                                      IsChecked="{Binding Enabled}"
-                                      IsEnabled="{Binding Implemented}"
-                                      ToolTip="{Binding Description}" />
-                            <TextBlock Grid.Column="1" Text="{Binding StatusText}"
-                                       VerticalAlignment="Center" FontSize="10"
-                                       Foreground="#9A9A9A" TextTrimming="CharacterEllipsis"
-                                       ToolTip="{Binding Description}" />
-                        </Grid>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <!-- What this camera watches for, as a line. The checkboxes are in the app settings,
+                 because which faults the rig looks for is one policy rather than four - a rig where
+                 camera 1 watches for Blackout and camera 2 does not produces a report nobody can
+                 read. What stays per camera is below: the thresholds, which had to be measured per
+                 optical path.
+
+                 The count of what is off is on purpose. Naming only what is on would let a pane
+                 with nothing to report read as "nothing wrong" while six of seven kinds go
+                 unexamined. -->
+            <Label Grid.Row="1" Grid.Column="0" Content="Watching" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding DetectionKindsText}"
+                       VerticalAlignment="Center" Margin="0,2,0,5" FontSize="11"
+                       Foreground="#9A9A9A" TextTrimming="CharacterEllipsis"
+                       ToolTip="검출 종류는 앱 전체 설정에서 켜고 끕니다 — 임계값은 카메라마다 따로입니다" />
 
             <!-- Detection thresholds. Per channel because the cameras do not see the same thing:
                  measured against one clip, the dimmest of three produced nine shallow false

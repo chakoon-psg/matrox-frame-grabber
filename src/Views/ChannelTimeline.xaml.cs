@@ -54,6 +54,10 @@ namespace MatroxFrameGrabber.Views
             { AnomalyKind.Washout,  Color.FromRgb(0xFF, 0xD4, 0x79) },
             { AnomalyKind.Flicker,  Color.FromRgb(0x4F, 0xC3, 0xF7) },
             { AnomalyKind.Flip,     Color.FromRgb(0x81, 0xC7, 0x84) },
+            // Blue grey for a picture that has stopped moving, pink for one whose colour is wrong -
+            // both far enough from the five above to be told apart on a 5 px mark.
+            { AnomalyKind.Freeze,     Color.FromRgb(0x90, 0xA4, 0xAE) },
+            { AnomalyKind.ColorShift, Color.FromRgb(0xF0, 0x62, 0x92) },
         };
 
         private static readonly Dictionary<ChannelHealth, Color> HealthColors = new Dictionary<ChannelHealth, Color>
@@ -66,6 +70,9 @@ namespace MatroxFrameGrabber.Views
             { ChannelHealth.ClipIncomplete,  Color.FromRgb(0xFF, 0x6E, 0x6E) },
             { ChannelHealth.DetectorBlind,   Color.FromRgb(0xFF, 0x6E, 0x6E) },
             { ChannelHealth.FramesMissed,    Color.FromRgb(0xFF, 0x6E, 0x6E) },
+            // Grey like Stopped, because it is the same kind of statement - somebody chose this -
+            // and deliberately not the green that would claim the panel had been examined.
+            { ChannelHealth.DetectionOff,    Color.FromRgb(0x6F, 0x6F, 0x6F) },
         };
 
         /// <summary>Everything one lane needs, so an update touches properties and not the tree.</summary>
@@ -305,7 +312,10 @@ namespace MatroxFrameGrabber.Views
             if (lane == null) return;
 
             ChannelHealth health = channel.Health;
-            lane.Dot.Fill = new SolidColorBrush(HealthColors[health]);
+            // TryGetValue, not the indexer: a state added to the enum without a colour here
+            // would throw on the stats tick, inside a UI update, for want of a dictionary entry.
+            lane.Dot.Fill = new SolidColorBrush(
+                HealthColors.TryGetValue(health, out Color hc) ? hc : Colors.Gray);
             lane.Dot.ToolTip = ChannelHealthRule.Describe(health);
 
             AnomalyTimeline t = channel.RecentAnomalies;

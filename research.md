@@ -367,8 +367,11 @@ W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형�
 
 - 저장 위치: `%LocalAppData%\MatroxFrameGrabber\settings.json`
 - 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `FfmpegPath`, `DisplayUpdateFps`,
-  `VideoSink`, `RecordingEncoding`, `SegmentFolder`, `KeepStills`, `AnomalyClipSeconds`, 채널별
-  `ChannelRois` / `ChannelDecimation` / `ChannelDetection`
+  `VideoSink`, `RecordingEncoding`, `EnabledKinds`, `SegmentFolder`, `KeepStills`,
+  `AnomalyClipSeconds`, 채널별 `ChannelRois` / `ChannelDecimation` / `ChannelDetection`
+- `EnabledKinds`는 **앱 전체 정책**이고 채널의 `KindSettings.Enabled`는 그 사본이다(`[JsonIgnore]`).
+  옛 파일의 채널별 플래그는 `StoredEnabled`로 읽어 **합집합**으로 이관한다 — 교집합을 쓰면 한
+  카메라에서만 켜 둔 종류를 조용히 끄게 된다.
 - **열거형은 숫자가 아니라 이름으로 저장한다**(`VideoSink`, `RecordingEncoding`). 못 알아보는
   이름은 가장 싼 기본값으로 떨어진다 — 인덱스로 저장하면 범위를 벗어난 값이 분당 71 GB를 쓰는
   인코딩을 고를 수 있다.

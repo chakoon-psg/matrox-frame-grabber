@@ -30,6 +30,7 @@ namespace MatroxFrameGrabber.Infrastructure
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
+        private bool[] _enabledKinds = AnomalyKindSet.Default();
 
         private string _outputFolder = DefaultFolder;
         private string _ffmpegPath = "";
@@ -119,6 +120,49 @@ namespace MatroxFrameGrabber.Infrastructure
 
         /// <summary>Persists the settings after a caller has edited one in place.</summary>
         public void SaveThresholds() => Save();
+
+        /// <summary>
+        /// Whether this kind is being watched for. App-wide, unlike the thresholds beside it.
+        ///
+        /// The split is the point: which faults we look for is a policy for the run, while how
+        /// sensitive one camera is had to be measured per optical path. A rig where camera 1 watches
+        /// for Blackout and camera 2 does not produces a report nobody can read.
+        /// </summary>
+        public bool IsKindEnabled(AnomalyKind kind) => AnomalyKindSet.Get(_enabledKinds, kind);
+
+        /// <summary>
+        /// Switches a kind on or off for every channel, and persists it.
+        ///
+        /// Written through to each channel's DetectionSettings as well as stored here, because that
+        /// is what the detector and the budget arithmetic read - but only this list is saved, so
+        /// there is one answer in the file rather than four that can disagree.
+        /// </summary>
+        public void SetKindEnabled(AnomalyKind kind, bool on)
+        {
+            if (_enabledKinds == null || _enabledKinds.Length != AnomalyCatalog.Count)
+                _enabledKinds = AnomalyKindSet.Default();
+            if (_enabledKinds[AnomalyCatalog.Index(kind)] == on) return;
+
+            _enabledKinds[AnomalyCatalog.Index(kind)] = on;
+            ApplyKindsToChannels();
+            RaiseChanged(nameof(EnabledKindsText));
+            Save();
+        }
+
+        /// <summary>What is being watched for, and how many kinds are not. For a status line.</summary>
+        [JsonIgnore]
+        public string EnabledKindsText => AnomalyKindSet.Describe(_enabledKinds);
+
+        /// <summary>Kinds that are on and have a detector - the ones that will run.</summary>
+        [JsonIgnore]
+        public int RunningKindCount => AnomalyKindSet.RunningCount(_enabledKinds);
+
+        private void ApplyKindsToChannels()
+        {
+            foreach (DetectionSettings d in _channelDetection)
+                foreach (AnomalyKind k in AnomalyCatalog.All)
+                    d.For(k).Enabled = AnomalyKindSet.Get(_enabledKinds, k);
+        }
 
         /// <summary>
         /// Cap for the MIL display's update rate, in frames per second. 0 = uncapped.
@@ -272,6 +316,12 @@ namespace MatroxFrameGrabber.Infrastructure
             // fall back to H.264, where an out-of-range index could select the one that writes
             // 71 GB a minute.
             public string RecordingEncoding { get; set; }
+
+            /// <summary>
+            /// Which kinds are watched for, by name. Null means a file written before the flag
+            /// moved out of ChannelDetection, and it is migrated from there - see Load.
+            /// </summary>
+            public string[] EnabledKinds { get; set; }
             public double? AnomalyClipSeconds { get; set; }
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
@@ -379,6 +429,30 @@ namespace MatroxFrameGrabber.Infrastructure
                             }
                         }
 
+                        // After ChannelDetection is loaded, because that is what the union is
+                        // taken from when the file predates this list.
+                        if (dto.EnabledKinds != null)
+                        {
+                            s._enabledKinds = AnomalyKindSet.FromNames(dto.EnabledKinds);
+                        }
+                        else
+                        {
+                            // The flag used to live per channel. Migrated as the union rather than
+                            // dropped: it was on Dropout everywhere, and a kind somebody switched on
+                            // for one camera was a kind they meant to be watching for.
+                            //
+                            // Taken from the deserialized instances rather than the live ones,
+                            // because that is where the old key landed - see KindSettings.StoredEnabled.
+                            s._enabledKinds = AnomalyKindSet.UnionOf(
+                                (System.Collections.Generic.IEnumerable<DetectionSettings>)dto.ChannelDetection
+                                ?? s._channelDetection);
+                            s._migrated = true;
+                            MilErrorLog.Note(
+                                "settings: watched kinds migrated out of the per-channel flag - "
+                              + AnomalyKindSet.Describe(s._enabledKinds)
+                              + " (it is one app-wide policy now, and the thresholds stay per channel)");
+                        }
+
                         if (dto.ChannelDecimation != null)
                         {
                             for (int i = 0; i < ChannelCount && i < dto.ChannelDecimation.Length; i++)
@@ -396,6 +470,10 @@ namespace MatroxFrameGrabber.Infrastructure
                 // being applied. If it cannot be read, that has to be said out loud.
                 MilErrorLog.Write("settings: load failed - running on defaults", e);
             }
+            // Outside the try and outside the file check: the channels' copy of the flag has to
+            // match this list on every path, including "no settings file at all" and "the file
+            // could not be read".
+            s.ApplyKindsToChannels();
             s._loading = false;
 
             // Written out here rather than left for the next edit: otherwise the file keeps the
@@ -434,6 +512,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
                     RecordingEncoding = _recordingEncoding.ToString(),
+                    EnabledKinds = AnomalyKindSet.ToNames(_enabledKinds),
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,

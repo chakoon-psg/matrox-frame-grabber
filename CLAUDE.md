@@ -55,7 +55,8 @@ src/
   App.xaml(.cs)                MatroxFrameGrabber
   Views/                       MatroxFrameGrabber.Views
                                  MainWindow, CameraPaneView, Styles.xaml (다크 테마)
-  ViewModels/                  MatroxFrameGrabber.ViewModels (MainViewModel)
+  ViewModels/                  MatroxFrameGrabber.ViewModels
+                                 MainViewModel, AnomalyKindToggle
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
                                  GenICamFeatures, TileReducer, BrightnessMeter, StillRing
@@ -69,13 +70,14 @@ src/
                                  DisplayMapping, BrightnessSamplePlan, PwmSweep,
                                  TileGrid, TileBounds, TileHistory, FrameMetrics,
                                  AnomalyDetector, BrightnessLog, MilErrorLog
-    Detection/                   AnomalyKind(+Catalog), DetectionSettings(+KindSettings),
+    Detection/                   AnomalyKind(+Catalog), AnomalyKindSet,
+                                 DetectionSettings(+KindSettings),
                                  AnomalyClipPolicy(+ClipScheduler)
     Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
                                  VideoEncoding(+VideoCodecs), VideoSinkPolicy,
                                  SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (359개). csproj가 `Infrastructure/**`를
+tests/                         MatroxFrameGrabber.Tests (396개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -145,6 +147,29 @@ CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면
 
 무손실 RAW-Bayer 녹화(`◆ RAW`)가 있었고 제거했다. `M_BAYER_CONVERSION`을 끄는 유일한
 코드였는데, **그 설정은 보드에 남으므로 복원 규율은 그대로 필요하다** — 아래 함정 참고.
+
+## 설정이 어디에 있는가
+
+두 창이다. **앱 전체 설정**(툴바 `Settings`)과 **카메라별 설정**(pane의 pop-out). 경계는 취향이
+아니라 다음 규칙이다 — **정책은 전체, 실측은 카메라별.**
+
+- 전체: 어떤 이상을 감시할지(`EnabledKinds`), 세션 녹화 인코딩, 폴더, 사건 창(±N초),
+  정지화면 여부, 프리뷰 레이트.
+- 카메라별: 노출·취득 레이트·decimation, 분석 ROI, **임계값과 캘리브레이션**.
+
+임계값이 카메라별인 이유는 실측이다 — 같은 조명에서 세 채널 중 가장 어두운 쪽이 얕은 오검출
+9건을 내고 나머지 둘은 0건이었다. 반대로 **감시 종류가 카메라별이면 리포트를 읽을 수 없다**
+(카메라 1은 Blackout을 보고 2는 안 보는 리그). 그래서 종류 체크박스는 전체 설정에 있고,
+카메라 창에는 `Watching Dropout · 6 off` 한 줄만 남는다.
+
+파일에는 **한 곳에만** 저장된다(`EnabledKinds`, 이름 배열). 채널의 `KindSettings.Enabled`는
+그 정책의 사본이고 `[JsonIgnore]`다 — 네 개의 답이 하나와 어긋날 수 있는 상태를 만들지 않는다.
+**키가 없는 것과 빈 배열은 다르다**: 없으면 기본값(Dropout), 있고 비어 있으면 정말 아무것도
+감시하지 않는다. 후자를 기본값으로 접었더니 체크를 모두 풀면 다음 시작에서 되살아났다.
+
+**종류를 모두 끄면 검출기를 아예 만들지 않는다**(타일 축약까지 건너뛴다 — 실측 reduce 0 µs,
+0/0 grids). 그리고 그 채널의 상태는 `Healthy`가 아니라 **`DetectionOff`**다: 아무것도 보지 않는
+채널의 조용한 레인이 정상 레인과 같아 보이면 안 된다.
 
 ## 함정 (겪고 나서 알게 된 것들)
 

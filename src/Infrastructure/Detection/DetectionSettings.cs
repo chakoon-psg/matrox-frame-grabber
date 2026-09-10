@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json.Serialization;
 
 namespace MatroxFrameGrabber.Infrastructure
 {
@@ -17,8 +18,31 @@ namespace MatroxFrameGrabber.Infrastructure
         /// Whether this kind is checked at all. Off for everything but Dropout, and off by default
         /// for a kind that appears in a later version - an uncalibrated detector switching itself
         /// on after an update would look like the panel had started failing.
+        ///
+        /// Not serialized any more: the flag is one app-wide policy, stored once as
+        /// OutputSettings.EnabledKinds and written into every channel from there. What lives here
+        /// is the copy the detector and the budget arithmetic read. Persisting it per channel as
+        /// well would give the file four answers that can disagree with the one.
         /// </summary>
+        [JsonIgnore]
         public bool Enabled { get; set; }
+
+        /// <summary>
+        /// The flag as a file written before the move stored it. Read only to migrate from - see
+        /// <see cref="AnomalyKindSet.UnionOf"/> - and never written, so the file ends up with one
+        /// answer rather than two that can disagree.
+        ///
+        /// It exists because the migration would otherwise be unable to see what it migrates: the
+        /// same change that moved the flag stopped deserializing it, and a union taken after that
+        /// reads every channel as off. Same shape as the ChannelThresholds legacy key.
+        /// </summary>
+        [JsonPropertyName("Enabled")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? StoredEnabled { get; set; }
+
+        /// <summary>The flag an older file stored, or the live one when there was no older file.</summary>
+        [JsonIgnore]
+        public bool WasEnabled => StoredEnabled ?? Enabled;
 
         /// <summary>
         /// How far brightness must move, as a fraction of the running baseline. For a falling kind

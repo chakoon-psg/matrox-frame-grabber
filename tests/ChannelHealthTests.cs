@@ -12,15 +12,44 @@ namespace MatroxFrameGrabber.Tests
     {
         static ChannelHealth H(bool present = true, bool grabbing = true, long missed = 0,
                                long reductions = 1000, long grids = 1000, long clipSkipped = 0,
-                               bool calibrated = true,
+                               bool detecting = true, bool calibrated = true,
                                double luma = 65.0, double clip = 0.0, double black = 0.0)
             => ChannelHealthRule.Evaluate(present, grabbing, missed, reductions, grids, clipSkipped,
-                                          calibrated, luma, clip, black);
+                                          detecting, calibrated, luma, clip, black);
 
         [Fact]
         public void A_running_calibrated_channel_measuring_a_lit_panel_is_healthy()
         {
             Assert.Equal(ChannelHealth.Healthy, H());
+        }
+
+        /// <summary>
+        /// Watching for nothing is not healthy and is not a fault. Reporting it as Healthy is the
+        /// ambiguity this whole enum exists to remove - a quiet lane on a channel that is not
+        /// looking says exactly what a quiet lane on a working one says.
+        /// </summary>
+        [Fact]
+        public void A_channel_watching_for_nothing_says_so_instead_of_reporting_healthy()
+        {
+            Assert.Equal(ChannelHealth.DetectionOff, H(detecting: false));
+            Assert.False(ChannelHealthRule.IsFault(ChannelHealth.DetectionOff));
+
+            // Somebody chose it, so it outranks everything about the picture - but not a loss,
+            // which is still true and still unrecoverable.
+            Assert.Equal(ChannelHealth.DetectionOff, H(detecting: false, luma: 2.0));
+            Assert.Equal(ChannelHealth.DetectionOff, H(detecting: false, calibrated: false));
+            Assert.Equal(ChannelHealth.FramesMissed, H(detecting: false, missed: 1));
+        }
+
+        /// <summary>
+        /// Every state needs its line, because the dot's tooltip is the only place a state is
+        /// spelled out - one added without a description shows a colour and says nothing.
+        /// </summary>
+        [Fact]
+        public void Every_state_describes_itself()
+        {
+            foreach (ChannelHealth h in (ChannelHealth[])System.Enum.GetValues(typeof(ChannelHealth)))
+                Assert.False(string.IsNullOrWhiteSpace(ChannelHealthRule.Describe(h)), h.ToString());
         }
 
         [Fact]

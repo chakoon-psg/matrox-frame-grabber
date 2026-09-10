@@ -410,19 +410,24 @@ namespace MatroxFrameGrabber.Mil
         public double DetectionFps => _detectionFps;
 
         /// <summary>
-        /// The five anomaly kinds as the settings window lists them, four of them not implemented.
-        /// Built once: the rows are bound to and hold no state of their own.
+        /// What this camera is watching for, and how many kinds it is not.
+        ///
+        /// A line rather than a list of checkboxes, because the switches moved to the app settings
+        /// where they belong - which faults we look for is one policy for the rig, not four. What
+        /// stays here is the part that is this camera's: its thresholds, below, and the fact that
+        /// they only matter for the kinds named here.
+        ///
+        /// The count of what is off is on purpose. Naming only what is on would let a pane with
+        /// nothing to report read as "nothing wrong" while six of seven kinds go unexamined.
         /// </summary>
-        public System.Collections.Generic.IReadOnlyList<DetectionKindRow> DetectionKinds =>
-            _detectionKinds ??= DetectionKindRow.BuildFor(this);
-
-        private System.Collections.Generic.IReadOnlyList<DetectionKindRow> _detectionKinds;
+        public string DetectionKindsText =>
+            Output == null ? string.Empty : Output.EnabledKindsText;
 
         /// <summary>
         /// The false-positive budget and the share each running detector gets.
         ///
-        /// Both, because the split is invisible otherwise: five detectors each allowed one an hour
-        /// is five an hour, and the number an operator was told to expect is the total.
+        /// Both, because the split is invisible otherwise: seven detectors each allowed one an
+        /// hour is seven an hour, and the number an operator was told to expect is the total.
         /// </summary>
         public string BudgetText
         {
@@ -543,7 +548,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
-            foreach (DetectionKindRow row in DetectionKinds) row.Refresh();
+            RaisePropertyChanged(nameof(DetectionKindsText));
 
             // Logged as resolved rather than as stored: milliseconds are what a person sets and
             // frames are what the detector counts, and the run is judged in frames.
@@ -622,6 +627,7 @@ namespace MatroxFrameGrabber.Mil
                     CameraPresent, _isGrabbing, FramesMissed,
                     Reductions, GridsAccepted,
                     tier.FramesSkipped + tier.FramesDropped,
+                    _detector != null,
                     !string.IsNullOrEmpty(Detection.For(AnomalyKind.Dropout).CalibratedAt),
                     latest.Luma, latest.ClippedPct, latest.BlackPct);
             }
@@ -703,7 +709,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(DetectionHint));
             RaisePropertyChanged(nameof(CalibrationText));
-            foreach (DetectionKindRow row in DetectionKinds) row.Refresh();
+            RaisePropertyChanged(nameof(DetectionKindsText));
 
             KindSettings cal = Detection.For(AnomalyKind.Dropout);
             MilErrorLog.Note(
@@ -1095,7 +1101,7 @@ namespace MatroxFrameGrabber.Mil
                                + $"max event {t.MaxEventFrames}f, baseline {t.BaselineWindow}"
                                + $"/{t.BaselineWarmupFrames}f, "
                                + $"onset spread {t.MaxOnsetSpreadFrames}f over {t.MinOnsetTiles}+ tiles; "
-                               + $"kinds enabled {Detection.EnabledCount} of {AnomalyCatalog.Count}, "
+                               + $"kinds watched {Output?.EnabledKindsText ?? "?"}, "
                                + $"budget {Detection.BudgetPerEnabledKind:0.###}/hour each");
             }
 
@@ -1331,7 +1337,15 @@ namespace MatroxFrameGrabber.Mil
             }
             StartEventTier();
 
-            _detector = new AnomalyDetector(DetectionThresholds);
+            // No detector at all when nothing is switched on, rather than one nobody reads: the
+            // flag used to change only the budget arithmetic, so clearing Dropout left the detector
+            // running and reporting - a checkbox that did nothing. Skipping it also skips the tile
+            // reduction, which is the expensive half (175 us of an 8043 us period, measured).
+            bool watching = Detection.For(AnomalyKind.Dropout).Enabled;
+            _detector = watching ? new AnomalyDetector(DetectionThresholds) : null;
+            if (!watching)
+                MilErrorLog.Note($"{Name}: detection off - no kind with a detector is switched on "
+                               + "(app Settings), so no frame is judged this run");
             _reducer.ResetCost();
             _history.Clear();
             _eventWindowsWritten = 0;
