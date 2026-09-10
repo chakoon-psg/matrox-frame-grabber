@@ -41,7 +41,8 @@ namespace MatroxFrameGrabber.Mil.Video
         private volatile bool _failed;
         private DateTime _start;
         private Task _finalizeTask;
-        private long _fed, _skipped;
+        private long _fed, _skipped, _notWanted;
+        private int _feedEveryNth = 1;
         private long _droppedAtStop;               // survives Stop(), which nulls the recorder
         private double _declaredFps, _elapsedAtStop, _feedUsSum, _maxFeedUs;
         private string[] _paths = Array.Empty<string>();
@@ -82,7 +83,7 @@ namespace MatroxFrameGrabber.Mil.Video
         public VideoSinkStats Stats => new VideoSinkStats(
             _fed, _skipped, _recorder?.DroppedFrames ?? _droppedAtStop, _declaredFps,
             _active ? (DateTime.Now - _start).TotalSeconds : _elapsedAtStop,
-            _fed > 0 ? _feedUsSum / _fed : 0.0, _maxFeedUs);
+            _fed > 0 ? _feedUsSum / _fed : 0.0, _maxFeedUs, _notWanted);
 
         /// <summary>Status suffix like "  ● REC 01:23 (dropped 5)"; empty when not recording.</summary>
         public string StatusSuffix()
@@ -138,6 +139,14 @@ namespace MatroxFrameGrabber.Mil.Video
                 long w = source.Width, h = source.Height;
                 bool color = source.Bands >= 3;
 
+                // What this process is actually fed. One output taking every Nth frame means the
+                // pipe carries source/N, so that is what -framerate must say - measured, declaring
+                // the source rate while feeding a quarter of it kept 27 frames of 100. With more
+                // than one output the pipe has to carry every frame and each output's -r selects,
+                // which is the arrangement the two-output test locks.
+                int feedEveryNth = spec.Outputs.Length == 1 ? spec.Outputs[0].EveryNthFrame : 1;
+                double inputFps = VideoRatePolicy.FileFps(spec.SourceFps, feedEveryNth);
+
                 string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 var outputs = new List<FfmpegOutput>(spec.Outputs.Length);
                 var paths = new List<string>(spec.Outputs.Length);
@@ -151,20 +160,20 @@ namespace MatroxFrameGrabber.Mil.Video
                         : $"{spec.BaseName}_{stamp}_{o.Label}";
                     // The extension picks the muxer, so it comes from the encoding: utvideo
                     // into .mp4 is refused and rawvideo into .mkv too.
-                    string ext = VideoCodecs.Extension(o.Encoding);
+                    string ext = VideoCodecs.Extension(o.Encoding, o.Container);
                     string path = Path.Combine(spec.Folder,
                         o.IsSegmented ? $"{stem}_%05d.{ext}" : $"{stem}.{ext}");
                     string list = o.IsSegmented ? Path.Combine(spec.Folder, stem + ".csv") : null;
 
                     outputs.Add(new FfmpegOutput(path, fileFps,
                         VideoRatePolicy.KeyframeInterval(fileFps, o.KeyframeSeconds),
-                        o.SegmentSeconds, list, o.Encoding));
+                        o.SegmentSeconds, list, o.Encoding, o.Container));
                     paths.Add(path);
                     rates.Add(fileFps);
                     lists.Add(list);
                 }
 
-                string args = FfmpegArgs.Build((int)w, (int)h, color ? 3 : 1, spec.SourceFps, outputs);
+                string args = FfmpegArgs.Build((int)w, (int)h, color ? 3 : 1, inputFps, outputs);
 
                 recorder = new FfmpegRecorder();
                 // Returned to the extractor, not to a pool of this sink's own: the array may still
@@ -188,12 +197,14 @@ namespace MatroxFrameGrabber.Mil.Video
                     _lists = lists.ToArray();
                     _source = source;
                     _ownsSource = ownsSource;
+                    _feedEveryNth = feedEveryNth;
                     _recorder = recorder;
                     _start = DateTime.Now;
                     _declaredFps = spec.SourceFps;
                     _codecName = VideoCodecs.Name(spec.Outputs[0].Encoding, color ? 3 : 1);
                     _fed = 0;
                     _skipped = 0;
+                    _notWanted = 0;
                     _droppedAtStop = 0;
                     _elapsedAtStop = 0.0;
                     _feedUsSum = 0.0;
@@ -228,8 +239,9 @@ namespace MatroxFrameGrabber.Mil.Video
             FrameExtractor source = _source;
             if (source == null) return;
 
+            if (!VideoRatePolicy.ShouldFeed(frameNumber, _feedEveryNth)) { _notWanted++; return; }
             // Nothing is read out while the encoder has no room for it - the live view comes first.
-            if (!Accepting) { _skipped++; return; }
+            if (!WantsFrame(frameNumber)) { _skipped++; return; }
 
             byte[] frame = source.Extract(buffer);
             if (frame == null) { _skipped++; return; }
@@ -251,6 +263,13 @@ namespace MatroxFrameGrabber.Mil.Video
             if (!_active) return false;
             FrameExtractor source = _source;
             if (source == null) return false;
+            // Not this sink's frame. Counted apart from a skip: a session tier at every fourth
+            // frame turns three away by design, and calling those skips would read as a fault.
+            if (!VideoRatePolicy.ShouldFeed(frameNumber, _feedEveryNth))
+            {
+                _notWanted++;
+                return false;
+            }
             if (frame == null)
             {
                 // The caller had nothing to give. Counted here rather than nowhere: a dry pool or
@@ -262,14 +281,15 @@ namespace MatroxFrameGrabber.Mil.Video
             return Accept(frame, source);
         }
 
-        /// <summary>Whether a frame offered right now would be queued rather than skipped.</summary>
-        public bool Accepting
+        /// <summary>
+        /// Whether this frame would be queued: the encoder has room and the frame is one this sink
+        /// takes. See IHostFrameSink.WantsFrame.
+        /// </summary>
+        public bool WantsFrame(long frameNumber)
         {
-            get
-            {
-                FfmpegRecorder r = _recorder;
-                return _active && r != null && r.HasRoom;
-            }
+            FfmpegRecorder r = _recorder;
+            return _active && r != null && r.HasRoom
+                && VideoRatePolicy.ShouldFeed(frameNumber, _feedEveryNth);
         }
 
         /// <summary>

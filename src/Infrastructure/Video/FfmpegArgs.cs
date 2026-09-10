@@ -30,9 +30,16 @@ namespace MatroxFrameGrabber.Infrastructure
         /// </summary>
         public readonly VideoEncoding Encoding;
 
+        /// <summary>
+        /// What wraps it. Default lets the encoding decide; MpegTs is for a file that has to stay
+        /// readable if the machine dies mid-write - see VideoContainer.
+        /// </summary>
+        public readonly VideoContainer Container;
+
         public FfmpegOutput(string pathOrPattern, double fps, int keyframeInterval = 0,
                             double segmentSeconds = 0.0, string segmentListPath = null,
-                            VideoEncoding encoding = VideoEncoding.H264)
+                            VideoEncoding encoding = VideoEncoding.H264,
+                            VideoContainer container = VideoContainer.Default)
         {
             PathOrPattern = pathOrPattern;
             Fps = fps;
@@ -40,6 +47,7 @@ namespace MatroxFrameGrabber.Infrastructure
             SegmentSeconds = segmentSeconds;
             SegmentListPath = segmentListPath;
             Encoding = encoding;
+            Container = container;
         }
 
         public bool IsSegmented => SegmentSeconds > 0.0;
@@ -97,7 +105,11 @@ namespace MatroxFrameGrabber.Infrastructure
                 // ffmpeg picks the muxer from the extension, so a mismatch here does not produce
                 // the file that was asked for: utvideo into .mp4 is refused outright, and rawvideo
                 // into .mkv too. Caught as an argument error rather than as a failed launch.
-                string wanted = "." + VideoCodecs.Extension(o.Encoding);
+                if (!VideoCodecs.Supports(o.Encoding, o.Container))
+                    throw new ArgumentException(
+                        $"{o.Container} cannot carry {o.Encoding}", nameof(outputs));
+
+                string wanted = "." + VideoCodecs.Extension(o.Encoding, o.Container);
                 if (!o.PathOrPattern.EndsWith(wanted, StringComparison.OrdinalIgnoreCase))
                     throw new ArgumentException(
                         $"{o.Encoding} writes {wanted}, not {o.PathOrPattern}", nameof(outputs));
@@ -122,13 +134,14 @@ namespace MatroxFrameGrabber.Infrastructure
                 {
                     sb.Append(" -f segment -segment_time ")
                       .Append(VideoRatePolicy.Format(o.SegmentSeconds))
-                      .Append(" -segment_format ").Append(VideoCodecs.SegmentFormat(o.Encoding))
+                      .Append(" -segment_format ")
+                      .Append(VideoCodecs.SegmentFormat(o.Encoding, o.Container))
                       .Append(" -reset_timestamps 1");
                     if (!string.IsNullOrWhiteSpace(o.SegmentListPath))
                         sb.Append(" -segment_list \"").Append(o.SegmentListPath)
                           .Append("\" -segment_list_type csv");
                 }
-                else if (VideoCodecs.WantsFastStart(o.Encoding))
+                else if (VideoCodecs.WantsFastStart(o.Encoding, o.Container))
                 {
                     // faststart rewrites the index to the front once the file is closed, which a
                     // segmented output cannot use - each segment is closed by the muxer itself -

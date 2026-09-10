@@ -39,9 +39,19 @@ namespace MatroxFrameGrabber.Mil.Video
         /// <summary>Worst single extraction. One over the frame period costs a frame.</summary>
         public readonly double MaxFeedUs;
 
+        /// <summary>
+        /// Frames this sink was offered and did not want, because it takes every Nth.
+        ///
+        /// Separate from FramesSkipped on purpose: a session tier at 31 fps out of 124 turns away
+        /// three frames in four *by design*, and counting those as skipped would make the log read
+        /// "75% skipped" on a recording that lost nothing.
+        /// </summary>
+        public readonly long FramesNotWanted;
+
         public VideoSinkStats(long framesFed, long framesSkipped, long framesDropped,
                               double declaredFps, double elapsedSeconds,
-                              double meanFeedUs, double maxFeedUs)
+                              double meanFeedUs, double maxFeedUs,
+                              long framesNotWanted = 0)
         {
             FramesFed = framesFed;
             FramesSkipped = framesSkipped;
@@ -50,6 +60,7 @@ namespace MatroxFrameGrabber.Mil.Video
             ElapsedSeconds = elapsedSeconds;
             MeanFeedUs = meanFeedUs;
             MaxFeedUs = maxFeedUs;
+            FramesNotWanted = framesNotWanted;
         }
 
         /// <summary>Frames per second actually written, which should match <see cref="DeclaredFps"/>.</summary>

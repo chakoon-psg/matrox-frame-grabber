@@ -76,9 +76,10 @@ src/
                                  AnomalyClipPolicy(+ClipScheduler)
     Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
-                                 VideoEncoding(+VideoCodecs), VideoSinkPolicy,
-                                 SharedFramePool, SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (406개). csproj가 `Infrastructure/**`를
+                                 VideoEncoding(+VideoCodecs+VideoContainer),
+                                 VideoSinkPolicy, RecordingRecord, SharedFramePool,
+                                 SegmentRing, ClipExtractor
+tests/                         MatroxFrameGrabber.Tests (417개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -108,6 +109,34 @@ research.md                    src/ 심층 분석
 크기가 카메라가 주는 크기다. 설정으로 있었을 때 30을 입력하면 파일은 31.079을 선언했고, 해상도
 프리셋은 1024×772 앞에서 1080p가 아무 일도 하지 않고 720p가 0.932배였다. `IVideoSink` 계약에는
 배율과 everyNth가 남아 있지만 **앱은 언제나 1.0과 매 프레임을 넘긴다**.
+
+## 상시 녹화 (요구 1)
+
+세션 tier는 **5분 `.ts` 세그먼트**이고, 세 값이 채널마다 해석된다:
+
+| 설정 | 어떻게 쓰이나 |
+|---|---|
+| `SessionRateFps`(기본 30) | **파일에 적히지 않는다.** 취득 레이트의 약수가 되고 파일은 그 결과를 선언한다 — 30 요청 → 124.316의 4프레임마다 → **31.079** 선언. 노출 100 ms(상한 10 fps)면 약수가 1이고 파일은 10 fps다 |
+| `SessionSegmentSeconds`(기본 300) | 파일 하나의 길이. 이동기가 기다리는 시간을 정한다 |
+| `SessionContainer`(기본 MpegTs) | 정전 내성. **쓰던 중 죽은 MP4는 0프레임, TS는 잘린 지점까지 전부** |
+
+**세 가지를 실측으로 확인했다(2026-09-11):**
+- ffmpeg을 12초 지점에서 강제 종료: MP4 7.08 MB에 **0프레임**, MPEG-TS **1480프레임 / 11.93초 정상**,
+  Matroska는 프레임은 회수되나 duration 없음. 잘린 TS는 `-c copy`로 0.07초에 MP4가 된다.
+- **세그먼트 경계는 비용이 없다.** 10초 세그먼트(180초에 채널당 18개 경계) 대 단일 파일:
+  유실 둘 다 0, 추출 최대는 오히려 세그먼트가 낮았다(7220~10911 대 10584~14979 µs).
+  경계 손실도 0(세그먼트 18개 합계 22382프레임 = 먹인 22382).
+- **파이프에 넣는 것과 선언하는 것이 같아야 한다.** 4프레임마다 넘기면서 입력을 124.316이라고
+  선언하면 ffmpeg이 다시 3/4을 버려 **100프레임 중 27개만** 남는다. 그래서 단일 출력이 N프레임마다
+  받을 때는 `-framerate`도 파일 레이트다. 출력이 둘 이상이면 파이프가 매 프레임을 실어야 한다.
+
+**레이트가 바뀌면 파일을 롤한다.** 파일 하나에 레이트 하나 — 노출이 8000 → 4000 µs가 되면
+그 이후가 어긋나므로, 사건 tier 재시작과 나란히 세션 파일도 새로 시작한다.
+
+**녹화마다 사이드카(`.json`)가 나온다.** 그 안의 감사 한 줄이 핵심이다 — **파일이 선언한 레이트 대
+보드가 전달한 레이트.** 둘은 어긋날 이유가 없고(실측 잔차 +0.014%, 카메라 발진기), 유실이 있으면
+비례해서 벌어진다. `test_id`·`dut_id`는 **빈 필드로 자리만** 잡아 둔다 — 나중에 채우는 것이 값 하나
+바뀌는 일이 되도록. 기록을 사후에 재배치하지 않는다.
 
 **인코딩은 설정이다** — 세션 파일에 한해서. `VideoEncoding` 셋(`H264` / `Lossless` /
 `Uncompressed`)이 코덱·컨테이너·크롭 여부를 정하고, 확장자가 컨테이너를 고른다(`.mp4` /

@@ -176,6 +176,12 @@ namespace MatroxFrameGrabber.Mil
         /// 2026-09-10; with one of them off, nothing was lost. See FrameExtractor.
         /// </summary>
         private FrameExtractor _frames;
+
+        // When the session recording started, for the record written beside it. The sink knows its
+        // own elapsed time but not the wall clock it began at, and a record has to say when.
+        private DateTimeOffset _recordingStartedAt;
+        private double _recordingBoardStartSec;
+        private long _recordingFrameStart;
         private SegmentRing _segments;
         private ClipScheduler _clips;
         private IClipExtractor _clipper;
@@ -507,6 +513,17 @@ namespace MatroxFrameGrabber.Mil
                 MilErrorLog.Note($"{Name}: exposure changed - restarting the event tier, "
                                + "the window before the change is discarded");
                 StartEventTier();
+            }
+
+            // And the session file, for the same reason one level up: a file carries one declared
+            // rate, so the half written after the change would be mis-timed. Rolled rather than
+            // discarded - what is already in it was correct when it was written.
+            if (_recording != null && _recording.IsActive)
+            {
+                MilErrorLog.Note($"{Name}: exposure changed - rolling the session recording so each "
+                               + "file declares one rate");
+                StopRecording();
+                StartRecording();
             }
         }
 
@@ -1721,7 +1738,8 @@ namespace MatroxFrameGrabber.Mil
                 FrameExtractor frames = _frames;
                 // Nothing is read out while every encoder is behind: the live view comes first,
                 // and each sink counts the frame it did not get.
-                bool room = (eventsHost?.Accepting ?? false) || (sessionHost?.Accepting ?? false);
+                bool room = (eventsHost?.WantsFrame(frameNumber) ?? false)
+                         || (sessionHost?.WantsFrame(frameNumber) ?? false);
                 byte[] frame = room && frames != null ? frames.Extract(grabbedBuffer) : null;
 
                 eventsHost?.FeedShared(frame, frameNumber);
@@ -2038,18 +2056,41 @@ namespace MatroxFrameGrabber.Mil
             double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
                        ? resulting
                        : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
-            // Every frame, at the acquisition geometry. Both were settings once and neither was
-            // a choice: the maximum rate is what the camera delivers, and the frame size is what it
-            // delivers it at. The sink can still scale - the contract keeps it - this caller does not.
+            // The wanted rate becomes a divisor of what this camera delivers, and the file
+            // declares what that produces - 30 wanted from 124.316 is every 4th frame at 31.079,
+            // never 30. Resolved here rather than stored, because the acquisition rate is this
+            // camera's and moves with its exposure.
+            int everyNth = VideoRatePolicy.EveryNthFor(fps, Output.SessionRateFps);
+            double fileFps = VideoRatePolicy.FileFps(fps, everyNth);
+
+            // Segments, in a container that survives a kill: an MP4 killed mid-write gave back 0
+            // frames, measured. The frame size is still the acquisition's - that one really is a
+            // result rather than a choice.
+            VideoContainer container = VideoCodecs.Supports(Output.RecordingEncoding, Output.SessionContainer)
+                ? Output.SessionContainer
+                : VideoContainer.Default;
             var spec = new VideoStreamSpec(
                 _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
-                new[] { VideoOutputSpec.SingleFile(encoding: Output.RecordingEncoding) });
+                new[] { VideoOutputSpec.Session(everyNth, Output.SessionSegmentSeconds,
+                                                Output.RecordingEncoding, container) });
 
             // Before Start, because that is when the sink decides whether to make its own reader.
             if (_recording is IHostFrameSink host)
                 host.SharedFrames = EnsureFrames();
 
             bool ok = _recording.Start(spec, out _);
+            if (ok)
+            {
+                _recordingStartedAt = DateTimeOffset.Now;
+                _recordingBoardStartSec = _hookData?.LastTimeStampSec ?? 0.0;
+                _recordingFrameStart = FrameCount;
+            }
+            if (ok)
+                MilErrorLog.Note($"{Name}: session recording - {Output.SessionRateFps} fps wanted "
+                               + $"of {fps:F3} delivered = every {everyNth} frame(s), "
+                               + $"file declares {fileFps:F3} fps, "
+                               + $"{Output.SessionSegmentSeconds:0.#} s segments, "
+                               + $".{VideoCodecs.Extension(Output.RecordingEncoding, container)}");
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
@@ -2063,10 +2104,85 @@ namespace MatroxFrameGrabber.Mil
             if (_recording == null || !_recording.IsActive)
                 return;
             _recording.Stop();
+            // After Stop, so the counters are the frozen final ones - Stop is what fixes the
+            // dropped count that used to be lost with the recorder.
+            WriteRecordingRecord();
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));
+        }
+
+        /// <summary>
+        /// Writes the record that travels with the recording, and logs its audit line.
+        ///
+        /// The audit is one comparison: the rate the file declares against the rate the board's own
+        /// timestamps say was delivered. They agree unless something is wrong, so a difference is a
+        /// defect report rather than a tolerance - see RecordingRecord.
+        /// </summary>
+        private void WriteRecordingRecord()
+        {
+            try
+            {
+                VideoSinkStats st = _recording.Stats;
+                double boardEnd = _hookData?.LastTimeStampSec ?? 0.0;
+                long framesOverRun = Math.Max(0, FrameCount - _recordingFrameStart);
+
+                var rec = new RecordingRecord
+                {
+                    Camera = SafeName(),
+                    Started = _recordingStartedAt,
+                    Stopped = DateTimeOffset.Now,
+                    BoardFirstSec = _recordingBoardStartSec,
+                    BoardLastSec = boardEnd,
+                    AcquiredFrames = framesOverRun,
+                    FramesWritten = st.FramesFed,
+                    SourceDeclaredFps = st.DeclaredFps,
+                    FileDeclaredFps = _recording.FileRates.Count > 0
+                        ? _recording.FileRates[0] : st.DeclaredFps,
+                    EveryNthFrame = st.DeclaredFps > 0.0 && _recording.FileRates.Count > 0
+                                    && _recording.FileRates[0] > 0.0
+                        ? (int)Math.Round(st.DeclaredFps / _recording.FileRates[0]) : 1,
+                    FramesMissed = FramesMissed,
+                    FramesSkipped = st.FramesSkipped,
+                    FramesDropped = st.FramesDropped,
+                    FramesNotWanted = st.FramesNotWanted,
+                    Encoding = Output?.RecordingEncoding.ToString() ?? string.Empty,
+                    Container = Output?.SessionContainer.ToString() ?? string.Empty,
+                    SegmentSeconds = Output?.SessionSegmentSeconds ?? 0.0,
+                    Files = _recording.FilePaths.Count > 0 ? _recording.FilePaths[0] : string.Empty,
+                    SegmentList = _recording.SegmentListPaths.Count > 0
+                                  && _recording.SegmentListPaths[0] != null
+                        ? _recording.SegmentListPaths[0] : string.Empty,
+                };
+
+                MilErrorLog.Note($"{Name}: timeline - {rec.Summary()}");
+
+                string path = RecordPathFor(rec.SegmentList, rec.Files);
+                if (path != null) System.IO.File.WriteAllText(path, rec.ToJson());
+            }
+            catch (Exception e)
+            {
+                // The recording itself is finished and safe; losing its record is worth a line, not
+                // an exception on the UI thread.
+                MilErrorLog.Write($"{Name}: write the recording record", e);
+            }
+        }
+
+        /// <summary>
+        /// Where the record goes: beside the recording, named after the same stem. The segment list
+        /// is the better source for that stem - a segmented output's own path is a printf pattern.
+        /// </summary>
+        private static string RecordPathFor(string segmentList, string files)
+        {
+            if (!string.IsNullOrEmpty(segmentList))
+                return System.IO.Path.ChangeExtension(segmentList, ".json");
+            if (string.IsNullOrEmpty(files)) return null;
+
+            string stem = files;
+            int pattern = stem.IndexOf("_%", StringComparison.Ordinal);
+            if (pattern > 0) stem = stem.Substring(0, pattern);
+            return System.IO.Path.ChangeExtension(stem, ".json");
         }
 
         /// <summary>Starts recording if idle, stops it if already recording.</summary>

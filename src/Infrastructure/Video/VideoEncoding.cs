@@ -24,6 +24,28 @@ namespace MatroxFrameGrabber.Infrastructure
     }
 
     /// <summary>
+    /// Which container a recording is wrapped in, where the encoding does not decide it on its own.
+    ///
+    /// It exists for one measured reason. Killing ffmpeg mid-write - a power cut, which is a thing
+    /// that happens to a rig running unattended for months - leaves an MP4 with **nothing
+    /// readable**: measured 2026-09-11, 7.08 MB on disk and 0 frames recoverable, with and without
+    /// faststart, because the index is only written when the file closes. The same kill against
+    /// MPEG-TS gave back 1480 frames and a correct 11.93 s duration; Matroska gave the frames but
+    /// no duration. TS costs 4% more bytes and remuxes to MP4 with a stream copy in 0.07 s, so
+    /// nothing is lost by recording in it and converting on the way out.
+    /// </summary>
+    public enum VideoContainer
+    {
+        /// <summary>Whatever the encoding's own container is - MP4 for H.264.</summary>
+        Default = 0,
+
+        /// <summary>
+        /// MPEG-TS. For a recording that must still be readable if the machine dies mid-file.
+        /// </summary>
+        MpegTs = 1,
+    }
+
+    /// <summary>
     /// Which encoder, which container, and what it costs. Measured on this machine 2026-09-10
     /// (16 threads, C: an NVMe sustaining 2.75-3.46 GB/s), feeding real 1024x772 3-band frames and
     /// again with incompressible noise as the floor:
@@ -61,8 +83,13 @@ namespace MatroxFrameGrabber.Infrastructure
     public static class VideoCodecs
     {
         /// <summary>File extension, which the container is chosen by.</summary>
-        public static string Extension(VideoEncoding encoding)
+        public static string Extension(VideoEncoding encoding) =>
+            Extension(encoding, VideoContainer.Default);
+
+        /// <summary>File extension for an explicit container.</summary>
+        public static string Extension(VideoEncoding encoding, VideoContainer container)
         {
+            if (container == VideoContainer.MpegTs) return "ts";
             switch (encoding)
             {
                 case VideoEncoding.Lossless: return "mkv";
@@ -72,8 +99,13 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>ffmpeg's name for that container, for -segment_format.</summary>
-        public static string SegmentFormat(VideoEncoding encoding)
+        public static string SegmentFormat(VideoEncoding encoding) =>
+            SegmentFormat(encoding, VideoContainer.Default);
+
+        /// <summary>ffmpeg's muxer name for an explicit container.</summary>
+        public static string SegmentFormat(VideoEncoding encoding, VideoContainer container)
         {
+            if (container == VideoContainer.MpegTs) return "mpegts";
             switch (encoding)
             {
                 case VideoEncoding.Lossless: return "matroska";
@@ -81,6 +113,16 @@ namespace MatroxFrameGrabber.Infrastructure
                 default: return "mp4";
             }
         }
+
+        /// <summary>
+        /// Whether the encoding can be wrapped in the container at all.
+        ///
+        /// MPEG-TS carries H.264 and nothing else we write: it has no mapping for Ut Video, and raw
+        /// RGB in TS is not a thing. Refused rather than attempted, because ffmpeg's failure for a
+        /// bad pairing is a launch error the operator sees as "recording did not start".
+        /// </summary>
+        public static bool Supports(VideoEncoding encoding, VideoContainer container) =>
+            container != VideoContainer.MpegTs || encoding == VideoEncoding.H264;
 
         /// <summary>
         /// The encoder and its pixel format. Colour arrives planar gbrp - see the MbufGetColor
@@ -120,7 +162,20 @@ namespace MatroxFrameGrabber.Infrastructure
         public static bool NeedsEvenDimensions(VideoEncoding encoding) => encoding == VideoEncoding.H264;
 
         /// <summary>Whether the container rewrites its index on close. MP4 only.</summary>
-        public static bool WantsFastStart(VideoEncoding encoding) => encoding == VideoEncoding.H264;
+        public static bool WantsFastStart(VideoEncoding encoding) =>
+            WantsFastStart(encoding, VideoContainer.Default);
+
+        /// <summary>Same, for an explicit container. TS has no index to move.</summary>
+        public static bool WantsFastStart(VideoEncoding encoding, VideoContainer container) =>
+            container != VideoContainer.MpegTs && encoding == VideoEncoding.H264;
+
+        /// <summary>
+        /// Whether a file in this container is still readable if the process writing it dies.
+        ///
+        /// Measured by killing ffmpeg 12 s into a write: MP4 gave back 0 frames, MPEG-TS gave back
+        /// all 1480 with the right duration.
+        /// </summary>
+        public static bool SurvivesAKill(VideoContainer container) => container == VideoContainer.MpegTs;
 
         /// <summary>What this is, for a log line and the Rec tooltip.</summary>
         public static string Name(VideoEncoding encoding, int bands)

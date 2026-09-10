@@ -250,19 +250,21 @@ namespace MatroxFrameGrabber.ViewModels
         }
 
         /// <summary>
-        /// What the recording follows from, rather than what it can be set to.
+        /// What the recording is derived from: the geometry and rate the camera delivers.
         ///
-        /// Both used to be settings and neither was a choice: the fastest a recording can go is the
-        /// rate the camera delivers, and the frame size is the size it delivers. Saying so once is
-        /// more use than two boxes whose only honest values are these.
+        /// The frame size is not a setting and cannot be - a preset that never upscales did nothing
+        /// against 1024x772. The rate is a setting, but only as a divisor of this number, which is
+        /// why this line states the number rather than the file's rate. Deliberately not the words
+        /// "every frame": the Rate row above says how many of them this file takes, and the two
+        /// lines contradicting each other is worse than either being terse.
         /// </summary>
         public string RecordingSourceText
         {
             get
             {
                 return TryAcquisition(out int w, out int h, out _, out double fps)
-                    ? $"{w}x{h} at {fps:F3} fps, every frame"
-                    : AnyCameraPresent ? "every frame, at the acquisition size" : "no camera";
+                    ? $"{w}x{h} acquired at {fps:F3} fps"
+                    : AnyCameraPresent ? "the acquisition size and rate" : "no camera";
             }
         }
 
@@ -306,6 +308,76 @@ namespace MatroxFrameGrabber.ViewModels
             _detectionKinds ??= AnomalyKindToggle.BuildFor(Output);
 
         private IReadOnlyList<AnomalyKindToggle> _detectionKinds;
+
+        // ----- The continuous tier: rate, segment length, container -----
+
+        /// <summary>
+        /// What the wanted rate resolves to, per camera.
+        ///
+        /// Shown because the wanted number is never the number in the file: 30 out of 124.316 is
+        /// every fourth frame at 31.079, and out of a 10 fps camera it is every frame at 10. The
+        /// resolution is per camera because the acquisition rate is, so cameras that disagree are
+        /// listed separately rather than averaged into a fiction.
+        /// </summary>
+        public string SessionRateText
+        {
+            get
+            {
+                int wanted = Output.SessionRateFps;
+                var seen = new List<string>();
+                foreach (CameraChannel c in _manager.Channels)
+                {
+                    if (!c.CameraPresent || c.DetectionFps <= 1.0) continue;
+                    int everyNth = VideoRatePolicy.EveryNthFor(c.DetectionFps, wanted);
+                    double file = VideoRatePolicy.FileFps(c.DetectionFps, everyNth);
+                    string one = everyNth == 1
+                        ? $"every frame = {file:F3} fps"
+                        : $"every {everyNth}th of {c.DetectionFps:F3} = {file:F3} fps";
+                    if (!seen.Contains(one)) seen.Add(one);
+                }
+                if (seen.Count == 0) return "no camera";
+                if (wanted <= 0) return "every frame";
+                return seen.Count == 1
+                    ? $"{wanted} wanted → {seen[0]}"
+                    : $"{wanted} wanted → " + string.Join(" · ", seen);
+            }
+        }
+
+        /// <summary>Segment length in minutes, which is how anybody thinks about it.</summary>
+        public string SessionSegmentMinutes
+        {
+            get => (Output.SessionSegmentSeconds / 60.0).ToString("0.##",
+                       System.Globalization.CultureInfo.InvariantCulture);
+            set
+            {
+                if (double.TryParse(value, System.Globalization.NumberStyles.Float,
+                                    System.Globalization.CultureInfo.InvariantCulture, out double m))
+                    Output.SessionSegmentSeconds = m * 60.0;
+                RaiseChanged(nameof(SessionSegmentMinutes));
+            }
+        }
+
+        public bool ContainerIsTs
+        {
+            get => Output.SessionContainer == VideoContainer.MpegTs;
+            set { if (value) SetContainer(VideoContainer.MpegTs); }
+        }
+
+        public bool ContainerIsMp4
+        {
+            get => Output.SessionContainer == VideoContainer.Default;
+            set { if (value) SetContainer(VideoContainer.Default); }
+        }
+
+        private void SetContainer(VideoContainer container)
+        {
+            if (Output.SessionContainer == container) return;
+            Output.SessionContainer = container;
+            RaiseChanged(nameof(ContainerIsTs));
+            RaiseChanged(nameof(ContainerIsMp4));
+            MilErrorLog.Note($"settings: session container set to {container}"
+                           + " - takes effect on the next Rec");
+        }
 
         // ----- Encoding: what a session recording does to the pixels -----
 

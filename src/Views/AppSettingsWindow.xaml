@@ -100,6 +100,60 @@
                        TextWrapping="Wrap"
                        ToolTip="다음 Rec부터 적용됩니다" />
 
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Rate" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.SessionRateFps, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="원하는 초당 프레임. 0 = 매 프레임&#x0a;이 값은 파일에 적히지 않습니다 — 취득 레이트의 약수가 되고, 파일은 그 결과를 선언합니다(30 → 31.079)" />
+                    <TextBlock Text="fps wanted  ·  0 = every frame"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="{Binding SessionRateText}" Margin="0,0,0,8"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10"
+                       TextWrapping="Wrap"
+                       ToolTip="카메라마다 따로 해석됩니다 — 취득 레이트가 카메라마다 다르고 노출에 따라 변하기 때문입니다" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Segment" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding SessionSegmentMinutes, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="파일 하나의 길이(분). 10초~60분&#x0a;이동기가 기다리는 시간을 정합니다. 실측: 세그먼트 경계는 부하도 프레임 손실도 없습니다" />
+                    <TextBlock Text="minutes per file"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Container" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <RadioButton GroupName="Container" Content="MPEG-TS" Margin="0,0,14,0"
+                                 IsChecked="{Binding ContainerIsTs}"
+                                 ToolTip="정전에 강합니다 — 실측: 쓰던 중 죽은 MP4는 0프레임, TS는 1480프레임 전부 회수&#x0a;4% 크고, 옮길 때 -c copy 로 MP4가 됩니다(0.07초)" />
+                    <RadioButton GroupName="Container" Content="MP4"
+                                 IsChecked="{Binding ContainerIsMp4}"
+                                 ToolTip="어느 플레이어에서나 열립니다&#x0a;다만 쓰던 중 죽으면 그 파일은 열리지 않습니다 — 인덱스가 닫을 때 쓰이기 때문입니다" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="a file killed mid-write: MP4 gives back nothing, MPEG-TS gives back everything up to the cut"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+
             <Grid Margin="0,0,0,10">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />

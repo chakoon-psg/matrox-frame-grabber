@@ -27,6 +27,9 @@ namespace MatroxFrameGrabber.Infrastructure
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
         private VideoEncoding _recordingEncoding = VideoEncoding.H264;
+        private VideoContainer _sessionContainer = VideoContainer.MpegTs;
+        private int _sessionRateFps = DefaultSessionRateFps;
+        private double _sessionSegmentSeconds = DefaultSessionSegmentSeconds;
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
@@ -274,6 +277,81 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>
+        /// Frames per second wanted from the continuous recording. 0 takes every frame.
+        ///
+        /// A *wanted* rate, not a declared one, and that distinction is why this exists at all: an
+        /// earlier setting of the same name wrote 30 into the file header while the camera delivered
+        /// 124.316, which made the file 3.6% slow. This one becomes a divisor - EveryNthFor(124.316,
+        /// 30) is 4 - and the file declares what that actually produces, 31.079. The resolution is
+        /// per camera, because the acquisition rate is per camera and varies with exposure: at
+        /// 100 ms exposure the ceiling is 10 fps and the divisor is 1, so the file is 10 fps and
+        /// says so rather than pretending to be 30.
+        /// </summary>
+        public int SessionRateFps
+        {
+            get => _sessionRateFps;
+            set
+            {
+                int v = value <= 0 ? 0 : (value < 1 ? 1 : (value > 1000 ? 1000 : value));
+                if (_sessionRateFps == v) return;
+                _sessionRateFps = v;
+                RaiseChanged(nameof(SessionRateFps));
+                Save();
+            }
+        }
+
+        /// <summary>Default wanted rate for the continuous tier.</summary>
+        public const int DefaultSessionRateFps = 30;
+
+        /// <summary>
+        /// Seconds per file in the continuous recording.
+        ///
+        /// It bounds two things: how long a file waits before a mover can take it, and how much is
+        /// exposed to a crash. The second is much smaller than it looks when the container survives
+        /// a kill - see SessionContainer - so this is really about the first. Measured: segmenting
+        /// costs nothing, and the boundary loses no frames (18 segments, 22382 frames fed, 22382 in
+        /// the files).
+        /// </summary>
+        public double SessionSegmentSeconds
+        {
+            get => _sessionSegmentSeconds;
+            set
+            {
+                double v = value <= 0.0 ? 0.0 : (value < 10.0 ? 10.0 : (value > 3600.0 ? 3600.0 : value));
+                if (Math.Abs(_sessionSegmentSeconds - v) < 1e-9) return;
+                _sessionSegmentSeconds = v;
+                RaiseChanged(nameof(SessionSegmentSeconds));
+                Save();
+            }
+        }
+
+        /// <summary>Five minutes: 288 files a day per camera, and a mover never waits long.</summary>
+        public const double DefaultSessionSegmentSeconds = 300.0;
+
+        /// <summary>
+        /// What the continuous recording is wrapped in.
+        ///
+        /// MPEG-TS by default, and the reason is measured: ffmpeg killed 12 s into an MP4 left
+        /// 7.08 MB on disk with **0 frames** readable, because the index is only written at close.
+        /// The same kill against TS gave back all 1480 frames with a correct duration. TS costs 4%
+        /// more bytes and remuxes to MP4 with a stream copy in 0.07 s.
+        ///
+        /// MP4 stays on offer because the choice is about the environment rather than the recording: a
+        /// viewer that cannot open .ts is a real constraint, and only whoever runs the rig knows.
+        /// </summary>
+        public VideoContainer SessionContainer
+        {
+            get => _sessionContainer;
+            set
+            {
+                if (_sessionContainer == value) return;
+                _sessionContainer = value;
+                RaiseChanged(nameof(SessionContainer));
+                Save();
+            }
+        }
+
+        /// <summary>
         /// Which backend records. Auto uses MIL when it is known to work here and ffmpeg otherwise;
         /// an explicit choice is honoured with no fallback, which is what makes a delivered MIL sink
         /// testable - see VideoSinkPolicy.
@@ -312,6 +390,9 @@ namespace MatroxFrameGrabber.Infrastructure
             // fall back to H.264, where an out-of-range index could select the one that writes
             // 71 GB a minute.
             public string RecordingEncoding { get; set; }
+            public string SessionContainer { get; set; }
+            public int? SessionRateFps { get; set; }
+            public double? SessionSegmentSeconds { get; set; }
 
             /// <summary>
             /// Which kinds are watched for, by name. Null means a file written before the flag
@@ -375,6 +456,15 @@ namespace MatroxFrameGrabber.Infrastructure
                             Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
                                 ? pref : VideoSinkPreference.Auto;
                         s._recordingEncoding = VideoCodecs.Parse(dto.RecordingEncoding);
+                        s._sessionContainer =
+                            Enum.TryParse(dto.SessionContainer, ignoreCase: true, out VideoContainer sc)
+                                ? sc : VideoContainer.MpegTs;
+                        int wantedRate = dto.SessionRateFps ?? DefaultSessionRateFps;
+                        s._sessionRateFps = wantedRate <= 0
+                            ? 0 : (wantedRate > 1000 ? 1000 : wantedRate);
+                        double seg = dto.SessionSegmentSeconds ?? DefaultSessionSegmentSeconds;
+                        s._sessionSegmentSeconds = seg <= 0.0
+                            ? 0.0 : (seg < 10.0 ? 10.0 : (seg > 3600.0 ? 3600.0 : seg));
                         s._displayUpdateFps = dto.DisplayUpdateFps <= 0
                             ? 0
                             : (dto.DisplayUpdateFps < 5 ? 5 : (dto.DisplayUpdateFps > 120 ? 120 : dto.DisplayUpdateFps));
@@ -508,6 +598,9 @@ namespace MatroxFrameGrabber.Infrastructure
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
                     RecordingEncoding = _recordingEncoding.ToString(),
+                    SessionContainer = _sessionContainer.ToString(),
+                    SessionRateFps = _sessionRateFps,
+                    SessionSegmentSeconds = _sessionSegmentSeconds,
                     EnabledKinds = AnomalyKindSet.ToNames(_enabledKinds),
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,
