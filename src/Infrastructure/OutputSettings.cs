@@ -153,10 +153,6 @@ namespace MatroxFrameGrabber.Infrastructure
         [JsonIgnore]
         public string EnabledKindsText => AnomalyKindSet.Describe(_enabledKinds);
 
-        /// <summary>Kinds that are on and have a detector - the ones that will run.</summary>
-        [JsonIgnore]
-        public int RunningKindCount => AnomalyKindSet.RunningCount(_enabledKinds);
-
         private void ApplyKindsToChannels()
         {
             foreach (DetectionSettings d in _channelDetection)

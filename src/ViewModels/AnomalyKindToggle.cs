@@ -65,9 +65,6 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>Re-reads the flag, for after a load.</summary>
-        public void Refresh() => Raise(nameof(Enabled));
-
         /// <summary>One row per kind, in the order the catalog lists them.</summary>
         internal static IReadOnlyList<AnomalyKindToggle> BuildFor(OutputSettings settings)
         {

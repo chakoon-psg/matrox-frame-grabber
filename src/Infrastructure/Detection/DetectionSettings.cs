@@ -118,6 +118,10 @@ namespace MatroxFrameGrabber.Infrastructure
             MaxEventMs = other.MaxEventMs;
             MaxOnsetSpreadMs = other.MaxOnsetSpreadMs;
             MinOnsetTiles = other.MinOnsetTiles;
+            // StoredEnabled is deliberately NOT copied. It is the old file's key, read once by
+            // the migration; carrying it onto the live instance would put "Enabled" back into
+            // every save, and the file would again hold four answers beside the one.
+            //
             // Provenance verbatim: it records where the threshold came from, and clamping a record
             // of the past would make it a different record.
             CalibratedAt = other.CalibratedAt ?? string.Empty;
@@ -153,7 +157,15 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Per-kind settings, indexed by <see cref="AnomalyKind"/>.</summary>
         public KindSettings[] PerKind { get; set; } = Defaults();
 
-        /// <summary>Defaults: Dropout on because it is measured, every other kind off.</summary>
+        /// <summary>
+        /// Defaults: Dropout on because it is measured, every other kind off.
+        ///
+        /// The flag here is a copy of the app-wide policy, which OutputSettings writes over this on
+        /// every load path - so this value only ever reaches a DetectionSettings held on its own,
+        /// which is what the budget arithmetic below is tested against. It says Dropout for the
+        /// same reason AnomalyKindSet.Default() does: a rig that has never been configured should
+        /// watch for the one fault there is a detector for.
+        /// </summary>
         public static KindSettings[] Defaults()
         {
             var a = new KindSettings[AnomalyCatalog.Count];
@@ -349,6 +361,8 @@ namespace MatroxFrameGrabber.Infrastructure
             s.BaselineWarmupMs = Ms(legacy.BaselineWarmupFrames);
 
             KindSettings d = s.For(AnomalyKind.Dropout);
+            // Set so the kind-set migration can see it: a file this old has no EnabledKinds list
+            // either, and AnomalyKindSet.UnionOf reads WasEnabled off these instances.
             d.Enabled = true;
             d.Deviation = legacy.Depth;
             d.Coherence = legacy.Coherence;

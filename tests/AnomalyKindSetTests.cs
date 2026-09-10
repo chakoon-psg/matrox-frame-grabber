@@ -18,8 +18,7 @@ namespace MatroxFrameGrabber.Tests
         {
             bool[] on = AnomalyKindSet.Default();
 
-            Assert.True(AnomalyKindSet.Get(on, AnomalyKind.Dropout));
-            Assert.Equal(1, AnomalyKindSet.RunningCount(on));
+            Assert.Equal(new[] { "Dropout" }, AnomalyKindSet.ToNames(on));
             foreach (AnomalyKind k in AnomalyCatalog.All)
                 if (k != AnomalyKind.Dropout)
                     Assert.False(AnomalyKindSet.Get(on, k), k.ToString());
@@ -79,7 +78,6 @@ namespace MatroxFrameGrabber.Tests
             bool[] on = AnomalyKindSet.FromNames(new string[0]);
 
             Assert.False(AnomalyKindSet.Get(on, AnomalyKind.Dropout));
-            Assert.Equal(0, AnomalyKindSet.RunningCount(on));
             Assert.Empty(AnomalyKindSet.ToNames(on));
         }
 
@@ -90,7 +88,7 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void A_list_of_unknown_names_watches_nothing_rather_than_guessing()
         {
-            Assert.Equal(0, AnomalyKindSet.RunningCount(AnomalyKindSet.FromNames(new[] { "Tearing" })));
+            Assert.Empty(AnomalyKindSet.ToNames(AnomalyKindSet.FromNames(new[] { "Tearing" })));
         }
 
         [Fact]
@@ -145,6 +143,24 @@ namespace MatroxFrameGrabber.Tests
             Assert.False(AnomalyKindSet.Get(on, AnomalyKind.Washout));
         }
 
+        /// <summary>
+        /// And it must not travel any further than the migration. CopyFrom carries the live flag
+        /// but deliberately not the stored one: if it did, "Enabled" would be written back into
+        /// every channel on the next save and the file would hold four answers beside the one -
+        /// which is the state this whole change exists to remove.
+        /// </summary>
+        [Fact]
+        public void The_old_files_key_does_not_travel_onto_the_live_settings()
+        {
+            var loaded = new DetectionSettings();
+            loaded.For(AnomalyKind.Dropout).StoredEnabled = true;
+
+            var live = new DetectionSettings();
+            live.CopyFrom(loaded);
+
+            Assert.Null(live.For(AnomalyKind.Dropout).StoredEnabled);
+        }
+
         [Fact]
         public void A_migration_from_channels_that_watched_nothing_still_watches_dropout()
         {
@@ -176,7 +192,6 @@ namespace MatroxFrameGrabber.Tests
             bool[] on = AnomalyKindSet.FromNames(new[] { "Dropout", "Flip" });
 
             Assert.Contains("Flip (미구현)", AnomalyKindSet.Describe(on));
-            Assert.Equal(1, AnomalyKindSet.RunningCount(on));   // Flip has no detector to run
         }
 
         [Fact]

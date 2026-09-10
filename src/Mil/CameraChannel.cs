@@ -444,7 +444,7 @@ namespace MatroxFrameGrabber.Mil
             }
         }
 
-        /// <summary>Persists a change made through one of the kind rows, and refreshes what shows it.</summary>
+        /// <summary>Persists a threshold edited in place, and refreshes what shows it.</summary>
         internal void SaveDetection()
         {
             Output?.SaveThresholds();
@@ -1341,11 +1341,20 @@ namespace MatroxFrameGrabber.Mil
             // flag used to change only the budget arithmetic, so clearing Dropout left the detector
             // running and reporting - a checkbox that did nothing. Skipping it also skips the tile
             // reduction, which is the expensive half (175 us of an 8043 us period, measured).
-            bool watching = Detection.For(AnomalyKind.Dropout).Enabled;
+            //
+            // EnabledCount rather than Dropout by name: it counts the kinds that are on *and*
+            // implemented, so the day Blackout gets a detector, switching on only Blackout does not
+            // leave this channel unwatched. And --no-detect goes through the same gate, so that
+            // switch reports DetectionOff as well instead of a channel that looks Healthy while
+            // judging nothing.
+            bool watching = DetectionEnabled && Detection.EnabledCount > 0;
             _detector = watching ? new AnomalyDetector(DetectionThresholds) : null;
             if (!watching)
-                MilErrorLog.Note($"{Name}: detection off - no kind with a detector is switched on "
-                               + "(app Settings), so no frame is judged this run");
+                MilErrorLog.Note($"{Name}: detection off - "
+                               + (DetectionEnabled
+                                    ? "no kind with a detector is switched on (app Settings)"
+                                    : "--no-detect")
+                               + ", so no frame is judged this run");
             _reducer.ResetCost();
             _history.Clear();
             _eventWindowsWritten = 0;
@@ -1575,6 +1584,10 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
             RaisePropertyChanged(nameof(FramesMissed));
+            // The watched kinds live in the app settings, which is a second window that can be open
+            // at the same time as this camera's. Nothing here hears that change, so it is re-read
+            // on the tick - the convention for every other live value.
+            RaisePropertyChanged(nameof(DetectionKindsText));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));

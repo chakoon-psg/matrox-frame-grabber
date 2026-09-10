@@ -99,15 +99,6 @@ namespace MatroxFrameGrabber.Infrastructure
             return any ? on : Default();
         }
 
-        /// <summary>How many kinds are on and have a detector - the ones that will actually run.</summary>
-        public static int RunningCount(bool[] enabled)
-        {
-            int n = 0;
-            foreach (AnomalyKind k in AnomalyCatalog.All)
-                if (AnomalyCatalog.Implemented(k) && Get(enabled, k)) n++;
-            return n;
-        }
-
         /// <summary>
         /// One line for a status area: what is on, and how many are not.
         ///
