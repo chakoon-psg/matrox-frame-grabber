@@ -14,22 +14,16 @@
   </PropertyGroup>
 
   <!-- Source-included, NOT a ProjectReference: referencing the app project would drag in the
-       MIL NuGet packages (x64-only, and only present where MIL is installed). ChannelRoi has no
-       MIL dependency, so pulling the single file in keeps these tests runnable anywhere. -->
+       MIL NuGet packages (x64-only, and only present where MIL is installed). Infrastructure is
+       the MIL-free layer, so all of it comes in by pattern rather than a list somebody has to
+       remember to extend - a new file there is tested from the moment it exists, and a file there
+       that reaches for MIL breaks this build, which is how the layer rule should be enforced.
+
+       The two exclusions need WPF, not MIL: RelayCommand for ICommand and NativeMethods for the
+       window interop. This project has no UseWPF on purpose. -->
   <ItemGroup>
-    <Compile Include="..\src\Infrastructure\ChannelRoi.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\DisplayMapping.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\RoiGesture.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\BrightnessSamplePlan.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\PwmSweep.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\TileGrid.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\FrameMetrics.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\AnomalyDetector.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\BrightnessHistory.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\BrightnessLog.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\TileBounds.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\TileHistory.cs" LinkBase="Included" />
-    <Compile Include="..\src\Infrastructure\MilErrorLog.cs" LinkBase="Included" />
+    <Compile Include="..\src\Infrastructure\**\*.cs" LinkBase="Included"
+             Exclude="..\src\Infrastructure\RelayCommand.cs;..\src\Infrastructure\NativeMethods.cs" />
   </ItemGroup>
 
   <ItemGroup>

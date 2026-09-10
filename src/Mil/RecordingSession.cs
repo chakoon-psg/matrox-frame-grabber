@@ -111,7 +111,7 @@ namespace MatroxFrameGrabber.Mil
                 if (w < 2 || h < 2) { error = "Resolution too small."; LastError = error; return false; }
 
                 bool color = (long)band >= 3;
-                string pixFmt = color ? "gbrp" : "gray";   // planar G,B,R (fed band-by-band, no packing)
+                // Planar G,B,R fed band by band, never packed - see the MbufGetColor trap.
                 int bpp = color ? 3 : 1;
                 int shift = (long)srcBit > 8 ? (int)((long)srcBit - 8) : 0;
 
@@ -132,7 +132,7 @@ namespace MatroxFrameGrabber.Mil
                 recorder = new FfmpegRecorder();
                 recorder.FrameReturned = ReturnFrameBuffer;
                 recorder.Failed += OnRecorderFailed;
-                if (!recorder.Start(ffmpeg, path, (int)w, (int)h, fps, pixFmt, out string err))
+                if (!recorder.Start(ffmpeg, path, (int)w, (int)h, color ? 3 : 1, fps, out string err))
                 {
                     error = string.IsNullOrEmpty(err) ? "ffmpeg failed to launch." : err;
                     LastError = error;
