@@ -146,6 +146,9 @@ namespace MatroxFrameGrabber.Mil
         // Output naming + recording (delegated to RecordingSession).
         private string _outputName;
         private RecordingSession _recording;
+        private StillRing _stills;
+        private long _stillProbeKept;
+        private bool _stillsExported;
 
         private long _framesMissed;
         private long _missedAtGrabStart;   // cumulative counter when this grab started
@@ -1058,6 +1061,8 @@ namespace MatroxFrameGrabber.Mil
 
             // Wait for any in-flight recording finalize before freeing MIL buffers/system.
             _recording?.WaitFinalize(15000);
+            _stills?.Free();
+            _stills = null;
 
             FreeBuffers();
 
@@ -1140,6 +1145,17 @@ namespace MatroxFrameGrabber.Mil
             // A fresh detector per run. Carrying a baseline across a stop would judge the opening
             // frames of the new run against the light of the old one, and the exposure or the
             // region may well have changed in between -- during the exposure scan both did.
+            if (App.StillProbe && _stills == null && _dispBufId != MIL.M_NULL)
+            {
+                var ring = new StillRing();
+                if (ring.Allocate(_sysId, _dispBufId, out string stillErr))
+                    _stills = ring;
+                else
+                    MilErrorLog.Note($"{Name}: still buffers not allocated - {stillErr}");
+            }
+            _stillProbeKept = 0;
+            _stillsExported = false;
+
             _detector = new AnomalyDetector(DetectionThresholds);
             _reducer.ResetCost();
             _history.Clear();
@@ -1210,6 +1226,15 @@ namespace MatroxFrameGrabber.Mil
             if (tail.HasValue)
                 RecordAnomaly(tail.Value);
 
+            if (_stills != null && _stills.IsAllocated)
+            {
+                MilErrorLog.Note($"{Name}: stills - {_stills.Copies} kept, "
+                               + $"copy mean {_stills.MeanCopyUs:F0} us / max {_stills.MaxCopyUs:F0} us "
+                               + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period; "
+                               + $"{_stills.Exports} PNG written, "
+                               + $"max {_stills.MaxExportMs:F1} ms, total {_stills.ExportMsSum:F1} ms");
+            }
+
             // Before releasing it: LogGrabSummary reads these, and a detector that is gone reports
             // nothing rather than what it found.
             _rejectedAtStop = _detector?.EventsRejectedForSpread ?? 0;
@@ -1275,6 +1300,15 @@ namespace MatroxFrameGrabber.Mil
                 catch (MILException e) { MilErrorLog.Write($"{Name}: read missed-frame counter", e); }
                 // This run's losses, not the digitizer's lifetime total (see StartGrab).
                 _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
+
+                StillRing stills = _stills;
+                if (stills != null && !_stillsExported && _stillProbeKept >= 4 && Output != null)
+                {
+                    _stillsExported = true;
+                    int n = stills.ExportAll(Output.EnsureFolder(), SafeName(), out string sErr);
+                    MilErrorLog.Note($"{Name}: stills exported - {n} files"
+                                   + (sErr != null ? $", error: {sErr}" : string.Empty));
+                }
 
                 // Anomalies are surfaced here rather than from the hook: a handler running on the
                 // acquisition thread would put the grab behind whatever it decides to do, and the
@@ -1409,6 +1443,15 @@ namespace MatroxFrameGrabber.Mil
             }
             if (copyToDisplay)
                 MIL.MbufCopy(grabbedBuffer, displayBuffer);
+
+            // ---- Lossless stills (probe: rotate every slot rather than wait for an event) ----
+            StillRing stills = _stills;
+            if (stills != null && frameNumber % StillRing.ReferenceEveryFrames == 0)
+            {
+                stills.Keep((StillRing.Slot)(_stillProbeKept % 4), grabbedBuffer,
+                            frameNumber, timeStampSec, 0.0);
+                _stillProbeKept++;
+            }
 
             // ---- Recording feed (RecordingSession guards start/stop vs feed internally) ----
             _recording?.Feed(grabbedBuffer);
