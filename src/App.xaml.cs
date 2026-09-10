@@ -81,6 +81,19 @@ namespace MatroxFrameGrabber
         /// <summary>Seconds to hold each exposure, from <c>--dwell 30</c>.</summary>
         public static int DwellSeconds { get; private set; } = DefaultDwellSeconds;
 
+        private const string RecordSwitch = "--rec";
+
+        /// <summary>
+        /// <c>--rec</c>: record every present camera for the whole of an <c>--autostart</c> run.
+        ///
+        /// This exists for one measurement. Recording extracts the entire frame inside the
+        /// acquisition hook, which is exactly what a preroll ring of frames would have to do, so a
+        /// timed run with recording on says whether that extraction fits in the frame period - and
+        /// whether the encoder keeps up at the acquisition rate, which decides whether the file's
+        /// time axis can be trusted enough to cut an event window out of it.
+        /// </summary>
+        public static bool RecordDuringAutoRun { get; private set; }
+
         private const string NoDetectSwitch = "--no-detect";
 
         /// <summary>
@@ -132,6 +145,7 @@ namespace MatroxFrameGrabber
             OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
             BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
             DetectionOff = HasSwitch(e.Args, NoDetectSwitch);
+            RecordDuringAutoRun = HasSwitch(e.Args, RecordSwitch);
             ExposureScan = ParseExposures(ParseSwitchValue(e.Args, ExposureScanSwitch));
             DwellSeconds = ParseDwellSeconds(e.Args);
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,

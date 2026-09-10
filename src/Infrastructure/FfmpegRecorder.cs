@@ -143,9 +143,16 @@ namespace MatroxFrameGrabber.Infrastructure
             {
                 string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
                 string args =
-                    $"-hide_banner -loglevel error -f rawvideo -pixel_format {pixFmt} " +
+                    $"-hide_banner -loglevel warning -f rawvideo -pixel_format {pixFmt} " +
                     $"-video_size {width}x{height} -framerate {fpsStr} -i pipe:0 -an " +
                     $"-vf \"crop=trunc(iw/2)*2:trunc(ih/2)*2\" " +
+                    // -r is not redundant with -framerate. -framerate sets the input rate; the output
+                    // rate comes from the demuxer's estimated tbr, and rawvideo's probe snaps that to
+                    // a standard rate - it read 120 for a 124.316 fps stream, then dropped 3.5% of
+                    // the frames converting to it (ffmpeg's own "drop=6"). Measured 2026-09-10: a
+                    // 20.0 s run fed 2493 frames and the file held 2408 at 120/1. Naming the output
+                    // rate keeps every frame and the declared rate exact.
+                    $"-r {fpsStr} " +
                     $"-c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart -y \"{outPath}\"";
 
                 var psi = new ProcessStartInfo(ffmpegPath, args)
@@ -155,6 +162,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
+                MilErrorLog.Note($"ffmpeg: {args}");
                 _proc = Process.Start(psi);
                 if (_proc == null) { error = "Failed to start ffmpeg."; return false; }
 

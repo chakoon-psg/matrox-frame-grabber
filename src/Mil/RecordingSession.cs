@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
@@ -30,6 +31,9 @@ namespace MatroxFrameGrabber.Mil
         private volatile bool _failed;
         private DateTime _start;
         private Task _finalizeTask;
+        private long _droppedAtStop;      // survives Stop(), which nulls the recorder
+        private double _elapsedAtStop;
+        private double _feedUsSum;
 
         public RecordingSession(MIL_ID sysId) { _sysId = sysId; }
 
@@ -37,6 +41,39 @@ namespace MatroxFrameGrabber.Mil
         public bool Failed => _failed;
         public string FilePath { get; private set; }
         public string LastError { get; private set; }
+
+        /// <summary>Frames extracted and handed to the encoder.</summary>
+        public long FramesFed { get; private set; }
+
+        /// <summary>
+        /// Frames the feed skipped without extracting, because the encoder queue was already full.
+        /// This is the loss that actually happens under load, and until now nothing counted it -
+        /// the banner shows <see cref="FramesDropped"/>, a rarer path that only fires when the
+        /// queue fills between the HasRoom check and the write.
+        /// </summary>
+        public long FramesSkipped { get; private set; }
+
+        /// <summary>Frames the encoder itself refused. Kept past Stop(), which nulls the recorder.</summary>
+        public long FramesDropped => _recorder?.DroppedFrames ?? _droppedAtStop;
+
+        /// <summary>
+        /// The frame rate written into the file's header. Reported separately from the measured rate
+        /// because the two disagreeing is exactly the failure worth catching: the file's time axis
+        /// is this number, whatever the camera was really doing.
+        /// </summary>
+        public double DeclaredFps { get; private set; }
+
+        /// <summary>Seconds recorded, frozen at Stop().</summary>
+        public double ElapsedSeconds => _active ? (DateTime.Now - _start).TotalSeconds : _elapsedAtStop;
+
+        /// <summary>Microseconds the last extraction took (MIL copy + per-band reads).</summary>
+        public double LastFeedUs { get; private set; }
+
+        /// <summary>Mean microseconds per extraction. The frame period at 124.3 fps is 8043 us.</summary>
+        public double MeanFeedUs => FramesFed > 0 ? _feedUsSum / FramesFed : 0.0;
+
+        /// <summary>Worst single extraction. One over the frame period is a missed frame.</summary>
+        public double MaxFeedUs { get; private set; }
 
         /// <summary>
         /// Starts recording <paramref name="sourceBuf"/>'s stream (geometry/format taken from it)
@@ -117,6 +154,14 @@ namespace MatroxFrameGrabber.Mil
                     _pool = new ConcurrentQueue<byte[]>();
                     _recorder = recorder;
                     _start = DateTime.Now;
+                    DeclaredFps = fps;
+                    FramesFed = 0;
+                    FramesSkipped = 0;
+                    _droppedAtStop = 0;
+                    _elapsedAtStop = 0.0;
+                    _feedUsSum = 0.0;
+                    LastFeedUs = 0.0;
+                    MaxFeedUs = 0.0;
                     _active = true;
                 }
                 return true;
@@ -139,7 +184,11 @@ namespace MatroxFrameGrabber.Mil
                 if (!_active || _recorder == null || _captureBuf == MIL.M_NULL)
                     return;
                 if (!_recorder.HasRoom)   // encoder behind: skip extraction, keep the live view fast
+                {
+                    FramesSkipped++;
                     return;
+                }
+                long t0 = Stopwatch.GetTimestamp();
                 try
                 {
                     MIL_ID src = grabbedBuffer;
@@ -164,6 +213,12 @@ namespace MatroxFrameGrabber.Mil
                     else
                         MIL.MbufGet(_captureBuf, frame);
                     _recorder.WriteFrame(frame);
+
+                    double us = (Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency;
+                    LastFeedUs = us;
+                    _feedUsSum += us;
+                    if (us > MaxFeedUs) MaxFeedUs = us;
+                    FramesFed++;
                 }
                 catch
                 {
@@ -181,6 +236,7 @@ namespace MatroxFrameGrabber.Mil
             {
                 if (!_active) return;
                 _active = false;
+                _elapsedAtStop = (DateTime.Now - _start).TotalSeconds;
                 recorder = _recorder; _recorder = null;
                 cap = _captureBuf; _captureBuf = MIL.M_NULL;
                 rez = _resizeBuf; _resizeBuf = MIL.M_NULL;
@@ -189,6 +245,10 @@ namespace MatroxFrameGrabber.Mil
                 _plane = null;
                 _pool = null;
             }
+            // Feed returns early once _active is false and it is the only caller of WriteFrame,
+            // so no further drops can be counted after the lock above - this read is final.
+            _droppedAtStop = recorder?.DroppedFrames ?? 0;
+
             _finalizeTask = Task.Run(() =>
             {
                 try { recorder?.Stop(); } catch { }

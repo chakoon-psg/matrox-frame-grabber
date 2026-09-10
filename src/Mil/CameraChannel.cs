@@ -584,6 +584,9 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Last recording error surfaced to the UI (null if none).</summary>
         public string LastRecordError => _recording?.LastError;
 
+        /// <summary>Path of the file being written, or the last one written. Null before the first.</summary>
+        public string RecordingFilePath => _recording?.FilePath;
+
         /// <summary>Whether recording is possible (ffmpeg available).</summary>
         public bool CanRecord { get; private set; }
 
@@ -1666,7 +1669,15 @@ namespace MatroxFrameGrabber.Mil
         {
             if (!CameraPresent || _recording == null)
                 return false;
-            double fps = _frameRate > 1.0 ? _frameRate : InquireNominalFps();
+            // The camera's own answer first. The measured rate does not exist yet - RefreshStats
+            // fills _frameRate on the stats tick, up to 500 ms from now, and never clears it between
+            // runs, so it is either zero or the last run's. And M_SELECTED_FRAME_RATE reports the
+            // configured AcquisitionFrameRate (184 on this camera), not what the exposure allows
+            // (124.3 at 8000 us) - a header written from it made a 120.0 s recording read as 81.07 s
+            // and play 1.48x too fast, with every frame present. Measured 2026-09-10.
+            double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
+                       ? resulting
+                       : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
             bool ok = _recording.Start(_dispBufId, Output, SafeName(), fps, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -2139,6 +2150,22 @@ namespace MatroxFrameGrabber.Mil
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period, "
                                + $"{_reducer.Accepted}/{_reducer.Reductions} grids accepted"
                                + (ReducerFailures > 0 ? $", {ReducerFailures} consecutive failures" : string.Empty));
+
+            // What recording cost and what it lost. The extraction here is the whole frame, and
+            // it runs in the acquisition hook - so this is also the measurement for whether a
+            // preroll ring of frames is affordable at all, since such a ring would have to pay the
+            // same extraction on every frame whether or not an event ever follows.
+            RecordingSession rec = _recording;
+            if (rec != null && (rec.FramesFed > 0 || rec.FramesSkipped > 0))
+            {
+                double secs = rec.ElapsedSeconds;
+                MilErrorLog.Note($"{Name}: recording - {rec.FramesFed} fed, {rec.FramesSkipped} skipped "
+                               + $"(encoder full), {rec.FramesDropped} dropped, "
+                               + $"{(secs > 0 ? rec.FramesFed / secs : 0):F1} fps written vs "
+                               + $"{rec.DeclaredFps:F2} fps declared over {secs:F1} s, "
+                               + $"extract mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
+                               + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period");
+            }
 
             // The board's stamps for this run, in milliseconds. Whether these share one clock across
             // channels is the whole of cross-channel correlation: the cameras free-run, so nothing

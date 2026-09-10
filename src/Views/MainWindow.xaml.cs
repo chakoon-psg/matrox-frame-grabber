@@ -524,8 +524,22 @@ namespace MatroxFrameGrabber.Views
             if (_viewModel == null)
                 return;
 
-            MilErrorLog.Note($"autostart: grabbing for {seconds}s, then closing");
+            MilErrorLog.Note($"autostart: grabbing for {seconds}s"
+                           + (App.RecordDuringAutoRun ? ", recording" : "") + ", then closing");
             _viewModel.StartAllCommand.Execute(null);
+
+            if (App.RecordDuringAutoRun)
+            {
+                foreach (CameraChannel c in _viewModel.Channels)
+                {
+                    if (!c.CameraPresent)
+                        continue;
+                    if (c.StartRecording())
+                        MilErrorLog.Note($"{c.Name}: recording to {c.RecordingFilePath}");
+                    else
+                        MilErrorLog.Note($"{c.Name}: recording did not start - {c.LastRecordError}");
+                }
+            }
 
             var timer = new System.Windows.Threading.DispatcherTimer
             {
