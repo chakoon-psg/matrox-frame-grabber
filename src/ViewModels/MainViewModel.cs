@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Windows.Threading;
 using MatroxFrameGrabber.Infrastructure;
 using MatroxFrameGrabber.Mil;
+using MatroxFrameGrabber.Mil.Video;
 
 namespace MatroxFrameGrabber.ViewModels
 {
@@ -180,7 +181,72 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>True if at least one camera supports recording (i.e. ffmpeg was found — recording never uses a MIL compression licence; see docs/adr/).</summary>
+        /// <summary>
+        /// Which backend is in force, as two radio buttons rather than three.
+        ///
+        /// Auto stays the stored default and is not offered: a third radio labelled "Auto" would
+        /// leave the operator unable to tell what is actually recording. Instead the pair shows the
+        /// effective choice, so on a fresh install it reads FFMPEG because that is what runs, and
+        /// picking one stores it explicitly - which also turns off the fallback, so a MIL sink
+        /// under test cannot quietly hand over to ffmpeg.
+        /// </summary>
+        public bool SinkIsFfmpeg
+        {
+            get => EffectiveSink() == SinkChoice.Ffmpeg;
+            set { if (value) SetSink(VideoSinkPreference.Ffmpeg); }
+        }
+
+        public bool SinkIsMil
+        {
+            get => EffectiveSink() == SinkChoice.Mil;
+            set { if (value) SetSink(VideoSinkPreference.Mil); }
+        }
+
+        /// <summary>Whether the MIL radio can be picked at all - see VideoSinkPolicy.MilSelectable.</summary>
+        public bool MilSinkSelectable => VideoSinkFactory.MilSelectable(out _);
+
+        /// <summary>
+        /// What to say about the MIL option, selectable or not. A radio that cannot be picked has
+        /// to explain itself, and the explanation is MIL's own words when it has any.
+        /// </summary>
+        public string MilSinkReason
+        {
+            get
+            {
+                VideoSinkFactory.MilSelectable(out string reason);
+                return reason;
+            }
+        }
+
+        /// <summary>The backend actually chosen, and why. Shown under the radios.</summary>
+        public string SinkReasonText
+        {
+            get
+            {
+                VideoSinkPolicy.Choose(Output.VideoSink, VideoSinkFactory.Readiness(out _),
+                                       !string.IsNullOrEmpty(FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath)),
+                                       out string reason);
+                return reason;
+            }
+        }
+
+        private SinkChoice EffectiveSink() =>
+            VideoSinkPolicy.Choose(Output.VideoSink, VideoSinkFactory.Readiness(out _),
+                                   !string.IsNullOrEmpty(FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath)),
+                                   out _);
+
+        private void SetSink(VideoSinkPreference preference)
+        {
+            if (Output.VideoSink == preference) return;
+            Output.VideoSink = preference;   // persists
+            RaiseChanged(nameof(SinkIsFfmpeg));
+            RaiseChanged(nameof(SinkIsMil));
+            RaiseChanged(nameof(SinkReasonText));
+            MilErrorLog.Note($"settings: recording backend set to {preference}"
+                           + " (takes effect on the next start - the sink is chosen when a camera is allocated)");
+        }
+
+        /// <summary>True if at least one camera supports recording (i.e. something can encode; see docs/adr/).</summary>
         public bool AnyCanRecord
         {
             get

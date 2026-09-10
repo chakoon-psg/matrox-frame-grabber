@@ -1,0 +1,119 @@
+<Window x:Class="MatroxFrameGrabber.Views.AppSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings" Width="560" SizeToContent="Height"
+        MinWidth="440" MaxHeight="900"
+        Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
+        ShowInTaskbar="False" WindowStartupLocation="Manual">
+    <!--
+      Replaces the "⚙ Rec" popup. It was called recording settings and held three rows, of which
+      one was about recording: the ffmpeg path is a read-only diagnostic and the display rate is
+      about the preview. Meanwhile the output folder lived on the toolbar, and the recording
+      backend had nowhere to go at all.
+
+      A window rather than a popup because the list only grows from here, and because the
+      per-camera settings already open in one - two kinds of settings in two kinds of container
+      was the confusing part.
+
+      Not modal, like the camera window: a folder or a rate is often changed while watching what
+      it does.
+
+      Labels in English with Korean tooltips, which is this app's convention. The popup this
+      replaces had drifted into Korean labels for two of its three rows.
+    -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="14,12,14,14">
+        <StackPanel Grid.IsSharedSizeScope="True">
+
+            <!-- ============ RECORDING ============ -->
+            <TextBlock Text="RECORDING" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,5" />
+
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Library" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <RadioButton GroupName="Sink" Content="FFMPEG" Margin="0,0,14,0"
+                                 IsChecked="{Binding SinkIsFfmpeg}"
+                                 ToolTip="외부 ffmpeg 프로세스로 인코딩합니다" />
+                    <RadioButton GroupName="Sink" Content="MIL"
+                                 IsChecked="{Binding SinkIsMil}"
+                                 IsEnabled="{Binding MilSinkSelectable}"
+                                 ToolTip="{Binding MilSinkReason}" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="{Binding SinkReasonText}" Margin="0,0,0,8"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10"
+                       TextWrapping="Wrap"
+                       ToolTip="다음 시작부터 적용됩니다 — 싱크는 카메라를 할당할 때 정해집니다" />
+
+            <Grid Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Resolution" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <ComboBox Width="120" VerticalContentAlignment="Center"
+                              ItemsSource="{Binding ResolutionOptions}"
+                              SelectedItem="{Binding Output.Resolution}"
+                              ToolTip="녹화·스냅샷의 출력 크기. 취득 해상도와는 무관합니다" />
+                </StackPanel>
+            </Grid>
+
+            <!-- ============ FOLDERS ============ -->
+            <TextBlock Text="FOLDERS" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
+
+            <Grid Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Output" />
+                <TextBox Grid.Column="1" IsReadOnly="True" VerticalContentAlignment="Center"
+                         Text="{Binding Output.OutputFolder, Mode=OneWay}"
+                         ToolTip="{Binding Output.OutputFolder}" />
+                <Button Grid.Column="2" Content="Browse…" Margin="4,0,0,0" Click="BrowseOutput_Click"
+                        ToolTip="스냅샷과 녹화가 저장되는 폴더" />
+                <Button Grid.Column="3" Content="Open" Margin="4,0,0,0" Click="OpenOutput_Click" />
+            </Grid>
+
+            <!-- ============ DISPLAY ============ -->
+            <TextBlock Text="DISPLAY" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
+
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Preview rate" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.DisplayUpdateFps, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="0 = 무제한. 취득 fps와 무관하며, 화면 갱신 비용만 줄입니다" />
+                    <TextBlock Text="fps  ·  0 = uncapped, unrelated to acquisition"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="ffmpeg" />
+                <TextBlock Grid.Column="1" Text="{Binding FfmpegPathText}"
+                           ToolTip="{Binding FfmpegPathText}"
+                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                           Foreground="{StaticResource MutedTextBrush}" FontSize="11" />
+            </Grid>
+            <TextBlock Text="found by search, not a setting — see the README for the search order"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,4" TextWrapping="Wrap" />
+
+        </StackPanel>
+    </ScrollViewer>
+</Window>

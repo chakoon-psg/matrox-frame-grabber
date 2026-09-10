@@ -570,20 +570,6 @@ namespace MatroxFrameGrabber.Views
 
         // ----- Toolbar: output folder / recording -----
 
-        private void BrowseFolder_Click(object sender, RoutedEventArgs e)
-        {
-            if (_viewModel == null) return;
-            using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
-            {
-                dialog.Description = "Select output folder for snapshots and recordings";
-                dialog.UseDescriptionForTitle = true;
-                if (Directory.Exists(_viewModel.Output.OutputFolder))
-                    dialog.SelectedPath = _viewModel.Output.OutputFolder;
-                if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
-                    _viewModel.Output.OutputFolder = dialog.SelectedPath;
-            }
-        }
-
         private void OpenFolder_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -616,9 +602,27 @@ namespace MatroxFrameGrabber.Views
             _viewModel?.ToggleRecordAll();
         }
 
-        private void RecSettings_Click(object sender, RoutedEventArgs e)
+        private AppSettingsWindow _settingsWindow;
+
+        /// <summary>
+        /// Opens the application settings, or brings the open one forward.
+        ///
+        /// One at a time, unlike the camera windows: there is nothing to compare these against, so
+        /// a second copy of the same settings would only be a way to make them disagree.
+        /// </summary>
+        private void AppSettings_Click(object sender, RoutedEventArgs e)
         {
-            RecSettingsPopup.IsOpen = !RecSettingsPopup.IsOpen;
+            if (_viewModel == null) return;
+
+            if (_settingsWindow != null)
+            {
+                _settingsWindow.Activate();
+                return;
+            }
+
+            _settingsWindow = new AppSettingsWindow(_viewModel, this);
+            _settingsWindow.Closed += (s2, e2) => _settingsWindow = null;
+            _settingsWindow.Show();
         }
 
 

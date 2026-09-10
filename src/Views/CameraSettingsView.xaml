@@ -96,6 +96,8 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- Detection region: which pixels the anomaly metrics are computed over. Software
@@ -128,11 +130,41 @@
                         ToolTip="Measure the whole frame" />
             </StackPanel>
 
+            <!-- Every kind, four of them without a detector. Listed rather than hidden: a panel
+                 with nothing to report must not read as "nothing wrong" when one of five things is
+                 being checked. The checkbox writes straight through and saves, so there is no
+                 Apply for it - a checkbox that needs confirming reads as broken. -->
+            <ItemsControl Grid.Row="1" Grid.ColumnSpan="2" Margin="0,2,0,5"
+                          ItemsSource="{Binding DetectionKinds}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="0,0,0,1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="104" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <CheckBox Grid.Column="0" FontSize="11" VerticalAlignment="Center"
+                                      Content="{Binding Name}"
+                                      IsChecked="{Binding Enabled}"
+                                      IsEnabled="{Binding Implemented}"
+                                      ToolTip="{Binding Description}" />
+                            <TextBlock Grid.Column="1" Text="{Binding StatusText}"
+                                       VerticalAlignment="Center" FontSize="10"
+                                       Foreground="#9A9A9A" TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding Description}" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
             <!-- Detection thresholds. Per channel because the cameras do not see the same thing:
                  measured against one clip, the dimmest of three produced nine shallow false
-                 positives where the other two produced none. Takes effect on the next Start. -->
-            <Label Grid.Row="1" Grid.Column="0" Content="Detect" />
-            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                 positives where the other two produced none. Takes effect on the next Start.
+
+                 Labelled with the kind it edits: it is Dropout's pair, and the four other kinds
+                 are listed above it. -->
+            <Label Grid.Row="2" Grid.Column="0" Content="Dropout" />
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
                 <TextBlock Text="depth" Margin="0,0,3,0" VerticalAlignment="Center"
                            Foreground="#9A9A9A" FontSize="10" />
                 <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
@@ -151,13 +183,21 @@
                         ToolTip="Saved to settings; takes effect on the next Start" />
             </StackPanel>
 
+            <!-- The budget and the share, because the split is invisible otherwise: five
+                 detectors each allowed one false positive an hour is five an hour, and the total
+                 is the number anybody was told to expect. -->
+            <Label Grid.Row="3" Grid.Column="0" Content="Budget" />
+            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding BudgetText}" Margin="0,0,0,3"
+                       VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                       TextTrimming="CharacterEllipsis" ToolTip="{Binding BudgetText}" />
+
             <!-- Where the depth threshold came from, and what the last run would propose instead.
                  Applying is a separate act on purpose: the histogram is collected on every run
                  because it costs nothing, but only a person can say the run was on a healthy
                  panel. TextTrimming rather than a fixed width, so a window shows all of it and a
                  pane shows as much as it has room for. -->
-            <Label Grid.Row="2" Grid.Column="0" Content="Calib" />
-            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal">
+            <Label Grid.Row="4" Grid.Column="0" Content="Calib" />
+            <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal">
                 <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
                            Foreground="#9A9A9A" FontSize="10"
                            TextTrimming="CharacterEllipsis"

@@ -43,65 +43,21 @@
                                   Margin="0,0,4,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
                                   IsEnabled="{Binding AnyCanRecord}"
                                   ToolTip="Record all running cameras (live color H.264, may drop frames at high fps)" />
-                    <!-- Recording settings popup (output resolution / ffmpeg / display fps) -->
-                    <Button x:Name="RecSettingsButton" Padding="8,4" Click="RecSettings_Click"
-                            ToolTip="Recording settings — output resolution, ffmpeg, display rate">
+                    <!-- Application settings, in a window: the list only grows from here, and the
+                         per-camera settings already open in one. See AppSettingsWindow. -->
+                    <Button Padding="8,4" Click="AppSettings_Click"
+                            AutomationProperties.Name="Settings"
+                            ToolTip="설정 — 녹화 백엔드, 출력 폴더, 표시 fps">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center" />
-                            <TextBlock Text="Rec" Margin="5,0,0,0" VerticalAlignment="Center" />
+                            <TextBlock Text="Settings" Margin="5,0,0,0" VerticalAlignment="Center" />
                         </StackPanel>
                     </Button>
-                    <Popup x:Name="RecSettingsPopup" PlacementTarget="{Binding ElementName=RecSettingsButton}"
-                           Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
-                        <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrushColor}"
-                                BorderThickness="1" CornerRadius="4" Padding="12" Margin="0,4,0,0">
-                            <StackPanel MinWidth="230">
-                                <TextBlock Text="Recording settings" FontWeight="SemiBold"
-                                           Foreground="#E0E0E0" Margin="0,0,0,10" />
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                    </Grid.RowDefinitions>
-
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Resolution"
-                                               VerticalAlignment="Center" Margin="0,0,12,0" Foreground="#D0D0D0" />
-                                    <ComboBox Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" Width="110"
-                                              VerticalContentAlignment="Center"
-                                              ItemsSource="{Binding ResolutionOptions}"
-                                              SelectedItem="{Binding Output.Resolution}" />
-
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="ffmpeg"
-                                               VerticalAlignment="Center" Margin="0,7,12,0" Foreground="#D0D0D0" />
-                                    <TextBlock Grid.Row="1" Grid.Column="1" MaxWidth="180" Margin="0,7,0,0"
-                                               Text="{Binding FfmpegPathText}"
-                                               ToolTip="{Binding FfmpegPathText}"
-                                               TextTrimming="CharacterEllipsis"
-                                               VerticalAlignment="Center"
-                                               Foreground="{StaticResource MutedTextBrush}" />
-
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="표시 fps"
-                                               VerticalAlignment="Center" Margin="0,7,12,0" Foreground="#D0D0D0" />
-                                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,7,0,0">
-                                        <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
-                                                 Text="{Binding Output.DisplayUpdateFps, UpdateSourceTrigger=LostFocus}" />
-                                        <TextBlock Text="0 = 무제한 · 취득 fps와 무관"
-                                                   Margin="6,0,0,0" VerticalAlignment="Center"
-                                                   Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
-                                    </StackPanel>
-                                </Grid>
-                            </StackPanel>
-                        </Border>
-                    </Popup>
 
                     <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
 
-                    <!-- Output folder -->
+                    <!-- Output folder. Browse moved into Settings: the path is set once, and
+                         there is more than one folder coming. -->
                     <Button Padding="8,4" Margin="0,0,4,0" Click="OpenFolder_Click"
                             ToolTip="{Binding Output.OutputFolder}">
                         <StackPanel Orientation="Horizontal">
@@ -109,8 +65,7 @@
                             <TextBlock Text="Open" Margin="5,0,0,0" VerticalAlignment="Center" />
                         </StackPanel>
                     </Button>
-                    <Button Content="Browse…" Padding="8,4" Click="BrowseFolder_Click"
-                            ToolTip="Change the output folder for snapshots and recordings" />
+
                 </WrapPanel>
             </DockPanel>
 

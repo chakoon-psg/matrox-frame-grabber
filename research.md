@@ -93,8 +93,12 @@ App.xaml ──> Views/MainWindow.xaml
 ### 2.2 `Views/MainWindow.xaml(.cs)` (217 + 912줄)
 
 **툴바 구성** (커밋 `121d605` → `07e9cbc`에서 단순화)
-- 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` / `⚙ Rec` 팝업 │ `Open` / `Browse…`
-- 가끔 쓰는 설정(출력 해상도, ffmpeg 경로, 표시 fps)은 `RecSettingsPopup` 뒤로 숨김.
+- 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` │ `⚙ Settings` │ `Open`
+- 설정은 `AppSettingsWindow`(앱 전역)와 `CameraSettingsWindow`(카메라별) 두 창에 모임.
+  팝업이던 `⚙ Rec`을 대체한다 — 그 팝업은 "recording settings"라는 이름으로 세 줄을 들고
+  있었는데 녹화인 것은 해상도 하나였고(ffmpeg 경로는 읽기 전용 진단, 표시 fps는 프리뷰),
+  출력 폴더는 툴바에 있었고 녹화 백엔드는 둘 자리가 없었다. `Browse…`도 창 안으로 옮겼다:
+  폴더는 한 번 정하는 값이고, 폴더가 둘 이상이 되면 툴바 버튼으로는 어느 쪽인지 말할 수 없다.
 - 오른쪽 끝에 `SystemStatus`(할당된 시스템 디스크립터 + 디지타이저 수) 고정.
 
 **생명주기 (중요한 순서 규약)**

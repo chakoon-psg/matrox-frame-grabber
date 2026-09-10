@@ -385,6 +385,44 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>The rate the thresholds above were resolved against.</summary>
         public double DetectionFps => _detectionFps;
 
+        /// <summary>
+        /// The five anomaly kinds as the settings window lists them, four of them not implemented.
+        /// Built once: the rows are bound to and hold no state of their own.
+        /// </summary>
+        public System.Collections.Generic.IReadOnlyList<DetectionKindRow> DetectionKinds =>
+            _detectionKinds ??= DetectionKindRow.BuildFor(this);
+
+        private System.Collections.Generic.IReadOnlyList<DetectionKindRow> _detectionKinds;
+
+        /// <summary>
+        /// The false-positive budget and the share each running detector gets.
+        ///
+        /// Both, because the split is invisible otherwise: five detectors each allowed one an hour
+        /// is five an hour, and the number an operator was told to expect is the total.
+        /// </summary>
+        public string BudgetText
+        {
+            get
+            {
+                DetectionSettings d = Detection;
+                int n = d.EnabledCount;
+                // Phrased without a plural: "1 false positives/hour" is what the obvious wording
+                // produces, and the number is often exactly one.
+                return n <= 1
+                    ? $"{d.FalsePositiveBudgetPerHour:0.00} per hour"
+                    : $"{d.FalsePositiveBudgetPerHour:0.00} per hour over {n} kinds "
+                    + $"= {d.BudgetPerEnabledKind:0.000} each";
+            }
+        }
+
+        /// <summary>Persists a change made through one of the kind rows, and refreshes what shows it.</summary>
+        internal void SaveDetection()
+        {
+            Output?.SaveThresholds();
+            RaisePropertyChanged(nameof(BudgetText));
+            RaisePropertyChanged(nameof(DetectionHint));
+        }
+
         private double _detectionFps = DetectionSettings.LegacyFrameRate;
 
         /// <summary>
@@ -469,6 +507,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
+            foreach (DetectionKindRow row in DetectionKinds) row.Refresh();
 
             // Logged as resolved rather than as stored: milliseconds are what a person sets and
             // frames are what the detector counts, and the run is judged in frames.
@@ -594,6 +633,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(DetectionHint));
             RaisePropertyChanged(nameof(CalibrationText));
+            foreach (DetectionKindRow row in DetectionKinds) row.Refresh();
 
             KindSettings cal = Detection.For(AnomalyKind.Dropout);
             MilErrorLog.Note(
