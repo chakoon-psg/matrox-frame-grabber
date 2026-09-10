@@ -2071,8 +2071,10 @@ namespace MatroxFrameGrabber.Mil
             VideoContainer container = VideoCodecs.Supports(OutputSettings.SessionEncoding, Output.SessionContainer)
                 ? Output.SessionContainer
                 : VideoContainer.Default;
+            // Into its own folder, which is what lets the low-space policy be confined to the
+            // continuous recording by construction rather than by a filename rule.
             var spec = new VideoStreamSpec(
-                _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
+                _dispBufId, fps, Output.EnsureContinuousFolder(), SafeName(), 1.0,
                 new[] { VideoOutputSpec.Session(everyNth, Output.SessionSegmentSeconds,
                                                 OutputSettings.SessionEncoding, container) });
 

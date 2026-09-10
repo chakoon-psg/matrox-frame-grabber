@@ -29,6 +29,8 @@ namespace MatroxFrameGrabber.Infrastructure
         private VideoContainer _sessionContainer = VideoContainer.MpegTs;
         private int _sessionRateFps = DefaultSessionRateFps;
         private double _sessionSegmentSeconds = DefaultSessionSegmentSeconds;
+        private double _localReserveGb = DefaultLocalReserveGb;
+        private LowSpacePolicy _whenLow = LowSpacePolicy.DeleteOldestContext;
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
@@ -363,6 +365,63 @@ namespace MatroxFrameGrabber.Infrastructure
             return _outputFolder;
         }
 
+        /// <summary>
+        /// Where the continuous recording is staged, under the output folder.
+        ///
+        /// Its own folder so that the low-space policy can be confined to it structurally. The
+        /// alternative - deciding what may be deleted from a filename - is one typo away from
+        /// deleting an anomaly's evidence, and that is a controlled record.
+        /// </summary>
+        public string EnsureContinuousFolder()
+        {
+            string path = Path.Combine(EnsureFolder(), "continuous");
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        /// <summary>
+        /// Free space to keep on the local disk, in GB. Clamped up to what the operating point
+        /// needs - see StoragePolicy.MinimumReserveGb.
+        /// </summary>
+        public double LocalReserveGb
+        {
+            get => _localReserveGb;
+            set
+            {
+                double v = double.IsNaN(value) ? DefaultLocalReserveGb
+                         : (value < 0.0 ? 0.0 : (value > 100000.0 ? 100000.0 : value));
+                if (Math.Abs(_localReserveGb - v) < 1e-9) return;
+                _localReserveGb = v;
+                RaiseChanged(nameof(LocalReserveGb));
+                Save();
+            }
+        }
+
+        /// <summary>Twenty gigabytes: comfortably above the minimum at any decimation this rig uses.</summary>
+        public const double DefaultLocalReserveGb = 20.0;
+
+        /// <summary>
+        /// What happens when the reserve is breached.
+        ///
+        /// Deleting the oldest context by default: in a durability test the interesting moment is
+        /// in the future, so keeping the recent hours beats keeping the first ones. The other
+        /// choice is for a lab whose rule is that nothing is lost without a person deciding.
+        ///
+        /// Neither touches the anomaly evidence, and that is not offered as an option - making it
+        /// one would let a controlled record be configured away.
+        /// </summary>
+        public LowSpacePolicy WhenLow
+        {
+            get => _whenLow;
+            set
+            {
+                if (_whenLow == value) return;
+                _whenLow = value;
+                RaiseChanged(nameof(WhenLow));
+                Save();
+            }
+        }
+
         #region Persistence
 
         // Plain DTO so (de)serialization never runs through the observable setters (which Save()).
@@ -386,6 +445,8 @@ namespace MatroxFrameGrabber.Infrastructure
             public string SessionContainer { get; set; }
             public int? SessionRateFps { get; set; }
             public double? SessionSegmentSeconds { get; set; }
+            public double? LocalReserveGb { get; set; }
+            public string WhenLow { get; set; }
 
             /// <summary>
             /// Which kinds are watched for, by name. Null means a file written before the flag
@@ -454,6 +515,10 @@ namespace MatroxFrameGrabber.Infrastructure
                         int wantedRate = dto.SessionRateFps ?? DefaultSessionRateFps;
                         s._sessionRateFps = wantedRate <= 0
                             ? 0 : (wantedRate > 1000 ? 1000 : wantedRate);
+                        s._localReserveGb = dto.LocalReserveGb is double res && res >= 0.0
+                            ? (res > 100000.0 ? 100000.0 : res) : DefaultLocalReserveGb;
+                        s._whenLow = Enum.TryParse(dto.WhenLow, ignoreCase: true, out LowSpacePolicy wl)
+                            ? wl : LowSpacePolicy.DeleteOldestContext;
                         double seg = dto.SessionSegmentSeconds ?? DefaultSessionSegmentSeconds;
                         s._sessionSegmentSeconds = seg <= 0.0
                             ? 0.0 : (seg < 10.0 ? 10.0 : (seg > 3600.0 ? 3600.0 : seg));
@@ -592,6 +657,8 @@ namespace MatroxFrameGrabber.Infrastructure
                     SessionContainer = _sessionContainer.ToString(),
                     SessionRateFps = _sessionRateFps,
                     SessionSegmentSeconds = _sessionSegmentSeconds,
+                    LocalReserveGb = _localReserveGb,
+                    WhenLow = _whenLow.ToString(),
                     EnabledKinds = AnomalyKindSet.ToNames(_enabledKinds),
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,

@@ -47,6 +47,7 @@ namespace MatroxFrameGrabber.ViewModels
             {
                 foreach (var channel in _manager.Channels)
                     channel.RefreshStats();
+                CheckStorage();
                 RecordMeasurementRow();
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(BandwidthText));
@@ -308,6 +309,161 @@ namespace MatroxFrameGrabber.ViewModels
             _detectionKinds ??= AnomalyKindToggle.BuildFor(Output);
 
         private IReadOnlyList<AnomalyKindToggle> _detectionKinds;
+
+        // ----- Local storage: the staging area the mover empties -----
+
+        private StorageWarden _warden;
+        private string _wardenFolder;
+        private DateTime _lastStorageCheck = DateTime.MinValue;
+        private string _storageStatus = "";
+        private bool _storageStopRaised;
+        private string _lastStorageMessage;
+
+        /// <summary>
+        /// The warden for the folder currently configured. Rebuilt when the folder changes, since
+        /// the output path is a setting and the volume may differ.
+        /// </summary>
+        private StorageWarden Warden()
+        {
+            string folder = Output.EnsureContinuousFolder();
+            if (_warden == null || !string.Equals(folder, _wardenFolder, StringComparison.OrdinalIgnoreCase))
+            {
+                _warden = new StorageWarden(folder);
+                _wardenFolder = folder;
+            }
+            return _warden;
+        }
+
+        /// <summary>
+        /// The smallest reserve this operating point can work with: enough to write a few events
+        /// per camera plus the segment that is too young to delete.
+        /// </summary>
+        public double MinimumReserveGb
+        {
+            get
+            {
+                int channels = 0;
+                long evidence = 0;
+                foreach (CameraChannel c in _manager.Channels)
+                {
+                    if (!c.CameraPresent) continue;
+                    channels++;
+                    if (evidence == 0 && c.TryGetFrameShape(out int w, out int h, out int bands))
+                        evidence = 4L * w * h * Math.Max(1, bands) + 500_000L;   // 4 stills + a clip
+                }
+                return StoragePolicy.MinimumReserveGb(Math.Max(1, channels), evidence,
+                                                      Warden().LargestCandidateBytes());
+            }
+        }
+
+        /// <summary>The reserve actually in force, which is what was asked for or the minimum.</summary>
+        public double EffectiveReserveGb =>
+            StoragePolicy.ClampReserveGb(Output.LocalReserveGb, MinimumReserveGb);
+
+        /// <summary>Room, policy and what is waiting for the mover.</summary>
+        public string StorageStatusText
+        {
+            get
+            {
+                StorageWarden w = Warden();
+                string line = StoragePolicy.Describe(w.FreeGb, EffectiveReserveGb, Output.WhenLow)
+                            + " - " + w.PendingText();
+                return string.IsNullOrEmpty(_storageStatus) ? line : line + " - " + _storageStatus;
+            }
+        }
+
+        /// <summary>What the reserve box will actually be clamped to, so the number is not a lie.</summary>
+        public string ReserveHintText
+        {
+            get
+            {
+                double min = MinimumReserveGb;
+                return Output.LocalReserveGb < min
+                    ? $"raised to {min:F1} GB - the minimum this operating point needs"
+                    : $"minimum {min:F1} GB at this operating point";
+            }
+        }
+
+        public bool WhenLowIsDelete
+        {
+            get => Output.WhenLow == LowSpacePolicy.DeleteOldestContext;
+            set { if (value) SetWhenLow(LowSpacePolicy.DeleteOldestContext); }
+        }
+
+        public bool WhenLowIsStop
+        {
+            get => Output.WhenLow == LowSpacePolicy.StopRecording;
+            set { if (value) SetWhenLow(LowSpacePolicy.StopRecording); }
+        }
+
+        private void SetWhenLow(LowSpacePolicy policy)
+        {
+            if (Output.WhenLow == policy) return;
+            Output.WhenLow = policy;
+            RaiseChanged(nameof(WhenLowIsDelete));
+            RaiseChanged(nameof(WhenLowIsStop));
+            RaiseChanged(nameof(StorageStatusText));
+            MilErrorLog.Note($"settings: when local storage is low - {policy}");
+        }
+
+        /// <summary>
+        /// Applies the low-space policy, at most every ten seconds.
+        ///
+        /// On the stats tick rather than a timer of its own, which is this app convention;
+        /// throttled because the answer cannot change meaningfully in half a second and the delete
+        /// path enumerates a folder.
+        /// </summary>
+        private void CheckStorage()
+        {
+            if ((DateTime.Now - _lastStorageCheck).TotalSeconds < 10.0) return;
+            _lastStorageCheck = DateTime.Now;
+
+            StorageAction action = Warden().Apply(EffectiveReserveGb, Output.WhenLow, out string message);
+
+            // Only when it changes. This runs every ten seconds, and a breach that nobody clears
+            // would otherwise write the same line 8640 times a day and push the log's real history
+            // out of its size cap. A deletion still logs each time, because each one is an event
+            // and the message carries its own count.
+            if (message != null && message != _lastStorageMessage)
+                MilErrorLog.Note("storage: " + message);
+            _lastStorageMessage = message;
+
+            if (action == StorageAction.StopRecording)
+            {
+                _storageStatus = "recording stopped - local storage low";
+                foreach (CameraChannel c in _manager.Channels)
+                {
+                    if (!c.IsRecording) continue;
+                    c.StopRecording();
+                    MilErrorLog.Note($"{c.Name}: session recording stopped by the storage policy");
+                }
+
+                // Once per transition, not once per check. This runs every ten seconds, and the
+                // handler is allowed to be a modal dialog - raising it each time would wall the
+                // screen with them and freeze the tick behind the first one.
+                if (!_storageStopRaised && message != null)
+                {
+                    _storageStopRaised = true;
+                    RecordingStopped?.Invoke(message);
+                }
+            }
+            else if (action == StorageAction.DeleteOldest)
+            {
+                _storageStatus = message;
+            }
+            else
+            {
+                // Recovered. Armed again, so the next breach is announced - and deliberately not
+                // resumed automatically: stopping was the policy that says a person decides.
+                _storageStopRaised = false;
+                _storageStatus = "";
+            }
+
+            RaiseChanged(nameof(StorageStatusText));
+        }
+
+        /// <summary>Raised when the storage policy stops the recording. The window shows it.</summary>
+        public event Action<string> RecordingStopped;
 
         // ----- The continuous tier: rate, segment length, container -----
 

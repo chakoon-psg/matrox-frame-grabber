@@ -251,6 +251,50 @@
             <TextBlock Text="keep this local — a network share becomes skipped frames, and a skipped frame is a hole in the clip"
                        Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
 
+            <!-- ============ STORAGE ============ -->
+            <TextBlock Text="STORAGE" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,1" />
+            <TextBlock Text="the continuous recording is staged locally until a mover takes it to the NAS"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,5" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Reserve" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.LocalReserveGb, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="이 여유 아래로 내려가면 정책이 작동합니다&#x0a;운전점이 요구하는 최소값 아래로는 내려가지 않습니다 — 사건 하나를 쓰지 못하면 정책이 무의미하기 때문입니다" />
+                    <TextBlock Text="GB free" Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="{Binding ReserveHintText}" Margin="0,0,0,6"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="When low" />
+                <StackPanel Grid.Column="1">
+                    <RadioButton GroupName="WhenLow" Content="delete the oldest context first"
+                                 IsChecked="{Binding WhenLowIsDelete}"
+                                 ToolTip="무인 운용을 계속합니다&#x0a;내구 시험에서 흥미로운 순간은 과거가 아니라 미래이므로, 최근을 남기는 쪽이 대개 맞습니다" />
+                    <RadioButton GroupName="WhenLow" Content="stop the recording and raise it"
+                                 Margin="0,2,0,0"
+                                 IsChecked="{Binding WhenLowIsStop}"
+                                 ToolTip="사람이 정하기 전에는 아무것도 잃지 않습니다&#x0a;자동 재개는 없습니다 — 그게 이 선택의 요점입니다" />
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Text="{Binding StorageStatusText}" Margin="0,4,0,2"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+            <TextBlock Text="the anomaly evidence is never deleted by either policy — if evidence alone fills the disk, the recording stops and says so"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+
             <!-- ============ DISPLAY ============ -->
             <TextBlock Text="DISPLAY" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
 

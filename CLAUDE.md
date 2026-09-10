@@ -78,8 +78,8 @@ src/
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
                                  VideoEncoding(+VideoCodecs+VideoContainer),
                                  VideoSinkPolicy, RecordingRecord, SharedFramePool,
-                                 SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (417개). csproj가 `Infrastructure/**`를
+                                 StoragePolicy(+StorageWarden), SegmentRing, ClipExtractor
+tests/                         MatroxFrameGrabber.Tests (425개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -132,6 +132,32 @@ research.md                    src/ 심층 분석
 
 **레이트가 바뀌면 파일을 롤한다.** 파일 하나에 레이트 하나 — 노출이 8000 → 4000 µs가 되면
 그 이후가 어긋나므로, 사건 tier 재시작과 나란히 세션 파일도 새로 시작한다.
+
+**로컬은 스테이징이고, 그래서 비워야 한다.** 상시 녹화는 출력 폴더 아래
+`continuous/`에 쓰이고 이동기가 NAS로 옮긴다. NAS가 닿지 않으면 폴더가 자라므로 여유가
+`LocalReserveGb`(기본 20 GB) 아래로 내려가면 정책이 작동한다 — **오래된 문맥부터 삭제**(기본) 또는
+**녹화 중단 후 알림**. 자동 재개는 없다. 후자를 고르는 이유가 "사람이 정하기 전에는 잃지 않는다"이기
+때문이다.
+
+**증거는 어느 정책도 지우지 않고, 그것을 파일명이 아니라 폴더로 보장한다.** 삭제는
+`continuous/` 안만 보고, 그 안에서도 미디어 파일만 후보다 — 사이드카와 세그먼트 목록은 몇 KB짜리
+*기록*이라 영상이 사라져도 남는다. 그리고 2분보다 어린 파일은 건드리지 않는다(쓰고 있는
+세그먼트일 수 있다). 증거만으로 디스크가 차면 지울 것이 없으므로 **멈추고 알린다** — 그건 정책이
+아니라 고장이다.
+
+예비 용량의 **최소값은 운전점에서 계산한다**(`StoragePolicy.MinimumReserveGb`): 바닥 2 GB +
+채널수 × (사건당 증거 × 4 + 세그먼트 하나). decim 2 · 3채널에서 2.1 GB이고 decim 1이면 네 배다.
+설정값이 그 아래면 **올려서 쓴다** — 사건 하나를 쓰지 못하는 예비 용량은 없느니만 못하다.
+
+**이동기는 앱 밖이다.** 앱은 `continuous/`에 쓰고 대기 파일 수·여유를 보고할 뿐이고, 옮기는 것은
+스크립트의 일이다. 규격은 실측에서 나왔다:
+- **1분 이상 지난 파일만** — 경계 직후는 ffmpeg이 파일을 닫고 여는 순간이다.
+- **직렬로** — 세 채널의 세그먼트는 같은 초에 닫힌다. 병렬로 보내면 버스트가 3배다.
+- **조각 단위로, 사이를 띄워서**(`robocopy /IPG` 또는 background I/O) — 실측: 꼬리 지연은 평균이
+  아니라 **버스트 강도**에 반응한다. 총량만 30 MB/s로 낮추고 버스트를 그대로 두면 효과가 없었다.
+- **검증 후 로컬 삭제** — 그러면 정책의 위험한 가지는 평시에 아예 돌지 않는다.
+- 실측: 경계마다 300 MB를 직렬로(실제의 3배 빈도) 보내며 3채널 180초 녹화 → **유실 0**. 반면
+  334 MB/s로 포화시키면 0.0089%를 잃는다.
 
 **녹화마다 사이드카(`.json`)가 나온다.** 그 안의 감사 한 줄이 핵심이다 — **파일이 선언한 레이트 대
 보드가 전달한 레이트.** 둘은 어긋날 이유가 없고(실측 잔차 +0.014%, 카메라 발진기), 유실이 있으면
