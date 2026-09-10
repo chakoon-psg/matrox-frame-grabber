@@ -321,6 +321,11 @@ namespace MatroxFrameGrabber.Mil
             MilErrorLog.Note(
                 $"{Name}: exposure asked {us:0.##} us, camera reports {_exposureUs:0.##} us" +
                 (_exposureUs > 0 ? $" (=> {1e6 / (_exposureUs + InterFrameOverheadUs):0.#} fps max)" : string.Empty));
+
+            // The exposure is what bounds the frame rate, so it is also what every millisecond
+            // threshold resolves against. A 4000 us exposure doubles the rate and would otherwise
+            // leave a debounce meaning half as long as it says.
+            RefreshDetectionFps();
             return ok;
         }
 
@@ -362,10 +367,47 @@ namespace MatroxFrameGrabber.Mil
         /// Falls back to a private instance only when there are no settings yet, which happens
         /// during construction before <see cref="Output"/> is attached.
         /// </summary>
-        public AnomalyThresholds DetectionThresholds =>
-            Output?.GetThresholds(_index) ?? _fallbackThresholds;
+        public DetectionSettings Detection =>
+            Output?.GetDetection(_index) ?? _fallbackDetection;
 
-        private readonly AnomalyThresholds _fallbackThresholds = new AnomalyThresholds();
+        private readonly DetectionSettings _fallbackDetection = new DetectionSettings();
+
+        /// <summary>
+        /// The settings resolved into the frame counts the detector counts in, at the rate this
+        /// camera is actually running.
+        ///
+        /// Stored as milliseconds and resolved here because a frame count means something else at
+        /// every other rate: a debounce of 20 frames is 161 ms at 124.316 fps and 667 ms at 30.
+        /// </summary>
+        public AnomalyThresholds DetectionThresholds =>
+            Detection.Resolve(AnomalyKind.Dropout, _detectionFps);
+
+        /// <summary>The rate the thresholds above were resolved against.</summary>
+        public double DetectionFps => _detectionFps;
+
+        private double _detectionFps = DetectionSettings.LegacyFrameRate;
+
+        /// <summary>
+        /// Re-reads the rate the millisecond thresholds resolve against.
+        ///
+        /// The camera's own ResultingFrameRate first, for the same reason recording prefers it: the
+        /// measured rate does not exist until the stats tick, and the configured
+        /// AcquisitionFrameRate answers 184 where the exposure allows 124.316. Falling back to the
+        /// rate the values were authored at reproduces the old frame-based behaviour exactly, which
+        /// is the right thing when the rate cannot be established at all.
+        /// </summary>
+        private void RefreshDetectionFps()
+        {
+            double resolved =
+                TryGetResultingFps(out double r) && r > 1.0 ? r
+                : (_frameRate > 1.0 ? _frameRate : DetectionSettings.LegacyFrameRate);
+
+            if (Math.Abs(resolved - _detectionFps) < 0.001) return;
+            _detectionFps = resolved;
+            MilErrorLog.Note($"{Name}: detection thresholds resolve at {_detectionFps:F3} fps");
+            RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(CalibrationText));
+        }
 
         /// <summary>Editable copies of the two thresholds an operator tunes, as typed.</summary>
         public string DepthInput
@@ -415,27 +457,27 @@ namespace MatroxFrameGrabber.Mil
                 !double.TryParse(_coherenceInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double coherence))
                 return false;
 
-            AnomalyThresholds t = DetectionThresholds;
-            var edited = new AnomalyThresholds
-            {
-                Depth = depth,
-                Coherence = coherence,
-                DebounceFrames = t.DebounceFrames,
-                MaxEventFrames = t.MaxEventFrames,
-                BaselineWindow = t.BaselineWindow,
-                BaselineWarmupFrames = t.BaselineWarmupFrames,
-            };
-            t.CopyFrom(edited);            // clamps, so a typo cannot silence the detector
+            KindSettings k = Detection.For(AnomalyKind.Dropout);
+            k.Deviation = depth;
+            k.Coherence = coherence;
+            k.Clamp();                     // so a typo cannot silence the detector
             Output?.SaveThresholds();
 
-            // Show what was actually kept, not what was typed: CopyFrom clamps.
+            // Show what was actually kept, not what was typed: Clamp may have moved it.
             _depthInput = null;
             _coherenceInput = null;
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
-            MilErrorLog.Note($"{Name}: thresholds now depth {t.Depth:0.###}, coherence {t.Coherence:0.###}, "
-                           + $"debounce {t.DebounceFrames}, max event {t.MaxEventFrames} frames");
+
+            // Logged as resolved rather than as stored: milliseconds are what a person sets and
+            // frames are what the detector counts, and the run is judged in frames.
+            AnomalyThresholds resolved = DetectionThresholds;
+            MilErrorLog.Note($"{Name}: {AnomalyKind.Dropout} thresholds now deviation "
+                           + $"{k.Deviation:0.###}, coherence {k.Coherence:0.###}, "
+                           + $"debounce {k.DebounceMs:0} ms ({resolved.DebounceFrames}f), "
+                           + $"max event {k.MaxEventMs:0} ms ({resolved.MaxEventFrames}f) "
+                           + $"at {_detectionFps:F3} fps");
             return true;
         }
 
@@ -540,33 +582,27 @@ namespace MatroxFrameGrabber.Mil
             if (!_lastProposal.IsUsable)
                 return false;
 
-            AnomalyThresholds t = DetectionThresholds;
-            var edited = new AnomalyThresholds
-            {
-                Depth = _lastProposal.Depth,
-                Coherence = t.Coherence,
-                DebounceFrames = t.DebounceFrames,
-                MaxEventFrames = t.MaxEventFrames,
-                MaxOnsetSpreadFrames = t.MaxOnsetSpreadFrames,
-                MinOnsetTiles = t.MinOnsetTiles,
-                BaselineWindow = t.BaselineWindow,
-                BaselineWarmupFrames = t.BaselineWarmupFrames,
-                FalsePositiveBudgetPerHour = t.FalsePositiveBudgetPerHour,
-                CalibratedAt = DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
-                CalibrationFrames = _lastProposal.FramesJudged,
-                CalibrationFloor = _floorAtStop,
-            };
-            t.CopyFrom(edited);
+            Detection.ApplyCalibration(
+                AnomalyKind.Dropout,
+                _lastProposal.Depth,
+                DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
+                _lastProposal.FramesJudged,
+                _floorAtStop);
             Output?.SaveThresholds();
 
             _depthInput = null;
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(DetectionHint));
             RaisePropertyChanged(nameof(CalibrationText));
+
+            KindSettings cal = Detection.For(AnomalyKind.Dropout);
             MilErrorLog.Note(
-                $"{Name}: depth calibrated to {t.Depth:0.###} at {t.CalibratedAt} "
-              + $"from {t.CalibrationFrames} frames, floor {t.CalibrationFloor:0.####}, "
-              + $"budget {t.FalsePositiveBudgetPerHour:0.##}/hour");
+                $"{Name}: {AnomalyKind.Dropout} deviation calibrated to {cal.Deviation:0.###} "
+              + $"at {cal.CalibratedAt} from {cal.CalibrationFrames} frames, "
+              + $"floor {cal.CalibrationFloor:0.####}, "
+              + $"budget {Detection.FalsePositiveBudgetPerHour:0.##}/hour "
+              + $"over {Detection.EnabledCount} enabled kind(s) "
+              + $"= {Detection.BudgetPerEnabledKind:0.###}/hour each");
             return true;
         }
 
@@ -935,15 +971,22 @@ namespace MatroxFrameGrabber.Mil
                 TryGetFrameSize(out int frameW, out int frameH);
                 MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {frameW}x{frameH} (decim {_decimation})");
 
+                // Before the thresholds are logged: the line below reports frame counts, and
+                // they are only this camera's once the rate has been read.
+                RefreshDetectionFps();
+
                 // The thresholds as loaded, for the same reason: they now come from a file that a
                 // person edits, they differ per channel on purpose, and a value that silently fell
                 // back to its default would otherwise be invisible until a run reported nothing.
                 AnomalyThresholds t = DetectionThresholds;
-                MilErrorLog.Note($"{Name}: detection thresholds - depth {t.Depth:0.###}, "
-                               + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}, "
-                               + $"max event {t.MaxEventFrames}, baseline {t.BaselineWindow}"
-                               + $"/{t.BaselineWarmupFrames} frames, "
-                               + $"onset spread {t.MaxOnsetSpreadFrames} over {t.MinOnsetTiles}+ tiles");
+                MilErrorLog.Note($"{Name}: detection thresholds at {_detectionFps:F3} fps - "
+                               + $"deviation {t.Depth:0.###}, "
+                               + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}f, "
+                               + $"max event {t.MaxEventFrames}f, baseline {t.BaselineWindow}"
+                               + $"/{t.BaselineWarmupFrames}f, "
+                               + $"onset spread {t.MaxOnsetSpreadFrames}f over {t.MinOnsetTiles}+ tiles; "
+                               + $"kinds enabled {Detection.EnabledCount} of {AnomalyCatalog.Count}, "
+                               + $"budget {Detection.BudgetPerEnabledKind:0.###}/hour each");
             }
 
             RaisePropertyChanged(nameof(CameraPresent));

@@ -183,10 +183,29 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public readonly struct AnomalyEvent
     {
+        /// <summary>
+        /// Which kind of fault this is. Carried on the event because a report that does not say
+        /// which of the five fired cannot answer the question the panel is being watched for, and
+        /// because the lane strip colours its marks by it.
+        /// </summary>
+        public AnomalyKind Kind { get; }
+
+        /// <summary>Which way this kind moves brightness, from <see cref="AnomalyCatalog"/>.</summary>
+        public AnomalyDirection Direction => AnomalyCatalog.DirectionOf(Kind);
+
         public long StartFrame { get; }
         public long EndFrame { get; }
         public int FrameCount { get; }
-        public double MaxDepth { get; }
+
+        /// <summary>
+        /// The largest move away from the baseline, as a positive fraction of it.
+        ///
+        /// Named for the deviation rather than the depth because a rising kind has no depth: the
+        /// same 0.12 is a fall on a Dropout and a rise on a Washout, and printing "depth" for the
+        /// second would be a lie about what was measured. <see cref="ToString"/> picks the word.
+        /// </summary>
+        public double MaxDeviation { get; }
+
         public double MaxCoherence { get; }
         public double StartTimeSec { get; }
         public double DurationMs { get; }
@@ -209,15 +228,17 @@ namespace MatroxFrameGrabber.Infrastructure
         public int OnsetTiles { get; }
 
         public AnomalyEvent(long startFrame, long endFrame, int frameCount,
-                            double maxDepth, double maxCoherence,
+                            double maxDeviation, double maxCoherence,
                             double startTimeSec, double durationMs,
                             bool truncated = false,
-                            int onsetSpreadFrames = 0, int onsetTiles = 0)
+                            int onsetSpreadFrames = 0, int onsetTiles = 0,
+                            AnomalyKind kind = AnomalyKind.Dropout)
         {
+            Kind = kind;
             StartFrame = startFrame;
             EndFrame = endFrame;
             FrameCount = frameCount;
-            MaxDepth = maxDepth;
+            MaxDeviation = maxDeviation;
             MaxCoherence = maxCoherence;
             StartTimeSec = startTimeSec;
             DurationMs = durationMs;
@@ -227,8 +248,8 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         public override string ToString() =>
-            $"frame {StartFrame}-{EndFrame} ({FrameCount}), {DurationMs:F1} ms, " +
-            $"depth {MaxDepth:F2}, coh {MaxCoherence:F2}, " +
+            $"{Kind} frame {StartFrame}-{EndFrame} ({FrameCount}), {DurationMs:F1} ms, " +
+            $"{AnomalyCatalog.DeviationWord(Kind)} {MaxDeviation:F2}, coh {MaxCoherence:F2}, " +
             $"onset {OnsetSpreadFrames}f over {OnsetTiles} tiles" +
             (Truncated ? " (still running - duration is a floor)" : string.Empty);
     }

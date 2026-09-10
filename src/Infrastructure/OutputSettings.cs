@@ -39,6 +39,7 @@ namespace MatroxFrameGrabber.Infrastructure
         private OutputResolution _resolution = OutputResolution.Original;
         private string _ffmpegPath = "";
         private bool _loading;   // suppresses Save() while Load() applies persisted values
+        private bool _migrated;  // set when Load() converted an older schema, so it is written once
 
         /// <summary>Optional explicit path to ffmpeg.exe. Empty = auto-detect.</summary>
         public string FfmpegPath
@@ -101,13 +102,14 @@ namespace MatroxFrameGrabber.Infrastructure
             Save();
         }
 
-        private readonly AnomalyThresholds[] _channelThresholds = CreateThresholds();
+        private readonly DetectionSettings[] _channelDetection = CreateDetection();
 
-        private static AnomalyThresholds[] CreateThresholds()
+        private static DetectionSettings[] CreateDetection()
         {
-            var all = new AnomalyThresholds[ChannelCount];
-            for (int i = 0; i < ChannelCount; i++) all[i] = new AnomalyThresholds();
-            return all;
+            var a = new DetectionSettings[ChannelCount];
+            for (int i = 0; i < a.Length; i++)
+                a[i] = new DetectionSettings();
+            return a;
         }
 
         /// <summary>
@@ -121,12 +123,12 @@ namespace MatroxFrameGrabber.Infrastructure
         /// of a run and an edit has to reach it. Call <see cref="SaveThresholds"/> after changing
         /// one.
         /// </summary>
-        public AnomalyThresholds GetThresholds(int channelIndex) =>
+        public DetectionSettings GetDetection(int channelIndex) =>
             channelIndex < 0 || channelIndex >= ChannelCount
-                ? new AnomalyThresholds()
-                : _channelThresholds[channelIndex];
+                ? new DetectionSettings()
+                : _channelDetection[channelIndex];
 
-        /// <summary>Persists the thresholds after a caller has edited one in place.</summary>
+        /// <summary>Persists the settings after a caller has edited one in place.</summary>
         public void SaveThresholds() => Save();
 
         /// <summary>
@@ -205,7 +207,15 @@ namespace MatroxFrameGrabber.Infrastructure
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
             // unlike ChannelRoi it needs no mirror type. Using it directly also means a threshold
             // added to the detector reaches the settings file without a second edit here.
+            /// <summary>
+            /// The old flat, frame-based shape. Read only to migrate from - see
+            /// DetectionSettings.FromLegacy - and not written any more, so the first save after an
+            /// upgrade replaces it with ChannelDetection.
+            /// </summary>
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
             public AnomalyThresholds[] ChannelThresholds { get; set; }
+
+            public DetectionSettings[] ChannelDetection { get; set; }
         }
 
         // ChannelRoi is a readonly struct with no parameterless constructor, so it cannot be
@@ -254,17 +264,36 @@ namespace MatroxFrameGrabber.Infrastructure
                             }
                         }
 
-                        if (dto.ChannelThresholds != null)
+                        // Copied field by field into the existing instance rather than
+                        // assigned: a channel already holding a reference to it must see the
+                        // loaded values, and a file written by an older build leaves the fields it
+                        // does not carry at their defaults.
+                        if (dto.ChannelDetection != null)
                         {
-                            // Copied field by field into the existing instance rather than
-                            // assigned: a channel already holding a reference to it must see the
-                            // loaded values, and a file written by an older build leaves the
-                            // fields it does not carry at their defaults.
+                            for (int i = 0; i < ChannelCount && i < dto.ChannelDetection.Length; i++)
+                            {
+                                DetectionSettings loaded = dto.ChannelDetection[i];
+                                if (loaded == null) continue;
+                                s._channelDetection[i].CopyFrom(loaded);
+                            }
+                        }
+                        else if (dto.ChannelThresholds != null)
+                        {
+                            // The old shape. Migrated rather than ignored, because ignoring it puts
+                            // every channel back on the default depth with nothing on screen to say
+                            // so - the detector would keep running and only the numbers would
+                            // change. Logged for the same reason.
                             for (int i = 0; i < ChannelCount && i < dto.ChannelThresholds.Length; i++)
                             {
-                                AnomalyThresholds loaded = dto.ChannelThresholds[i];
-                                if (loaded == null) continue;
-                                s._channelThresholds[i].CopyFrom(loaded);
+                                AnomalyThresholds legacy = dto.ChannelThresholds[i];
+                                if (legacy == null) continue;
+                                s._channelDetection[i].CopyFrom(DetectionSettings.FromLegacy(legacy));
+                                s._migrated = true;
+                                MilErrorLog.Note(
+                                    $"settings: channel {i} detection migrated from the frame-based "
+                                  + $"schema - depth {legacy.Depth:0.###} kept, times converted at "
+                                  + $"{DetectionSettings.LegacyFrameRate:F3} fps, "
+                                  + $"{AnomalyKind.Dropout} enabled and the other kinds off");
                             }
                         }
 
@@ -281,6 +310,15 @@ namespace MatroxFrameGrabber.Infrastructure
                 // Corrupt/unreadable settings — keep defaults.
             }
             s._loading = false;
+
+            // Written out here rather than left for the next edit: otherwise the file keeps the
+            // old key and every start migrates again, which is harmless but means the conversion
+            // never actually happens and the log says it did.
+            if (s._migrated)
+            {
+                s.Save();
+                MilErrorLog.Note("settings: rewritten in the per-kind schema");
+            }
             return s;
         }
 
@@ -310,7 +348,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
-                    ChannelThresholds = _channelThresholds
+                    ChannelDetection = _channelDetection
                 };
                 File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }
