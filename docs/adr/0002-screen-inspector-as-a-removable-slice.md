@@ -99,6 +99,24 @@ Flip이 바로 "무엇인지"를 요구하는 종류다.
 **Screen inspector**(판독기). `_피할 말_`까지 같이 적었고, 그중 첫 줄이 "Detection이라 부르지
 않는다"이다.
 
+### 검토에서 떨어진 이름들 (2026-09-11, 확정)
+
+다시 꺼내지 않도록 사유를 남긴다. 앞의 넷은 **충돌**이라 취향의 문제가 아니었다.
+
+| 후보 | 왜 안 되는가 |
+|---|---|
+| `ScreenReading` / `IScreenReader` | 글로서리에 **`Brightness reading`**이 있어 `Reading`이 선점됐다. 그리고 "screen reader"는 세상에서 접근성 소프트웨어를 뜻한다 |
+| `ScreenRegion` | 글로서리의 **`Detection region`**(분석 ROI)과 충돌. 코드에도 `BrightnessSampleRegion`이 있다 |
+| `IScreenModel` | `Model`은 MVVM과 충돌한다 — `CameraChannel`이 "모델이자 뷰모델"이다 |
+| `*Detector` | `AnomalyDetector`가 선점. 설계 전체가 "타일 검출기 대 학습 판독기"의 구분 위에 서 있는데 코드에서 둘이 갈라지지 않는다 |
+| `AnomalyFinding` / `IAnomalyInspector` | 충돌은 아니지만 **`AnomalyEvent`(시점) 옆에 `AnomalyFinding`(사각형)** 이 앉는다. `Detection`에서 피한 문제를 한 칸 옆으로 옮기는 것뿐이고, 접두어 `Anomaly*`는 이미 다섯 타입이 쓴다 |
+| `AvnScreenFinding` | 글로서리와 정확히 일치하지만 호출부가 길어진다. `Screen` 식별자 사용처가 **0건**이라 모호할 자리가 없었다 |
+| `ScreenHit` | 짧지만 한국어 대응어가 마땅치 않다. 이 프로젝트는 IATF 16949 도메인이고 거기서 심사가 찾아낸 한 건을 부르는 말이 **finding**이다 |
+
+`Inspector`를 고른 것은 이 저장소의 관례이기도 하다 — `Detector` / `Meter` / `Reducer` /
+`Extractor` / `Warden` / `Scheduler` / `Recorder` / `Gate` / `Pool`처럼 **행위자 명사**로 역할을
+붙인다.
+
 ## 계약
 
 `Infrastructure/Detection/`에 둔다. ONNX도 OpenCV도 MIL도 이름이 나오지 않으므로 테스트된다.

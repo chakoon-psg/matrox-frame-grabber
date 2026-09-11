@@ -245,12 +245,14 @@ _피할 말_: 분류, 인식, 추론(모델을 돌리는 **행위**와 구분되
 **`Detection`이라 부르지 않는다** — 이 글로서리에서 Detection은 타임라인 위의 **한 시점**이고
 이것은 그림 위의 **사각형**이다. 가져온 코드가 이 이름을 쓰고 있었고, 그대로 뒀다면 한 단어에
 두 뜻이 앉을 뻔했다.
-_피할 말_: Detection, 박스, bbox, 디텍션, 객체
+_피할 말_: Detection, 박스, bbox, 디텍션, 객체, `AnomalyFinding`(`AnomalyEvent`와 섞인다),
+`ScreenRegion`(분석 ROI와 섞인다), `ScreenReading`(Brightness reading과 섞인다)
 
 **Screen inspector** (판독기)
 판독을 수행하는 것. 모델이 없으면 `NullScreenInspector`가 그 자리에 있고 언제나 0건을 돌려준다 —
 "꺼짐"과 "빌드에 없음"이 한 경로가 되도록.
-_피할 말_: 검출기(`AnomalyDetector`와 섞인다), 분류기, 모델(MVVM의 모델과 섞인다), 엔진
+_피할 말_: 검출기(`AnomalyDetector`와 섞인다), 분류기, 모델(MVVM의 모델과 섞인다), 엔진,
+`IScreenReader`(접근성 소프트웨어를 뜻한다)
 
 ### 프레임과 지표의 손실
 
