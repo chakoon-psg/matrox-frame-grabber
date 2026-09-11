@@ -8,8 +8,11 @@
 
 측정 환경은 같은 머신이다(Ryzen 7 9700X 8C/16T). 그래서 cs 문서의 추론 시간이 그대로 옮겨온다.
 
-> **상태: 설계만.** 이 문서에 코드는 없고 저장소에도 없다. 계약 초안을 한 번 써 보고
-> 되돌렸으며, 그때 나온 것들은 아래 요구사항으로 남겼다. 검토를 통과하면 그때 쓴다.
+> **상태: 설계만, 검토 완료(2026-09-11).** 이 문서에 코드는 없고 저장소에도 없다. 계약 초안을
+> 한 번 써 보고 되돌렸으며, 그때 나온 것들은 아래 요구사항으로 남겼다. 네 가지를 검토해
+> 확정했다 — **이름**(`Screen*` + `Inspector`/`Finding`), **붙는 자리**(사건 판독 + 순찰 판독
+> 둘 다), **어휘**(`Kind`로 행동하고 `Label`로 기록, 맞는 종류가 없으면 `Unknown`),
+> **제거 비용**(의존성 세 줄, 남는 것은 회색 체크박스 한 줄). 구현은 아직 시작하지 않았다.
 
 ## 무엇을 가져오고 무엇을 버리는가
 
@@ -308,18 +311,81 @@ ScaleY로 역변환하면 프레임 아래 끝 = (7+241−7)/0.31218 = 772.0  �
 
 **도입:** 모델 파일 하나를 탐색 경로에 두고 설정에서 켠다. ffmpeg와 같은 방식이다.
 
-**제거:** 세 가지뿐이다.
-1. `MatroxFrameGrabber.csproj`에서 `<ProjectReference Include="..\Onnx\..." />` 한 줄 삭제
-2. `src/Onnx/` 폴더 삭제
-3. `ScreenInspectorFactory`가 `NullScreenInspector`를 돌려준다 — **코드 변경 없음.** 이미
-   그것이 모델을 못 찾았을 때의 동작이다
-
-`Infrastructure/`의 계약과 `BgrLetterbox`는 남아도 MIL-free 순수 코드 몇 백 줄이고 테스트가
-붙어 있다. 남겨도 비용이 없고 지워도 된다.
-
 **끄기(제거가 아니라):** 모델 파일이 없으면 그걸로 끝이다. 팩토리가 이유를 로그에 남기고
 `NullScreenInspector`로 간다. `MilSeqVideoSink`가 "이 장비에서 한 번도 실행된 적 없는 골격"으로
 존재하면서 아무 비용도 내지 않는 것과 같은 구조다.
+
+### 제거 — 세 층으로 갈린다 (2026-09-11 재검토)
+
+처음에 "세 줄"이라고 적었는데, 그건 **의존성**에 대해서만 맞다. 위의 결정 둘(호출 지점 둘,
+`Unknown`)이 footprint를 넓혔으므로 정직하게 다시 센다.
+
+**① 의존성 — 여전히 세 가지.**
+1. `MatroxFrameGrabber.csproj`에서 `<ProjectReference Include="..\Onnx\..." />` 한 줄 삭제
+2. `src/Onnx/` 폴더 삭제
+3. `ScreenInspectorFactory`가 `NullScreenInspector`를 돌려준다 — **코드 변경 없음**
+
+**② 남지만 공짜 — 폴더째 지워지고, 둬도 된다.**
+`IScreenInspector` · `ScreenFinding` · `NullScreenInspector` · `BgrLetterbox` ·
+`CenterNetDecoder` · `ScreenInspectorFactory` · `ScreenPatrol`. 전부 `Infrastructure/`,
+MIL-free, 테스트됨.
+
+**③ 깔끔하게 되돌아가지 않는 것.**
+
+| 남는 것 | 비용 |
+|---|---|
+| `CameraChannel`의 호출 지점 둘 | `if` 둘. 파일 자체는 삭제 대상이 아니다 |
+| `OutputSettings.InspectSeconds` / `InspectOnAnomaly` | 속성을 지우면 **설정 파일의 키는 조용히 무시된다** — `JsonSerializerOptions`에 `UnmappedMemberHandling.Disallow`가 없다. 비용 0 |
+| `RecordingRecord`의 판독 필드 | 판독이 없으면 안 써진다. 비용 0 |
+| `AnomalyKind.Unknown` | **설정 창에 회색 "미구현" 한 줄.** 아래 참조 |
+| `AnomalyCatalog`의 출처 구분 | 판독기가 없으면 "타일 / 없음"으로 퇴화해 지금과 동작이 같다 |
+
+### 제거된 빌드가 예전 설정 파일을 만나도 깨지지 않는다 (확인함)
+
+이게 ③에서 제일 중요했던 부분이고, 방어가 이미 이중으로 있다.
+
+```csharp
+// AnomalyKindSet.FromNames — 판독기 빌드가 "Unknown"을 저장해 둔 경우
+if (!Enum.TryParse(name.Trim(), ignoreCase: true, out AnomalyKind kind)) continue;  // 파싱 실패
+if ((int)kind < 0 || (int)kind >= AnomalyCatalog.Count) continue;                   // 범위 밖
+```
+
+그리고 `PerKind` 배열이 8줄인 파일을 7종류 빌드가 읽으면 `Normalize()`가 **절단한다** — "더 긴
+배열은 잘린다. 이 빌드가 이름 붙일 수 있는 것은 잃지 않는다"가 그 메서드의 주석이다.
+
+### `Implemented`는 정적으로 두고, 연결은 밖에서
+
+`Unknown`은 "미구현"이 아니라 "**판독기가 있으면** 구현된 것"이다. 그런데 그걸
+`AnomalyCatalog`가 직접 알게 하면 순수 정적 카탈로그에 전역 런타임 상태가 들어오고
+`Infrastructure/`가 순수하지 않게 되며 테스트가 실행 순서에 의존한다.
+
+그래서 **카탈로그는 "누가 할 수 있는 종류인가"만 정적으로 말한다.**
+
+```csharp
+public enum KindSource { None, Tiles, Inspector }
+
+AnomalyCatalog.SourceOf(Dropout) => Tiles
+AnomalyCatalog.SourceOf(Unknown) => Inspector
+AnomalyCatalog.SourceOf(Flip)    => None      // 아직 아무도 안 한다
+```
+
+"지금 판독기가 있는가"는 뷰모델이 합친다.
+
+```csharp
+Implemented => SourceOf(Kind) == Tiles
+            || (SourceOf(Kind) == Inspector && _inspector != null);
+```
+
+호출부 넷이 이 구분을 따라간다. 둘은 의미가 **또렷해진다**:
+
+- `DetectionSettings.EnabledCount` — 타일 검출기를 만들지 말지를 가르는 값이므로
+  `SourceOf(k) == Tiles`만 센다. 지금 우연히 맞는 것(구현된 종류가 Dropout뿐이라서)이
+  명시적으로 맞게 된다.
+- `AnomalyKindSet.Describe`의 `(미구현)` 꼬리표도 출처를 알고 붙인다.
+
+판독기를 뺀 빌드에서 `Unknown`은 설정 창에 **회색 "미구현 — …"** 으로 나온다
+(`IsEnabled="{Binding Implemented}"`, `AppSettingsWindow.xaml:61`). 잔재가 아니라 **사실이고,
+화면이 스스로 설명한다.**
 
 ## 가져오면서 고치는 것
 
