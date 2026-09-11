@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -6,6 +7,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
 using MatroxFrameGrabber.Infrastructure;
@@ -86,6 +88,27 @@ namespace MatroxFrameGrabber.Mil
         private MIL_ID _dispBufId = MIL.M_NULL;
         private MIL_ID _graId = MIL.M_NULL;
         private readonly BrightnessMeter _brightness = new BrightnessMeter();
+        private double _exposureUs;
+
+        // Detection. The reducer and the grid are reused frame after frame -- nothing on the
+        // acquisition path allocates. The detector is per-run, created in StartGrab.
+        private readonly TileReducer _reducer = new TileReducer();
+        private readonly TileGrid _grid = new TileGrid();
+
+        // Recent tile grids, so a confirmed event can be written out with the frames that led to
+        // it. See TileHistory for why the frames themselves cannot be kept.
+        private readonly TileHistory _history = new TileHistory();
+        private int _eventWindowsWritten;
+        private int _rejectedWindowsWritten;
+        private long _rejectedSeen;
+        private AnomalyDetector _detector;
+
+        // Events cross from the acquisition thread to the stats tick through this queue. Raising
+        // them from the hook would put the grab behind whatever a UI handler decides to do.
+        private readonly ConcurrentQueue<AnomalyEvent> _anomalies = new ConcurrentQueue<AnomalyEvent>();
+        private long _anomalyCount;
+        private AnomalyEvent _lastAnomaly;
+        private bool _hasLastAnomaly;
         private readonly List<MIL_ID> _grabBuffers = new List<MIL_ID>();
 
         private bool _cameraAvailable;
@@ -293,10 +316,33 @@ namespace MatroxFrameGrabber.Mil
             if (!_supportsExposure)
                 return false;
 
+            return WriteExposureUs(us);
+        }
+
+        /// <summary>
+        /// Writes the exposure, reads it back, and logs both numbers. The single place either entry
+        /// point goes through, so a measurement can always be traced to the exposure it ran at:
+        /// the startup line alone left mid-session changes unrecorded, which meant working out
+        /// afterwards which exposure a snapshot belonged to from how bright it came out.
+        /// </summary>
+        private bool WriteExposureUs(double us)
+        {
             bool ok = SetFeatureDouble(F_EXPOSURE_TIME, us);
             RefreshExposureReadback();
+            // The read-back value, not the requested one, and logged even when the write was
+            // refused: a run whose exposure silently stayed put is what this has to reveal.
+            MilErrorLog.Note(
+                $"{Name}: exposure asked {us:0.##} us, camera reports {_exposureUs:0.##} us" +
+                (_exposureUs > 0 ? $" (=> {1e6 / (_exposureUs + InterFrameOverheadUs):0.#} fps max)" : string.Empty));
             return ok;
         }
+
+        /// <summary>
+        /// Readout overhead added to the exposure to get the camera's frame period. Measured at
+        /// 45 us against the camera's own ResultingFrameRate; see PwmSweep, which uses the same
+        /// figure.
+        /// </summary>
+        private const double InterFrameOverheadUs = 45.0;
 
         /// <summary>Wall time the last brightness reading took, for the tick-budget check.</summary>
         public double LastBrightnessSampleMs => _brightness.LastSampleMs;
@@ -311,6 +357,231 @@ namespace MatroxFrameGrabber.Mil
         /// comparison of frames missed with measurement on and off.
         /// </summary>
         public bool BrightnessEnabled { get; set; }
+
+        /// <summary>
+        /// Whether this channel reduces frames and judges them. Off by default and switched on for
+        /// the session by MainViewModel, kept as an explicit flag for the same reason
+        /// <see cref="BrightnessEnabled"/> is: the acceptance test for putting the reduction on the
+        /// acquisition path is a comparison of frames missed with it on and off.
+        /// </summary>
+        public bool DetectionEnabled { get; set; }
+
+        /// <summary>
+        /// The numbers this channel judges by, held in the settings file so they survive a restart
+        /// and can differ between channels without a rebuild. Per channel because the cameras do
+        /// not see the same thing: measured against one clip, the dimmest of three produced nine
+        /// shallow false positives where the other two produced none.
+        ///
+        /// Falls back to a private instance only when there are no settings yet, which happens
+        /// during construction before <see cref="Output"/> is attached.
+        /// </summary>
+        public AnomalyThresholds DetectionThresholds =>
+            Output?.GetThresholds(_index) ?? _fallbackThresholds;
+
+        private readonly AnomalyThresholds _fallbackThresholds = new AnomalyThresholds();
+
+        /// <summary>Editable copies of the two thresholds an operator tunes, as typed.</summary>
+        public string DepthInput
+        {
+            get => _depthInput ??= DetectionThresholds.Depth.ToString("0.###", CultureInfo.InvariantCulture);
+            set { _depthInput = value; RaisePropertyChanged(nameof(DepthInput)); }
+        }
+
+        public string CoherenceInput
+        {
+            get => _coherenceInput ??= DetectionThresholds.Coherence.ToString("0.###", CultureInfo.InvariantCulture);
+            set { _coherenceInput = value; RaisePropertyChanged(nameof(CoherenceInput)); }
+        }
+
+        private string _depthInput;
+        private string _coherenceInput;
+
+        /// <summary>
+        /// The thresholds that are not on the pane, in the units they actually act in. Frames are
+        /// what the detector counts, but nobody reasons in frames at 124 fps -- and the same frame
+        /// count means a different duration at a different exposure, which is exactly the sort of
+        /// thing that goes unnoticed.
+        /// </summary>
+        public string DetectionHint
+        {
+            get
+            {
+                AnomalyThresholds t = DetectionThresholds;
+                double ms = _frameRate > 0 ? 1000.0 / _frameRate : 0.0;
+                return ms > 0
+                    ? $"debounce {t.DebounceFrames}f ({t.DebounceFrames * ms:0} ms), cap {t.MaxEventFrames}f ({t.MaxEventFrames * ms / 1000.0:0.0} s)"
+                    : $"debounce {t.DebounceFrames}f, cap {t.MaxEventFrames}f";
+            }
+        }
+
+        /// <summary>
+        /// Applies the typed thresholds to this channel and saves them. Returns false when either
+        /// box does not parse, leaving both alone -- a half-applied pair is worse than neither.
+        ///
+        /// Takes effect on the next run, not this one: the detector is created per grab and holds
+        /// the instance, so an edit mid-grab would change the rules underneath a baseline built
+        /// under the old ones.
+        /// </summary>
+        public bool ApplyDetectionThresholds()
+        {
+            if (!double.TryParse(_depthInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double depth) ||
+                !double.TryParse(_coherenceInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double coherence))
+                return false;
+
+            AnomalyThresholds t = DetectionThresholds;
+            var edited = new AnomalyThresholds
+            {
+                Depth = depth,
+                Coherence = coherence,
+                DebounceFrames = t.DebounceFrames,
+                MaxEventFrames = t.MaxEventFrames,
+                BaselineWindow = t.BaselineWindow,
+                BaselineWarmupFrames = t.BaselineWarmupFrames,
+            };
+            t.CopyFrom(edited);            // clamps, so a typo cannot silence the detector
+            Output?.SaveThresholds();
+
+            // Show what was actually kept, not what was typed: CopyFrom clamps.
+            _depthInput = null;
+            _coherenceInput = null;
+            RaisePropertyChanged(nameof(DepthInput));
+            RaisePropertyChanged(nameof(CoherenceInput));
+            RaisePropertyChanged(nameof(DetectionHint));
+            MilErrorLog.Note($"{Name}: thresholds now depth {t.Depth:0.###}, coherence {t.Coherence:0.###}, "
+                           + $"debounce {t.DebounceFrames}, max event {t.MaxEventFrames} frames");
+            return true;
+        }
+
+        /// <summary>Anomalies confirmed during this run.</summary>
+        public long AnomalyCount => Interlocked.Read(ref _anomalyCount);
+
+        /// <summary>
+        /// Falls that met depth and coherence but swept across the tiles instead of covering them
+        /// at once - something crossing the field rather than the surface dimming. Surfaced because
+        /// a gate whose rejections leave no trace cannot be told from a quiet rig.
+        /// </summary>
+        public long EventsRejectedForSpread => _detector?.EventsRejectedForSpread ?? _rejectedAtStop;
+
+        // The detector is released before the run is summarised, so the count has to outlive it.
+        // Without this the summary reported "0 swept and turned away" for a run whose own log
+        // carried 72 of them - the one line a reader would take the run's verdict from.
+        private long _rejectedAtStop;
+
+        // What the last run would propose as a depth threshold, and the floor it measured. Kept
+        // past the detector for the same reason, and because applying it is a separate act: a
+        // threshold must not follow the picture on its own, or a failing panel becomes the normal
+        // one -- the same reason the baseline freezes during an event.
+        private DepthProposal _lastProposal;
+        private double _floorAtStop;
+
+        /// <summary>The most recent anomaly, formatted, or empty when there has been none.</summary>
+        public string LastAnomalyText => _hasLastAnomaly ? _lastAnomaly.ToString() : string.Empty;
+
+        /// <summary>Microseconds the last tile reduction took, the mean, and the worst of this run.</summary>
+        public double LastReduceUs => _reducer.LastReduceUs;
+        public double MeanReduceUs => _reducer.MeanReduceUs;
+        public double MaxReduceUs => _reducer.MaxReduceUs;
+
+        /// <summary>Consecutive reduction failures; non-zero means the detector is being fed nothing.</summary>
+        public int ReducerFailures => _reducer.ConsecutiveFailures;
+
+        /// <summary>Reductions attempted, and those that produced a grid. A gap is a fault.</summary>
+        public long Reductions => _reducer.Reductions;
+        public long GridsAccepted => _reducer.Accepted;
+
+        /// <summary>
+        /// What the detector measured on the last frame it judged. Exposed because the thresholds
+        /// have to be chosen from the distribution these take on a healthy panel.
+        /// </summary>
+        public double DetectionDepth => _detector?.LastDepth ?? 0.0;
+        public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
+        public double DetectionBaseline => _detector?.Baseline ?? 0.0;
+
+        /// <summary>
+        /// The false-positive floor this run measured: the deepest fall on a frame judged normal,
+        /// how many normal frames crowded the gate, and how many were turned away by coherence
+        /// alone. The numbers the thresholds get chosen from.
+        /// </summary>
+        public double MaxCoherentNormalDepth => _detector?.MaxCoherentNormalDepth ?? 0.0;
+        public double MaxNormalDepth => _detector?.MaxNormalDepth ?? 0.0;
+        public long NormalFramesNearThreshold => _detector?.NormalFramesNearThreshold ?? 0;
+        public long CoherenceSaves => _detector?.CoherenceSaves ?? 0;
+
+        /// <summary>Raised on the stats tick for each anomaly confirmed since the last tick.</summary>
+        public event Action<CameraChannel, AnomalyEvent> AnomalyDetected;
+
+        /// <summary>What the last completed run would propose as this channel's depth threshold.</summary>
+        public DepthProposal LastProposal => _lastProposal;
+
+        /// <summary>Whether there is a proposal worth offering.</summary>
+        public bool CanCalibrate => _lastProposal.IsUsable && !_isGrabbing;
+
+        /// <summary>
+        /// The proposal, and where the current threshold came from. Both, because the second is
+        /// what says whether the first is worth acting on: a threshold with no recorded
+        /// calibration is somebody's guess, and one calibrated before the lens moved is worse.
+        /// </summary>
+        public string CalibrationText
+        {
+            get
+            {
+                AnomalyThresholds t = DetectionThresholds;
+                string from = string.IsNullOrEmpty(t.CalibratedAt)
+                    ? "depth never calibrated"
+                    : $"calibrated {t.CalibratedAt} ({t.CalibrationFrames} frames, floor {t.CalibrationFloor:0.####})";
+
+                if (_isGrabbing)
+                    return from;
+
+                return _lastProposal.FramesJudged > 0
+                    ? $"{from}   |   last run proposes {_lastProposal}"
+                    : from;
+            }
+        }
+
+        /// <summary>
+        /// Takes the last run's proposal as this channel's depth threshold, and records where it
+        /// came from.
+        ///
+        /// Deliberately a separate act from measuring it. The histogram is collected on every run
+        /// because it costs nothing, but only a person can say the run was on a healthy panel --
+        /// and a threshold derived from a run that was not becomes a threshold that accepts the
+        /// fault as normal.
+        /// </summary>
+        public bool ApplyCalibration()
+        {
+            if (!_lastProposal.IsUsable)
+                return false;
+
+            AnomalyThresholds t = DetectionThresholds;
+            var edited = new AnomalyThresholds
+            {
+                Depth = _lastProposal.Depth,
+                Coherence = t.Coherence,
+                DebounceFrames = t.DebounceFrames,
+                MaxEventFrames = t.MaxEventFrames,
+                MaxOnsetSpreadFrames = t.MaxOnsetSpreadFrames,
+                MinOnsetTiles = t.MinOnsetTiles,
+                BaselineWindow = t.BaselineWindow,
+                BaselineWarmupFrames = t.BaselineWarmupFrames,
+                FalsePositiveBudgetPerHour = t.FalsePositiveBudgetPerHour,
+                CalibratedAt = DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
+                CalibrationFrames = _lastProposal.FramesJudged,
+                CalibrationFloor = _floorAtStop,
+            };
+            t.CopyFrom(edited);
+            Output?.SaveThresholds();
+
+            _depthInput = null;
+            RaisePropertyChanged(nameof(DepthInput));
+            RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(CalibrationText));
+            MilErrorLog.Note(
+                $"{Name}: depth calibrated to {t.Depth:0.###} at {t.CalibratedAt} "
+              + $"from {t.CalibrationFrames} frames, floor {t.CalibrationFloor:0.####}, "
+              + $"budget {t.FalsePositiveBudgetPerHour:0.##}/hour");
+            return true;
+        }
 
         /// <summary>Editable base name used as the snapshot/recording filename prefix.</summary>
         public string OutputName
@@ -381,6 +652,15 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Exposure time in microseconds, as text for the input box.</summary>
         public string ExposureInput { get => _exposureInput; set { _exposureInput = value; RaisePropertyChanged(nameof(ExposureInput)); } }
+
+        /// <summary>
+        /// The exposure the camera reports, in microseconds; 0 when the camera has no exposure
+        /// feature. Read back from the camera rather than parsed from <see cref="ExposureInput"/>:
+        /// the box holds what was asked for, and this camera has form for accepting a write and
+        /// then ignoring it. Recorded on every measurement row so a run's exposure never has to be
+        /// inferred from how bright the picture came out.
+        /// </summary>
+        public double ExposureUs => _exposureUs;
 
         public string ExposureRangeHint =>
             _supportsExposure ? $"µs  [{_exposureMin:0}–{_exposureMax:0}]" : "µs";
@@ -653,6 +933,16 @@ namespace MatroxFrameGrabber.Mil
                 // ASCII note on MilErrorLog).
                 TryGetFrameSize(out int frameW, out int frameH);
                 MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {frameW}x{frameH} (decim {_decimation})");
+
+                // The thresholds as loaded, for the same reason: they now come from a file that a
+                // person edits, they differ per channel on purpose, and a value that silently fell
+                // back to its default would otherwise be invisible until a run reported nothing.
+                AnomalyThresholds t = DetectionThresholds;
+                MilErrorLog.Note($"{Name}: detection thresholds - depth {t.Depth:0.###}, "
+                               + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}, "
+                               + $"max event {t.MaxEventFrames}, baseline {t.BaselineWindow}"
+                               + $"/{t.BaselineWarmupFrames} frames, "
+                               + $"onset spread {t.MaxOnsetSpreadFrames} over {t.MinOnsetTiles}+ tiles");
             }
 
             RaisePropertyChanged(nameof(CameraPresent));
@@ -750,6 +1040,10 @@ namespace MatroxFrameGrabber.Mil
                     _grabBuffers.Add(buf);
                 }
             }
+
+            // Band children live exactly as long as the ring does; see TileReducer for why they
+            // are not created per frame.
+            _reducer.Bind(_grabBuffers);
         }
 
         /// <summary>
@@ -761,6 +1055,10 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         private void FreeBuffers(bool resetBrightness = true)
         {
+            // Before the ring, not after: a band child outliving its parent is a failure this
+            // codebase already documents.
+            _reducer.Unbind();
+
             foreach (MIL_ID buf in _grabBuffers)
             {
                 if (buf != MIL.M_NULL)
@@ -875,6 +1173,20 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException e) { MilErrorLog.Write($"{Name}: baseline the missed-frame counter", e); }
             _framesMissed = 0;
 
+            // A fresh detector per run. Carrying a baseline across a stop would judge the opening
+            // frames of the new run against the light of the old one, and the exposure or the
+            // region may well have changed in between -- during the exposure scan both did.
+            _detector = new AnomalyDetector(DetectionThresholds);
+            _reducer.ResetCost();
+            _history.Clear();
+            _eventWindowsWritten = 0;
+            _rejectedWindowsWritten = 0;
+            _rejectedSeen = 0;
+            _rejectedAtStop = 0;
+            while (_anomalies.TryDequeue(out _)) { }
+            Interlocked.Exchange(ref _anomalyCount, 0);
+            _hasLastAnomaly = false;
+
             _isGrabbing = true;
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
@@ -911,6 +1223,39 @@ namespace MatroxFrameGrabber.Mil
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
+
+            // Before Flush clears it: the floor this run measured is the reason for running it.
+            if (DetectionEnabled && _detector != null)
+                MilErrorLog.Note(
+                    $"{Name}: depth proposal - {_detector.Propose(DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate)}"
+                  + $" against the current {DetectionThresholds.Depth:0.###}");
+
+            if (DetectionEnabled && _detector != null)
+                MilErrorLog.Note(
+                    $"{Name}: detection floor - coherent normal depth max {_detector.MaxCoherentNormalDepth:F4} "
+                  + $"at frame {_detector.MaxCoherentNormalDepthFrame} "
+                  + $"vs threshold {DetectionThresholds.Depth:F2} "
+                  + $"({(_detector.MaxCoherentNormalDepth > 0 ? DetectionThresholds.Depth / _detector.MaxCoherentNormalDepth : 0):F1}x margin), "
+                  + $"{_detector.NormalFramesNearThreshold} past half of it; "
+                  + $"any-normal depth max {_detector.MaxNormalDepth:F4}, "
+                  + $"{_detector.CoherenceSaves} turned away by coherence alone; "
+                  + $"{_detector.Observed} frames judged");
+
+            // A fault still running when the grab ends would otherwise never be reported at all.
+            AnomalyEvent? tail = _detector?.Flush();
+            if (tail.HasValue)
+                RecordAnomaly(tail.Value);
+
+            // Before releasing it: LogGrabSummary reads these, and a detector that is gone reports
+            // nothing rather than what it found.
+            _rejectedAtStop = _detector?.EventsRejectedForSpread ?? 0;
+            _floorAtStop = _detector?.MaxCoherentNormalDepth ?? 0.0;
+            if (_detector != null)
+                _lastProposal = _detector.Propose(
+                    DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
+            _detector = null;
+            RaisePropertyChanged(nameof(CalibrationText));
+            RaiseCommandStates();
 
             // Leave the run its own evidence. The acceptance criterion for the whole payload
             // change is that frames missed does not increase, and until now reading it meant
@@ -968,6 +1313,45 @@ namespace MatroxFrameGrabber.Mil
                 _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
                 if (_rawRecording)
                     _rawMissed = _framesMissed;   // same number the status line shows
+
+                // Anomalies are surfaced here rather than from the hook: a handler running on the
+                // acquisition thread would put the grab behind whatever it decides to do, and the
+                // whole reason the reduction is kept small is to stay out of that budget.
+                bool raised = false;
+                while (_anomalies.TryDequeue(out AnomalyEvent found))
+                {
+                    _lastAnomaly = found;
+                    _hasLastAnomaly = true;
+                    raised = true;
+                    MilErrorLog.Note($"{Name}: anomaly {found}");
+                    WriteEventWindow(found);
+                    AnomalyDetected?.Invoke(this, found);
+                }
+                if (raised)
+                {
+                    RaisePropertyChanged(nameof(AnomalyCount));
+                    RaisePropertyChanged(nameof(LastAnomalyText));
+                    RaisePropertyChanged(nameof(DetectionHint));
+                }
+
+                // Rejections are surfaced on the same tick. Only the last one is kept, so a tick
+                // that turned away several leaves one window and a count - which is why the count
+                // is logged rather than inferred from the files.
+                AnomalyDetector detector = _detector;
+                if (detector != null && detector.EventsRejectedForSpread > _rejectedSeen)
+                {
+                    long now = detector.EventsRejectedForSpread;
+                    AnomalyEvent? turned = detector.LastRejectedEvent;
+                    if (turned.HasValue)
+                    {
+                        MilErrorLog.Note(
+                            $"{Name}: swept, not dimmed - {turned.Value} "
+                          + $"(rejected {now} so far)");
+                        WriteEventWindow(turned.Value, rejected: true);
+                    }
+                    _rejectedSeen = now;
+                    RaisePropertyChanged(nameof(EventsRejectedForSpread));
+                }
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -1051,7 +1435,7 @@ namespace MatroxFrameGrabber.Mil
             data.LastTimeStampSec = timeStampSec;
 
             data.FrameCount++;
-            data.Owner?.OnGrabbedFrame(grabbedBuffer, data.DisplayBuffer);
+            data.Owner?.OnGrabbedFrame(grabbedBuffer, data.DisplayBuffer, data.FrameCount, timeStampSec);
             return 0;
         }
 
@@ -1059,8 +1443,14 @@ namespace MatroxFrameGrabber.Mil
         /// Per-frame work on the acquisition thread: copy to the display buffer, and (if
         /// recording) feed the frame to the encoder. Add real inspection here as needed.
         /// </summary>
-        private void OnGrabbedFrame(MIL_ID grabbedBuffer, MIL_ID displayBuffer)
+        private void OnGrabbedFrame(MIL_ID grabbedBuffer, MIL_ID displayBuffer,
+                                    long frameNumber, double timeStampSec)
         {
+            // Detection first, and in both modes. It reads about 150 kB of the region where RAW
+            // writes 1.6 MB of the whole frame, so it is the cheaper half of either path -- and a
+            // RAW recording is exactly when a fault most needs to be on record.
+            RunDetection(grabbedBuffer, frameNumber, timeStampSec);
+
             // ---- Lossless RAW capture: write EVERY frame to the current segment; grayscale preview ----
             RawSegmentSession seg = _rawSegments;
             if (seg != null)
@@ -1098,6 +1488,97 @@ namespace MatroxFrameGrabber.Mil
 
             // ---- Recording feed (RecordingSession guards start/stop vs feed internally) ----
             _recording?.Feed(grabbedBuffer);
+        }
+
+        /// <summary>
+        /// Reduces this frame to tiles and hands them to the detector. On the acquisition thread.
+        ///
+        /// The region is read from the grab buffer rather than the display buffer, which is what
+        /// makes per-frame judgement possible at all: the display copy runs at DisplayUpdateFps,
+        /// so reading it would sample about a quarter of the frames and miss every fault shorter
+        /// than 33 ms -- which is most of them.
+        /// </summary>
+        private void RunDetection(MIL_ID grabbedBuffer, long frameNumber, double timeStampSec)
+        {
+            if (!DetectionEnabled)
+                return;
+
+            AnomalyDetector detector = _detector;
+            if (detector == null)
+                return;
+
+            // A failed reduction leaves the grid empty, and an empty grid is not a dark one -
+            // judging it would read as a total blackout.
+            if (!_reducer.Reduce(grabbedBuffer, _analysisRoi, _grid))
+                return;
+
+            // After Reduce: it resets the grid, which clears the number.
+            _grid.FrameNumber = frameNumber;
+            _history.Add(_grid, timeStampSec);
+
+            AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
+            if (closed.HasValue)
+                RecordAnomaly(closed.Value);
+        }
+
+        /// <summary>
+        /// Frames of history written before an event starts. 200 is about 1.6 s at 124.3 fps --
+        /// enough to show what the tiles were doing before the fall, which is the difference
+        /// between a panel that switched off and something that swept across in front of it.
+        /// </summary>
+        private const int EventPrerollFrames = 200;
+
+        /// <summary>
+        /// Event windows one run will write before it stops. A run that fires constantly is a
+        /// misconfiguration, and the diagnosis is in the first few windows either way; without a
+        /// cap it would fill the disk while nobody was reading them.
+        /// </summary>
+        private const int MaxEventWindows = 20;
+
+        /// <summary>
+        /// Writes the tile history around a confirmed event. On the stats tick, not the hook: this
+        /// touches the disk.
+        /// </summary>
+        /// <summary>
+        /// Windows written for rejected falls. Fewer than for confirmed ones, and counted
+        /// separately: on the run this gate was built from, 56 of 60 events were sweeps, and a
+        /// shared cap would have filled entirely with them and left no room for the real ones.
+        /// </summary>
+        private const int MaxRejectedWindows = 5;
+
+        private void WriteEventWindow(AnomalyEvent found, bool rejected = false)
+        {
+            if (rejected)
+            {
+                if (_rejectedWindowsWritten >= MaxRejectedWindows) return;
+            }
+            else if (_eventWindowsWritten >= MaxEventWindows)
+            {
+                return;
+            }
+
+            string kind = rejected ? "rejected" : "event";
+            string label = $"{kind}-ch{_index}-{DateTime.Now:yyyyMMdd-HHmmss-fff}";
+            string path = _history.Write(
+                BrightnessLog.DefaultFolder,
+                label,
+                found.StartFrame - EventPrerollFrames,
+                found.EndFrame + DetectionThresholds.DebounceFrames,
+                found.StartFrame,
+                found.EndFrame);
+
+            if (path == null)
+                return;
+
+            if (rejected) _rejectedWindowsWritten++; else _eventWindowsWritten++;
+            MilErrorLog.Note($"{Name}: {kind} window -> {path}");
+        }
+
+        /// <summary>Queues a confirmed anomaly for the stats tick. On the acquisition thread.</summary>
+        private void RecordAnomaly(AnomalyEvent found)
+        {
+            _anomalies.Enqueue(found);
+            Interlocked.Increment(ref _anomalyCount);
         }
 
         #endregion
@@ -1215,6 +1696,18 @@ namespace MatroxFrameGrabber.Mil
             OutputSettings settings = Output;
             if (_dispBufId == MIL.M_NULL || settings == null)
                 return null;
+
+            // While stopped, the display buffer still holds the last frame of the previous run, so
+            // this would save that frame under the current timestamp - and would keep saving it,
+            // byte for byte, however the exposure was changed in between. Measured: four snapshots
+            // taken across three exposures produced two hashes, both from a run that had already
+            // ended. Refusing is the only honest answer.
+            if (!_isGrabbing)
+            {
+                MilErrorLog.Note($"{Name}: snapshot refused - not grabbing, the display buffer holds a stale frame");
+                return null;
+            }
+
             try
             {
                 string path = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.png");
@@ -1689,7 +2182,11 @@ namespace MatroxFrameGrabber.Mil
         private void RefreshExposureReadback()
         {
             if (_supportsExposure && TryGetFeatureDouble(MIL.M_FEATURE_VALUE, F_EXPOSURE_TIME, out double v))
+            {
                 ExposureInput = v.ToString("0.##", CultureInfo.InvariantCulture);
+                _exposureUs = v;
+                RaisePropertyChanged(nameof(ExposureUs));
+            }
         }
 
         /// <summary>Parses the exposure input box and applies it to the camera.</summary>
@@ -1700,9 +2197,7 @@ namespace MatroxFrameGrabber.Mil
             if (!double.TryParse(_exposureInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double us))
                 return false;
 
-            bool ok = SetFeatureDouble(F_EXPOSURE_TIME, us);
-            RefreshExposureReadback();
-            return ok;
+            return WriteExposureUs(us);
         }
 
         private bool SetExposureAuto(bool on)
@@ -1870,6 +2365,17 @@ namespace MatroxFrameGrabber.Mil
 
             MilErrorLog.Note($"{Name}: grab stopped - {FrameCount} frames, {_frameRate:F1} fps, "
                            + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
+
+            // What detection cost and what it found, on the same line as the losses it must not
+            // have caused. The worst reduction matters more than the average: the frame period at
+            // 124 fps is 8045 us, and one reduction over that is a missed frame.
+            if (DetectionEnabled)
+                MilErrorLog.Note($"{Name}: detection - {AnomalyCount} anomalies, "
+                               + $"{EventsRejectedForSpread} swept and turned away, "
+                               + $"reduce mean {_reducer.MeanReduceUs:F0} us / max {_reducer.MaxReduceUs:F0} us "
+                               + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period, "
+                               + $"{_reducer.Accepted}/{_reducer.Reductions} grids accepted"
+                               + (ReducerFailures > 0 ? $", {ReducerFailures} consecutive failures" : string.Empty));
 
             // The board's stamps for this run, in milliseconds. Whether these share one clock across
             // channels is the whole of cross-channel correlation: the cameras free-run, so nothing

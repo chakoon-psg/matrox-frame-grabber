@@ -19,6 +19,12 @@ namespace MatroxFrameGrabber.ViewModels
         private readonly MilApplicationManager _manager;
         private readonly DispatcherTimer _statsTimer;
 
+        // One CSV per grab, opened on the tick that first sees a channel grabbing and closed on the
+        // tick that sees the last one stop. Driven from the tick rather than from StartAll/StopAll
+        // because panes start and stop channels individually too, and a run that began from a pane
+        // is worth just as much as one that began from the toolbar.
+        private readonly BrightnessLog _brightnessLog = new BrightnessLog();
+
         public MainViewModel(MilApplicationManager manager)
         {
             _manager = manager;
@@ -35,12 +41,19 @@ namespace MatroxFrameGrabber.ViewModels
             foreach (var channel in _manager.Channels)
                 channel.BrightnessEnabled = true;
 
+            // Detection likewise for the whole session, unless the command line switched it off.
+            // The switch exists for one measurement: frames missed with the tile reduction on the
+            // acquisition path against the same run without it.
+            foreach (var channel in _manager.Channels)
+                channel.DetectionEnabled = !App.DetectionOff;
+
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += (s, e) =>
             {
                 foreach (var channel in _manager.Channels)
                     channel.RefreshStats();
+                RecordMeasurementRow();
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(AnyRawRecording));
                 RaiseChanged(nameof(BandwidthText));
@@ -48,6 +61,73 @@ namespace MatroxFrameGrabber.ViewModels
             };
             _statsTimer.Start();
         }
+
+        /// <summary>
+        /// Appends this tick's readings to the measurement CSV, opening or closing the file as the
+        /// set of grabbing channels changes.
+        ///
+        /// Why the readings are logged at all: the detector's depth threshold has to clear the
+        /// false-positive floor, and that floor is a property of the rig — how much the luma of a
+        /// healthy panel wanders over minutes under this lighting, this lens, and this exposure.
+        /// It can only be measured, and a run of any length is the measurement. Missed frames and
+        /// fps ride along in the same rows so the acceptance check for a payload or hook change is
+        /// answered by the same file, from the same seconds, as the brightness it may have cost.
+        /// </summary>
+        private void RecordMeasurementRow()
+        {
+            bool anyGrabbing = false;
+            foreach (var channel in _manager.Channels)
+            {
+                if (channel.IsGrabbing) { anyGrabbing = true; break; }
+            }
+
+            if (!anyGrabbing)
+            {
+                if (_brightnessLog.IsActive)
+                {
+                    _brightnessLog.Stop();
+                    RaiseChanged(nameof(MeasurementLogText));
+                }
+                return;
+            }
+
+            if (!_brightnessLog.IsActive)
+            {
+                if (!_brightnessLog.Start(BrightnessLog.DefaultFolder, DateTime.Now))
+                    return;   // Start already logged the reason; a run without a log still runs.
+                RaiseChanged(nameof(MeasurementLogText));
+            }
+
+            DateTime now = DateTime.Now;
+            foreach (var channel in _manager.Channels)
+            {
+                if (!channel.IsGrabbing) continue;
+
+                var history = channel.Brightness;
+                var latest = history.Latest;
+                _brightnessLog.Append(
+                    now, channel.Name, channel.Decimation, channel.ExposureUs,
+                    channel.AnalysisRoi.Width, channel.AnalysisRoi.Height,
+                    channel.FrameCount, channel.FrameRate, channel.FramesMissed,
+                    history.HasData, latest.Luma, latest.ClippedPct, latest.BlackPct,
+                    // LastReduceUs, not the running maximum: a monotonic column cannot show a
+                    // distribution, and what the cost does over a run is the question.
+                    channel.AnomalyCount, channel.LastReduceUs,
+                    channel.GridsAccepted, channel.DetectionDepth,
+                    channel.DetectionCoherence, channel.DetectionBaseline);
+            }
+
+            RaiseChanged(nameof(MeasurementLogText));
+        }
+
+        /// <summary>Where this run's measurements are going, for the status bar.</summary>
+        public string MeasurementLogText =>
+            _brightnessLog.IsActive
+                ? $"log {System.IO.Path.GetFileName(_brightnessLog.Path)} ({_brightnessLog.Rows} rows)"
+                : string.Empty;
+
+        /// <summary>Closes the measurement file. Called from the window's Closing handler.</summary>
+        public void StopMeasurementLog() => _brightnessLog.Stop();
 
         /// <summary>The camera channels, bound by index in the XAML.</summary>
         public IReadOnlyList<CameraChannel> Channels => _manager.Channels;
@@ -317,6 +397,8 @@ namespace MatroxFrameGrabber.ViewModels
         public void Shutdown()
         {
             _statsTimer.Stop();
+            // After the timer, so no tick can reopen the file behind us.
+            StopMeasurementLog();
         }
 
         #region INotifyPropertyChanged

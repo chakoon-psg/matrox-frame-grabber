@@ -59,10 +59,16 @@ src/
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
                                  GenICamFeatures, RecordingSession, BrightnessMeter
-  Infrastructure/              MatroxFrameGrabber.Infrastructure
+  Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
                                  OutputSettings, FfmpegRecorder, RawFrameWriter,
                                  RawSegmentSession, RelayCommand, NativeMethods,
-                                 BrightnessHistory
+                                 BrightnessHistory, ChannelRoi, RoiGesture,
+                                 DisplayMapping, BrightnessSamplePlan, PwmSweep,
+                                 TileGrid, FrameMetrics, AnomalyDetector,
+                                 BrightnessLog
+tests/                         MatroxFrameGrabber.Tests (165개). csproj가 위 파일들을
+                               ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
+                               MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다.
 docs/
 LICENSES/                       동봉 서드파티 라이선스 고지
 tools/                          빌드 보조 스크립트 (ffmpeg 스테이징)
@@ -131,6 +137,15 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   갱신한다. 새 값을 노출하려면 거기서 올릴 것. 이벤트로 밀어내는 것은 세 가지뿐이다
   (`RecordingFailed`, `CameraLost`, `RawRecordingFinished`). 밝기 측정도 이 틱 위에서 돈다 —
   취득 훅이 아니라 여기다. `MdigProcess` 훅에 넣은 작업은 취득 예산 안에서 돌기 때문이다.
+- **정지 상태의 스냅샷은 이전 실행의 마지막 프레임이다.** `SaveSnapshotToOutput`은 디스플레이
+  버퍼를 내보내는데, grab이 멈춰 있으면 그 버퍼는 직전 실행의 마지막 프레임에 얼어 있다. 노출을
+  바꿔 가며 스냅샷을 찍어도 **바이트 단위로 같은 파일**이 나온다(실측: 3개 노출 × 스냅샷 4장 →
+  해시 2개, 전부 이미 끝난 실행의 프레임). `Snap` 버튼을 `IsGrabbing`에 묶고 메서드에서도
+  거부하도록 해 두었다. 무언가를 버퍼에서 꺼내 저장하는 코드를 새로 추가한다면 같은 확인을 할 것.
+- **노출 하나만 바꿔 비교하면 가산 잡음과 곱셈성 플리커를 구별할 수 없다.** 두 점은 어느 쪽
+  이야기로도 이어진다 — 실측에서 이 때문에 한 번 반대로 읽었다. 최소 3점을 재서 **곡선의 모양**을
+  볼 것. 플리커는 단조가 아니라 `|sinc(πfT)|`의 V 자로 나타난다. `--expo-scan`이 이 스캔을
+  자동으로 돌린다.
 - **`Mim*` 함수는 하나의 라이선싱 그룹이 아니다.** `MimResize`와 `MimShift`는 MIL-Lite에
   포함되지만 `MimStat`은 Image Processing(IM) 모듈이 필요하고 이 장비에는 없다 — 호출하면
   `Licensing error. A module was used without a valid license`가 난다. 통계·히스토그램류를
@@ -160,26 +175,15 @@ RAW는 segment를 로컬 scratch 폴더(빠른 NVMe)에 쓰고, 변환된 MP4만
   `M_TYPE_MIL_INT`로 써야 한다** — `M_TYPE_DOUBLE`로 쓰면 조용히 무시된다.
 - **한 채널만 느리면 케이블·링크보다 노출을 먼저 보라.** `AcquisitionFrameRate`의 최대값은
   `ExposureTime`에 종속된다. 노출 100 ms면 그 채널의 상한은 10 fps다.
-- **GenICam 피처 쓰기는 read-back 하기 전까지 검증되지 않았다.** 이 카메라(CREVIS
-  MX-A320K-184)는 `Width` / `Height` / `OffsetX` / `OffsetY` 쓰기를 **받아들이고 무시한다.**
-  `MdigControlFeature`가 예외를 던지지 않고, `M_PRINT_DISABLE` 상태에서는 출력도 없어서
-  `MdigControlFeature`를 감싼 헬퍼가 **true를 반환한다** — 그런데 값은 그대로다.
-  `TLParamsLocked = 0`으로 풀어도, `MdigControl(M_SOURCE_SIZE_X / M_SOURCE_OFFSET_X)`로 우회해도
-  마찬가지다. **즉 이 카메라는 취득 ROI를 지원하지 않는다.** 페이로드를 줄이는 유일한 수단은
-  `DecimationHorizontal` / `Vertical`이며, 이쪽은 같은 할당된 digitizer에서 정상 동작한다
-  (실측: decimation 2 → 1024×772 컬러 184.1 fps, 유실 0).
-  **지오메트리 피처를 쓴 뒤에는 반드시 다시 읽어 확인할 것.** 반환값만 믿으면 안 된다.
-  **access mode는 이 실패를 설명하지 못한다 — 2026-08-27에 그 추론을 철회했다.**
-  `M_FEATURE_ACCESS_MODE`는 **decimation에 따라 답이 바뀐다**: decimation 2에서 네 노드가
-  `M_FEATURE_READ_ONLY`(4)이고, decimation 1에서는 `M_FEATURE_READ_WRITE`(5)다. 그런데 크롭이
-  무시된 그 측정은 `Width`가 2064였을 때, 즉 **decimation 1에서** 한 것이다 — 노드가 RW라고
-  답하는 바로 그 조건이다. 08-21에 "카메라가 스스로 못 쓴다고 말한다"고 적은 것은 decimation 2에서
-  읽은 값을 다른 조건의 실패에 갖다 붙인 것이었다.
-  남는 사실은 처음 그대로다 — **RW라고 답하는 상태에서도 쓰기가 무시된다.** 그래서 read-back
-  규칙이 오히려 더 중요해진다: 반환값도, access mode도 믿을 수 없다. 값은 앱 시작 때마다
-  `mil-errors.log`에 찍히니 지금 어느 상태인지는 거기서 볼 것.
-- **실제 하드웨어 증분은 2가 아니다.** 이 카메라는 `Width` 증분 **16**, `Height` 증분 **4**를
-  보고한다. 짝수 가정만으로 계산하면 격자에서 벗어난다 — `M_FEATURE_INCREMENT`를 조회할 것.
+- **GenICam 피처 쓰기는 read-back 하기 전까지 검증되지 않았다.** `MdigControlFeature`가 예외를
+  던지지 않고, `M_PRINT_DISABLE` 상태에서는 출력도 없어서 이를 감싼 헬퍼가 **true를 반환한다** —
+  그런데 값은 그대로일 수 있다. 반환값도, `M_FEATURE_ACCESS_MODE`도 믿을 수 없다
+  (RW라고 답하는 상태에서 무시된 쓰기를 실측했다). **쓴 뒤에는 반드시 다시 읽어 확인할 것.**
+  현재 값은 앱 시작 때마다 `mil-errors.log`에 찍힌다.
+- **페이로드를 줄이는 수단은 `DecimationHorizontal` / `Vertical` 뿐이다.** 이 카메라는 카메라 쪽
+  ROI(`Width` / `Height` / `OffsetX` / `OffsetY`)를 지원하지 않는다 — 쓰기를 받아들이고 무시한다.
+  판정 범위 지정은 소프트웨어 값인 **분석 ROI**로 한다.
+  (실측: decimation 2 → 1024×772 컬러 184.1 fps, 유실 0)
 - **앱을 강제 종료하면 카메라의 지오메트리 노드가 잠긴다.** 작업 관리자 종료, 디버거 중단,
   크래시 — `Window_Closing`을 타지 않고 죽으면 `DecimationHorizontal` 같은 피처 쓰기가 그 뒤로
   **조용히 거부된다**(예외도 출력도 없고 반환값은 성공이다). 증상이 "코드가 맞는데 값이 안

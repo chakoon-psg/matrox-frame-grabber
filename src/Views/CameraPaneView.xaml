@@ -51,7 +51,9 @@
                               Click="RawRecord_Click" IsChecked="{Binding IsRawRecording, Mode=OneWay}"
                               IsEnabled="{Binding CanRecord}"
                               ToolTip="Lossless RAW recording: every frame at full fps → color MP4 (grayscale preview while recording)" />
-                <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding CameraPresent}" Margin="10,0,3,0" />
+                <!-- IsGrabbing, not CameraPresent: while stopped the display buffer still holds the
+                     previous run's last frame, so a snapshot of it looks fresh but is not. -->
+                <Button Content="Snap" Click="Snapshot_Click" IsEnabled="{Binding IsGrabbing}" Margin="10,0,3,0" />
                 <Button Content="Fit" Command="{Binding FitCommand}" />
                 <Button Content="1:1" Command="{Binding OneToOneCommand}" />
                 <ToggleButton x:Name="RoiSelectToggle" Content="⬚" Padding="6,3"
@@ -196,6 +198,45 @@
                         <Button Content="Apply" Click="ApplyRoi_Click" />
                         <Button Content="Full" Margin="2,0,0,0" Click="ClearRoi_Click"
                                 ToolTip="Measure the whole frame" />
+                    </StackPanel>
+
+                    <!-- Detection thresholds. Per channel because the cameras do not see the same
+                         thing: measured against one clip, the dimmest of three produced nine
+                         shallow false positives where the other two produced none. Takes effect on
+                         the next Start, not the run in progress. -->
+                    <StackPanel Orientation="Horizontal">
+                        <Label Content="Detect" Width="42" />
+                        <TextBlock Text="depth" Margin="0,0,3,0" VerticalAlignment="Center"
+                                   Foreground="#9A9A9A" FontSize="10" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="detect" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding DepthInput, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="How far brightness must fall to count, as a fraction of the baseline" />
+                        <TextBlock Text="coh" Margin="6,0,3,0" VerticalAlignment="Center"
+                                   Foreground="#9A9A9A" FontSize="10" />
+                        <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                                 Tag="detect" KeyDown="SettingsField_KeyDown"
+                                 Text="{Binding CoherenceInput, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="How much the tiles must agree before a fall is believed" />
+                        <TextBlock Text="{Binding DetectionHint}" Margin="6,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                        <Button Content="Apply" Click="ApplyThresholds_Click"
+                                ToolTip="Saved to settings; takes effect on the next Start" />
+                    </StackPanel>
+
+                    <!-- Where the depth threshold came from, and what the last run would propose
+                         instead. Applying is a separate act on purpose: the histogram is collected
+                         every run because it is free, but only a person can say the run was on a
+                         healthy panel. -->
+                    <StackPanel Orientation="Horizontal">
+                        <Label Content="Calib" Width="42" />
+                        <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
+                                   Foreground="#9A9A9A" FontSize="10" Width="300"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding CalibrationText}" />
+                        <Button Content="Use proposal" Margin="4,0,0,0" Click="ApplyCalibration_Click"
+                                IsEnabled="{Binding CanCalibrate}"
+                                ToolTip="Only after a run on a known-good panel" />
                     </StackPanel>
 
                     <!-- DCF / feature browser -->

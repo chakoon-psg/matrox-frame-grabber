@@ -12,6 +12,13 @@
     <!-- WinForms only for the folder-picker dialog (FolderBrowserDialog). -->
     <UseWindowsForms>true</UseWindowsForms>
     <Platforms>x64</Platforms>
+    <!-- Platform, not just Platforms. Platforms only lists what is offered; without a default,
+         building this project directly (rather than through the solution) gets AnyCPU and writes
+         to bin\Release\ instead of bin\x64\Release\. Two output folders is how somebody ends up
+         running a stale exe and concluding their change did nothing — which happened here.
+         AnyCPU is meaningless anyway: the MIL packages are x64-only. A global property from the
+         solution or -p:Platform= still wins over this, which is the behaviour we want. -->
+    <Platform>x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
     <RootNamespace>MatroxFrameGrabber</RootNamespace>
     <AssemblyName>MatroxFrameGrabber</AssemblyName>

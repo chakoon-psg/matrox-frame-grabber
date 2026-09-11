@@ -149,11 +149,13 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void OperatingPoints_ReportBMinFromTheExposure()
         {
-            // b_min = 0.10 x exposure: at 8333 us a 0.83 ms event just reaches the threshold.
+            // b_min = the depth threshold x exposure. Written against the constant rather than a
+            // literal: the threshold is a measured value that has already moved once, and the
+            // relationship is what this test is about, not the number it currently produces.
             PwmSweep.OperatingPoint p =
                 PwmSweep.OperatingPoints(240).Find(x => x.ExposureUs == 8333);
 
-            Assert.Equal(0.833, p.BMinMs, 2);
+            Assert.Equal(PwmSweep.DepthThreshold * 8.333, p.BMinMs, 3);
         }
 
         [Fact]

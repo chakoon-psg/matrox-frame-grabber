@@ -138,6 +138,34 @@ namespace MatroxFrameGrabber.Infrastructure
             Save();
         }
 
+        private readonly AnomalyThresholds[] _channelThresholds = CreateThresholds();
+
+        private static AnomalyThresholds[] CreateThresholds()
+        {
+            var all = new AnomalyThresholds[ChannelCount];
+            for (int i = 0; i < ChannelCount; i++) all[i] = new AnomalyThresholds();
+            return all;
+        }
+
+        /// <summary>
+        /// Per-channel detection thresholds. Per channel because the cameras do not see the same
+        /// thing: measured against one clip under one set of lighting, the dimmest of three
+        /// channels produced nine shallow false positives where the other two produced none, and
+        /// its own noise floor sat within 1.2x of the shared threshold. Raising the threshold for
+        /// all three to fix one would throw away sensitivity on the two that were behaving.
+        ///
+        /// The instance is returned live rather than copied: the detector holds it for the length
+        /// of a run and an edit has to reach it. Call <see cref="SaveThresholds"/> after changing
+        /// one.
+        /// </summary>
+        public AnomalyThresholds GetThresholds(int channelIndex) =>
+            channelIndex < 0 || channelIndex >= ChannelCount
+                ? new AnomalyThresholds()
+                : _channelThresholds[channelIndex];
+
+        /// <summary>Persists the thresholds after a caller has edited one in place.</summary>
+        public void SaveThresholds() => Save();
+
         /// <summary>
         /// Cap for the MIL display's update rate, in frames per second. 0 = uncapped.
         ///
@@ -198,6 +226,11 @@ namespace MatroxFrameGrabber.Infrastructure
             public RoiDto[] ChannelRois { get; set; }
             public int DisplayUpdateFps { get; set; } = 30;
             public int[] ChannelDecimation { get; set; }
+
+            // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
+            // unlike ChannelRoi it needs no mirror type. Using it directly also means a threshold
+            // added to the detector reaches the settings file without a second edit here.
+            public AnomalyThresholds[] ChannelThresholds { get; set; }
         }
 
         // ChannelRoi is a readonly struct with no parameterless constructor, so it cannot be
@@ -246,6 +279,20 @@ namespace MatroxFrameGrabber.Infrastructure
                             }
                         }
 
+                        if (dto.ChannelThresholds != null)
+                        {
+                            // Copied field by field into the existing instance rather than
+                            // assigned: a channel already holding a reference to it must see the
+                            // loaded values, and a file written by an older build leaves the
+                            // fields it does not carry at their defaults.
+                            for (int i = 0; i < ChannelCount && i < dto.ChannelThresholds.Length; i++)
+                            {
+                                AnomalyThresholds loaded = dto.ChannelThresholds[i];
+                                if (loaded == null) continue;
+                                s._channelThresholds[i].CopyFrom(loaded);
+                            }
+                        }
+
                         if (dto.ChannelDecimation != null)
                         {
                             for (int i = 0; i < ChannelCount && i < dto.ChannelDecimation.Length; i++)
@@ -289,7 +336,8 @@ namespace MatroxFrameGrabber.Infrastructure
                     RawScratchFolder = _rawScratchFolder,
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
-                    ChannelDecimation = (int[])_channelDecimation.Clone()
+                    ChannelDecimation = (int[])_channelDecimation.Clone(),
+                    ChannelThresholds = _channelThresholds
                 };
                 File.WriteAllText(SettingsPath, JsonSerializer.Serialize(dto, JsonOpts));
             }

@@ -59,6 +59,37 @@ namespace MatroxFrameGrabber
         public static bool PwmSweepScan { get; private set; }
 
         private const string ChannelsSwitch = "--channels";
+        private const string ExposureScanSwitch = "--expo-scan";
+        private const string DwellSwitch = "--dwell";
+
+        private const int MinDwellSeconds = 5;
+        private const int MaxDwellSeconds = 600;
+        private const int DefaultDwellSeconds = 30;
+
+        /// <summary>
+        /// Exposures to walk, in microseconds, from <c>--expo-scan 10000,8000,6000</c>. Null for an
+        /// ordinary run.
+        ///
+        /// This exists because doing it by hand went wrong: three exposures were set and snapped in
+        /// sequence while the cameras were stopped, so every snapshot was the same frozen frame and
+        /// the log recorded only the startup exposure. One switch does the whole sequence in the one
+        /// order that yields usable data - set, settle, dwell while the measurement log fills,
+        /// snapshot, next - and the exposure ends up in both the CSV and the file it belongs to.
+        /// </summary>
+        public static double[] ExposureScan { get; private set; }
+
+        /// <summary>Seconds to hold each exposure, from <c>--dwell 30</c>.</summary>
+        public static int DwellSeconds { get; private set; } = DefaultDwellSeconds;
+
+        private const string NoDetectSwitch = "--no-detect";
+
+        /// <summary>
+        /// <c>--no-detect</c>: run without the tile reduction and the detector. Exists for one
+        /// measurement -- frames missed with detection on the acquisition path against the same run
+        /// without it -- which is the acceptance test for putting it there.
+        /// </summary>
+        public static bool DetectionOff { get; private set; }
+
         private const string BayerScopeSwitch = "--bayer-scope";
         private const string DecimSwitch = "--decim";
 
@@ -85,8 +116,12 @@ namespace MatroxFrameGrabber
         /// <summary>True while a PWM sweep is driving the app.</summary>
         public static bool PwmSweeping => !string.IsNullOrEmpty(PwmSweepChannel);
 
+        /// <summary>True while an exposure scan is driving the app.</summary>
+        public static bool ExposureScanning => ExposureScan != null && ExposureScan.Length > 0;
+
         /// <summary>True while running unattended, so nothing waits for a person who isn't there.</summary>
-        public static bool Unattended => AutoRunSeconds > 0 || PwmSweeping || BayerScopeTest;
+        public static bool Unattended =>
+            AutoRunSeconds > 0 || PwmSweeping || BayerScopeTest || ExposureScanning;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -96,6 +131,9 @@ namespace MatroxFrameGrabber
             PwmSweepScan = HasSwitch(e.Args, PwmScanSwitch);
             OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
             BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
+            DetectionOff = HasSwitch(e.Args, NoDetectSwitch);
+            ExposureScan = ParseExposures(ParseSwitchValue(e.Args, ExposureScanSwitch));
+            DwellSeconds = ParseDwellSeconds(e.Args);
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,
                          CultureInfo.InvariantCulture, out int decim);
             StartupDecimation = decim;
@@ -107,6 +145,38 @@ namespace MatroxFrameGrabber
                 MilErrorLog.FileSuffix = "-ch" + string.Join("", OwnedChannels);
 
             base.OnStartup(e);
+        }
+
+        /// <summary>
+        /// Reads "10000,8000,6000" into microsecond exposures, keeping the order given: the scan
+        /// walks them as written, so a run can go bright-to-dark or dark-to-bright as the operator
+        /// intends. Out-of-range and unparseable entries are dropped rather than clamped - a typo
+        /// must not silently become a measurement at some other exposure.
+        /// </summary>
+        private static double[] ParseExposures(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            var list = new System.Collections.Generic.List<double>();
+            foreach (string part in value.Split(','))
+            {
+                if (double.TryParse(part.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture,
+                                    out double us) && us >= 100.0 && us <= 1e6)
+                    list.Add(us);
+            }
+            return list.Count > 0 ? list.ToArray() : null;
+        }
+
+        /// <summary>Reads <c>--dwell 30</c>, clamped; the default is used when absent.</summary>
+        private static int ParseDwellSeconds(string[] args)
+        {
+            if (!int.TryParse(ParseSwitchValue(args, DwellSwitch), NumberStyles.Integer,
+                              CultureInfo.InvariantCulture, out int seconds))
+                return DefaultDwellSeconds;
+
+            return seconds < MinDwellSeconds ? MinDwellSeconds
+                 : seconds > MaxDwellSeconds ? MaxDwellSeconds
+                 : seconds;
         }
 
         /// <summary>Reads "0,2" into a set. Null for absent or unparseable, meaning all channels.</summary>

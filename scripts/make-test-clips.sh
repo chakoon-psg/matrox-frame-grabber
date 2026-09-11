@@ -141,6 +141,125 @@ echo "  motion-reject.mp4 — 밝은 물체 이동 (검출되면 안 됨)"
   -vf "drawbox=x='mod(t*400\,${W}+400)-400':y=240:w=400:h=600:color=white@1:t=fill" \
   "${ENC[@]}" "$OUT/motion-reject.mp4"
 
+# ---- 7. The coherence gate under load ----
+# motion-reject.mp4 above is a weaker test than it looks. One white box on grey makes the picture
+# brighter, and depth only counts falls -- so it never reaches the coherence gate, and a detector
+# with the gate deleted outright would still pass it.
+#
+# Nor is sliding enough. Blocks crossing a grey field were measured at depth 0.0000 across twenty
+# seconds: however fast they travel, half the tiles are still grey and the median of sixty-four
+# tiles is that grey. The gate is never consulted.
+#
+# What moves a median is a change of composition -- most of the tiles going dark at once. So the
+# load phase switches the field to bands, five eighths dark and three eighths bright, sized so the
+# frame mean stays near grey and the running baseline does not follow it down. The median lands in
+# the dark bands while five of them fall and three rise, which is the signed sum cancelling against
+# the magnitudes: a deep fall the tiles do not agree on. Coherence has to reject every one.
+#
+# The last phase asks what a negative test cannot: does a real event still get through while
+# content moves? The blocks return and the whole field is scaled by 0.70 for two frames every two
+# seconds. Scaling moves every tile the same way, so a working gate passes it -- and a gate tuned
+# until nothing ever fires would swallow these too.
+#
+#   0-4 s    still                 baseline settles
+#   4-20 s   blocks sliding        expect 0 -- and depth near zero, which is the point
+#   20-40 s  band bursts           expect 0 -- this is the load
+#   40-60 s  blocks + dips         expect 10
+BURST_FROM=1200                    # frame, 20 s
+BURST_TO=2399                      # frame, 40 s
+BURST_FRAMES=10                    # 167 ms of pattern, every PERIOD
+DIP_FROM=2400                      # frame, 40 s
+DIP_FRAMES=2
+DIP_ALPHA=0.30
+
+# The load pattern. Cells are a quarter of the frame across and down, which is twice the detection
+# tile pitch in both axes -- the point of that being alignment. An earlier version used bands
+# exactly one tile tall and measured 10, 7 and 1 false positives on three cameras watching the same
+# clip: shift the grid half a tile and every tile straddles two bands, averages them, and lands on
+# the same value as every other tile, so they all fall together and coherence reads 1.00. A tile
+# inside a cell twice its size is predominantly one colour whatever the offset.
+#
+# Ten cells dark against six bright, either side of grey so the frame mean stays near 125 and the
+# baseline does not follow the pattern down. The median lands in the dark cells; the signed sum
+# nearly cancels because the six bright cells rise by half again as much as the ten dark ones fall.
+CELL_DARK=0x4e4e4e                 # 78
+CELL_BRIGHT=0xcbcbcb               # 203
+BRIGHT_A="0,0 2,1 1,2 3,2 0,3 2,3"
+BRIGHT_B="1,1 3,0 0,1 2,2 3,3 1,3"
+
+motion_load_clip() {
+  local name="motion-load.mp4"
+  local vf="" cw=$((W / 4)) ch=$((H / 4))
+  local slide="between(n\,${LEADIN}\,$((BURST_FROM - 1)))+gte(n\,${DIP_FROM})"
+  local burst="between(n\,${BURST_FROM}\,${BURST_TO})*lt(mod(n-${BURST_FROM}\,${PERIOD})\,${BURST_FRAMES})"
+  # Which arrangement this burst uses. Alternating so a single unlucky alignment cannot decide the
+  # whole run: if one arrangement lands badly on a camera, the other one still loads the gate.
+  local even="eq(mod(floor((n-${BURST_FROM})/${PERIOD})\,2)\,0)"
+  local odd="eq(mod(floor((n-${BURST_FROM})/${PERIOD})\,2)\,1)"
+
+  add_box() {                      # colour w h y speed dir
+    local colour="$1" bw="$2" bh="$3" by="$4" sp="$5" dir="$6" x
+    if [ "$dir" = "r" ]; then
+      x="mod(t*${sp}\,${W}+${bw})-${bw}"
+    else
+      x="${W}-mod(t*${sp}\,${W}+${bw})"
+    fi
+    [ -n "$vf" ] && vf="$vf,"
+    vf="${vf}drawbox=x='${x}':y=${by}:w=${bw}:h=${bh}:color=${colour}:t=fill:enable='${slide}'"
+  }
+
+  add_box "0x303030@1" 620 420  60 380 r
+  add_box "0xe0e0e0@1" 420 300 140 310 l
+  add_box "0x303030@1" 500 360 400 260 r
+  add_box "0xe0e0e0@1" 360 260 520 440 l
+  add_box "0x303030@1" 700 300 700 500 r
+  add_box "0xe0e0e0@1" 300 220 760 210 l
+
+  # The whole field dark, then six cells painted back bright, per arrangement.
+  vf="${vf},drawbox=x=0:y=0:w=iw:h=ih:color=${CELL_DARK}@1:t=fill:enable='${burst}'"
+  local cell col row when
+  for when in even odd; do
+    local cells guard
+    if [ "$when" = "even" ]; then cells="$BRIGHT_A"; guard="$even"; else cells="$BRIGHT_B"; guard="$odd"; fi
+    for cell in $cells; do
+      col=${cell%,*}; row=${cell#*,}
+      vf="${vf},drawbox=x=$((col * cw)):y=$((row * ch)):w=${cw}:h=${ch}:color=${CELL_BRIGHT}@1:t=fill:enable='${burst}*${guard}'"
+    done
+  done
+
+  # The dips, last so they scale whatever has been drawn under them.
+  vf="${vf},drawbox=x=0:y=0:w=iw:h=ih:color=black@${DIP_ALPHA}:t=fill:enable='gte(n\,${DIP_FROM})*lt(mod(n-${DIP_FROM}\,${PERIOD})\,${DIP_FRAMES})'"
+
+  echo "  $name — 움직임 부하 + 움직이는 중의 실제 사건"
+  "$FFMPEG" -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=${GREY}:s=${W}x${H}:r=${FPS}:d=${DUR}" \
+    -vf "$vf" "${ENC[@]}" "$OUT/$name"
+}
+
+motion_load_clip
+
+# ---- What the motion clip actually came out as -------------------------------------------
+# The blackout clips need no measuring: the events are where the script put them. This one does.
+# Whether the load phase reaches the coherence gate depends on how the bands land on an 8x8 grid,
+# and whether the dips survive the motion depends on the same. Guessing produced a first version
+# whose load phase measured depth 0.0000 for twenty seconds -- it never reached the gate at all.
+MOTION_KEY=$(python "$(dirname "${BASH_SOURCE[0]}")/predict-clip.py" \
+               "$OUT/motion-load.mp4" --phases 4,20,40 2>/dev/null || echo "(predict-clip.py 실행 실패)")
+MOTION_EVENTS=$(printf '%s' "$MOTION_KEY" | awk '/^predicted events:/ {print $3}')
+MOTION_LOAD=$(printf '%s' "$MOTION_KEY" | awk '/coherence rejected:/ {print $NF}')
+MOTION_MAXDEPTH=$(printf '%s' "$MOTION_KEY" | awk '$1 ~ /^20\.0-40\.0/ {print $5}')
+
+# The property that matters most, and the one the first version of this clip failed: the answer
+# must not depend on where the tile grid lands. Four offsets, including a whole tile and an awkward
+# half one. Each line has to read 0 fired and the full event count.
+MOTION_SHIFTS=""
+for shift in "" "1800:1012:120:68" "1440:810:240:135" "1560:900:180:90"; do
+  line=$(python "$(dirname "${BASH_SOURCE[0]}")/predict-clip.py" "$OUT/motion-load.mp4"            ${shift:+--region "$shift"} --phases 4,20,40 2>/dev/null          | awk -v s="${shift:-정렬 없음}"              '$1 ~ /^20\.0-40\.0/ {d=$5; f=$7} /^predicted events:/ {e=$3} /coherence rejected:/ {r=$NF}
+              END {printf "| `%s` | %s | %s | %s | %s |", s, d, f, e, r}')
+  MOTION_SHIFTS="${MOTION_SHIFTS}${line}
+"
+done
+
 # ---- Ground truth, written next to the clips ----
 FIRST_S=$(awk -v l="$LEADIN" -v f="$FPS" 'BEGIN{printf "%.2f", l/f}')
 GAP_S=$(awk -v p="$PERIOD" -v f="$FPS" 'BEGIN{printf "%.2f", p/f}')
@@ -178,7 +297,8 @@ cat > "$OUT/README.md" <<EOF
 | \`blank-1frame.mp4\` | 16.7 ms | ${FIRST_S}s | ${GAP_S}s | ${COUNT} | ${COUNT}회, depth ≈ 1.0 |
 | \`blank-2frame.mp4\` | 33.3 ms | ${FIRST_S}s | ${GAP_S}s | ${COUNT} | ${COUNT}회, depth ≈ 1.0 |
 | \`blank-5frame.mp4\` | 83.3 ms | ${FIRST_S}s | ${GAP_S}s | ${COUNT} | ${COUNT}회, depth ≈ 1.0 |
-| \`motion-reject.mp4\` | 없음 | — | — | 0 | **검출 0** (coh 게이트가 걸러야 함) |
+| \`motion-reject.mp4\` | 없음 | — | — | 0 | **검출 0** — 다만 아래 참고 |
+| \`motion-load.mp4\` | 33.3 ms | 40.00s | ${GAP_S}s | ${MOTION_EVENTS} | 구간별, 아래 표 참조 |
 | \`depth-staircase.mp4\` | 16.7 ms | ${FIRST_S}s | ${GAP_S}s | ${DEPTH_EVENTS} | 아래 표 참조 |
 
 사건은 프레임 ${LEADIN}부터 ${PERIOD}프레임마다 시작한다. 앞 ${FIRST_S}초는 노출이 안정될
@@ -202,6 +322,54 @@ ${DEPTH_TABLE}
 - **믿을 값은 앱이 재는 luma다.** 기준 구간의 luma와 딥의 luma 비가 검지기가 실제로 보는
   depth이고, 임계는 거기에 맞춰 정한다. 위 표는 어느 단계가 더 깊은지의 순서일 뿐이다.
 
+## coherence 게이트 (\`motion-load.mp4\`)
+
+coherence는 **내용 변화를 걸러내라고** 있는 게이트다. 그런데 그것이 실제로 걸러내는지는
+지금까지 확인된 적이 없다 — 정지한 패널 앞에서 15분을 재도 게이트가 막아낸 프레임이 0~1개였다.
+부하가 걸리지 않으면 임계값 0.80이 맞는지 알 수 없다.
+
+\`motion-reject.mp4\`로는 확인되지 않는다. 흰 상자가 회색 위를 지나가면 화면이 **밝아지고**,
+depth는 하락만 세므로 게이트까지 도달하지 않는다. **게이트를 아예 삭제해도 이 영상은 통과한다.**
+
+미끄러지는 것만으로도 부족하다. 상자 6개를 서로 다른 방향·속도로 지나가게 해도
+20초간 depth가 **0.0000**이었다 — 아무리 빨라도 타일의 절반은 회색으로 남고,
+64개 타일의 중앙값은 그 회색이다.
+
+중앙값을 움직이는 것은 **구성의 변화**다. 그래서 부하 구간은 화면을 띠로 바꾼다 —
+8분할 중 5개를 어둡게, 3개를 밝게. 프레임 평균은 회색 근처로 유지되어 baseline이 따라오지 않고,
+중앙값은 어두운 띠에 놓인다. 5개가 내려가는 동안 3개가 올라가므로 **깊은 하락인데 타일이
+동의하지 않는다.** coherence가 이걸 전부 막아야 한다.
+
+| 구간 | 내용 | 기대 |
+|---|---|---|
+| 0–4초 | 정지 | baseline 안정 |
+| 4–20초 | 상자 6개 이동 | **검출 0**, depth ≈ 0 — 게이트에 도달하지 않는 것이 결과 |
+| 20–40초 | 띠 전환 10회 (167 ms씩) | **검출 0**, depth 최대 ${MOTION_MAXDEPTH} — 이것이 부하 |
+| 40–60초 | 상자 이동 + 전체 0.70배 딥 | **검출 ${MOTION_EVENTS}회**, depth ≈ 0.27 |
+
+- **coherence가 막아낸 프레임: ${MOTION_LOAD}개.** 이 수가 0이면 그 실행은 게이트를 시험하지 않았다.
+- 마지막 구간이 반대쪽 절반이다. 움직임에 안 걸리도록 게이트를 조여 놓으면 **실제 사건도 같이
+  삼킨다.** 20–40초가 0이고 40–60초가 ${MOTION_EVENTS}여야 둘 다 맞는 것이다.
+### 정렬에 의존하지 않는지
+
+이 클립의 첫 판은 띠 높이를 타일 높이(1080/8)와 같게 잡았다가 **정렬을 시험하는 클립**이 되었다.
+격자가 반 타일만 어긋나도 모든 타일이 어두운 띠와 밝은 띠를 함께 평균해 똑같은 값이 되고,
+그러면 전부 같이 떨어져 coherence가 1.00이 된다. 같은 클립을 본 카메라 3대가 오검출
+**10 / 7 / 1**로 갈린 것이 그 증거다.
+
+그래서 셀을 타일의 2×2 크기로 키우고 띠가 아니라 흩어 배치했으며, 배열 두 가지를 번갈아 쓴다.
+격자를 밀어 가며 확인한 결과:
+
+| 격자 오프셋 | depth 최대 | 부하 중 발화 | 딥 검출 | coherence가 막은 프레임 |
+|---|---|---|---|---|
+${MOTION_SHIFTS}
+**어느 정렬에서도 발화가 0이고 딥이 ${MOTION_EVENTS}개여야 한다.** depth 최대값은 정렬에 따라
+달라지지만 임계값 위에 남아 있으므로 부하는 항상 게이트까지 도달한다.
+
+- 위 수치는 \`scripts/predict-clip.py\`가 이 영상을 직접 축약해 계산한 **예측**이다.
+  코드 공간의 값이고, 모니터 감마와 카메라 응답이 사이에 있으므로 앱이 재는 depth와는 다르다.
+  **개수를 정답으로 보고 depth는 근사로 볼 것.**
+
 ### 쓰는 법
 
 검출된 사건이 몇 번째 단계까지 내려가는지 센다. 예를 들어 1~6단계가 검출되고 7·8단계가
@@ -216,7 +384,11 @@ ${DEPTH_TABLE}
 3. 범례에서 luma 60~180, **clip 0.0%** 확인.
 4. \`control-steady.mp4\`부터 돌린다 — 여기서 나온 최대 depth가 임계의 바닥이다.
 5. 그다음 blank 클립들. 개수가 위 표와 맞는지 센다.
-6. 마지막으로 \`motion-reject.mp4\`. 하나라도 검출되면 coh 게이트가 덜 된 것이다.
+6. \`motion-load.mp4\`. **coherence 게이트를 판정하는 유일한 클립이다** — 20~40초 구간에서
+   하나라도 검출되면 게이트가 통과시키고 있고, 40~60초에서 ${MOTION_EVENTS}회가 안 나오면
+   게이트가 실제 사건까지 막고 있다. 두 조건을 같이 봐야 한다.
+7. \`motion-reject.mp4\`는 남겨 두었지만 약한 시험이다. 화면이 밝아지므로 depth 게이트에서
+   이미 걸러지고, coherence까지 가지 않는다.
 
 ## 이 방법의 한계 — 미리 알아 둘 것
 
