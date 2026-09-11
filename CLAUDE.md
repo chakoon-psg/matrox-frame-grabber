@@ -525,3 +525,9 @@ memcpy는 공짜이고, 비용은 **덤프가 쉬지 않고 도는 상태**(30�
 ### 도메인 문서
 
 단일 컨텍스트 — 루트의 `CONTEXT.md`와 `docs/adr/`. `docs/agents/domain.md` 참고.
+
+ADR 둘:
+- `0001-ffmpeg-for-all-encoding.md` — 인코딩은 전부 ffmpeg, MIL 압축 라이선스는 쓰지 않는다.
+- `0002-onnx-classifier-as-a-removable-slice.md` — 학습 검출기(ONNX)를 붙일 자리와 **빼는 비용**.
+  매 프레임이 아니라 `StillRing`의 사건당 네 장에 붙이고, OpenCV(93.7 MB)와 ClosedXML(8.8 MB)은
+  가져오지 않는다. 아직 들어간 코드는 없다.
