@@ -8,6 +8,9 @@
 
 측정 환경은 같은 머신이다(Ryzen 7 9700X 8C/16T). 그래서 cs 문서의 추론 시간이 그대로 옮겨온다.
 
+> **상태: 설계만.** 이 문서에 코드는 없고 저장소에도 없다. 계약 초안을 한 번 써 보고
+> 되돌렸으며, 그때 나온 것들은 아래 요구사항으로 남겼다. 검토를 통과하면 그때 쓴다.
+
 ## 무엇을 가져오고 무엇을 버리는가
 
 | cs 파일 | 판정 | 근거 |
@@ -100,15 +103,42 @@ Flip이 바로 "무엇인지"를 요구하는 종류다.
 
 `Infrastructure/Detection/`에 둔다. ONNX도 OpenCV도 MIL도 이름이 나오지 않으므로 테스트된다.
 
-| 있음 | 무엇 |
-|---|---|
-| ✅ `ScreenFinding` | `AnomalyKind` + 점수 + 사각형. `Right`/`Bottom`/`Area` |
-| ✅ `IScreenInspector` | `Describe` / `InputWidth` / `InputHeight` / `Reports` / `Inspect(byte[] bgr, Span<ScreenFinding>)` |
-| ✅ `NullScreenInspector` | 언제나 0건. 모델이 없을 때의 기본값 |
-| ✅ `BgrLetterbox` | 플래나 gbrp → 인터리브 BGR + 축소 + 레터박스 + 역매핑. 순수 산술, 테스트 15개 |
-| ⬜ `CenterNetDecoder` | 히트맵 → 후보 → NMS. 다음 포팅 대상 |
-| ⬜ `ScreenInspectorFactory` | 시작할 때 고르고 이유를 로그에 (VideoSinkFactory와 같은 규약) |
-| ⬜ `OnnxScreenInspector` | `src/Onnx/`. ORT 세션과 버퍼만 |
+**아직 한 줄도 쓰지 않았다.** 아래는 제안이고, 검토를 통과하기 전에는 문서로만 있다.
+
+| 무엇 | 어디 | 역할 |
+|---|---|---|
+| `ScreenFinding` | `Infrastructure/Detection/` | `AnomalyKind` + 점수 + 사각형 |
+| `IScreenInspector` | `Infrastructure/Detection/` | 계약 |
+| `NullScreenInspector` | `Infrastructure/Detection/` | 언제나 0건. 모델이 없을 때의 기본값 |
+| `BgrLetterbox` | `Infrastructure/Detection/` | 플래나 gbrp → 인터리브 BGR + 축소 + 레터박스 + 역매핑 |
+| `CenterNetDecoder` | `Infrastructure/Detection/` | 히트맵 → 후보 → NMS. ONNX 타입 없음 |
+| `ScreenInspectorFactory` | `Infrastructure/Detection/` | 시작할 때 고르고 이유를 로그에 (`VideoSinkFactory`와 같은 규약) |
+| `OnnxScreenInspector` | `src/Onnx/` | ORT 세션과 버퍼만 |
+
+```csharp
+public readonly struct ScreenFinding
+{
+    public AnomalyKind Kind { get; }     // 모델의 클래스가 아니라 우리 종류
+    public float Score { get; }          // 0..1
+    public float X, Y, Width, Height;    // 취득 프레임 좌표 (분석 ROI와 같은 계)
+    public float Right  => X + Width;    // x2가 아니라 가장자리 이름으로
+    public float Bottom => Y + Height;
+    public float Area   => Width <= 0f || Height <= 0f ? 0f : Width * Height;
+}
+
+public interface IScreenInspector : IDisposable
+{
+    string Describe { get; }             // 어떤 가중치로 판독했는지 — 로그와 툴팁
+    int InputWidth { get; }
+    int InputHeight { get; }
+    AnomalyKind[] Reports { get; }       // 이 판독기가 말할 수 있는 종류
+    int Inspect(byte[] bgr, Span<ScreenFinding> into);   // 인터리브 BGR, 패딩 없음
+}
+```
+
+**스레드 안전하지 않다.** 구현은 버퍼를 사전 할당해 재사용한다 — 그게 hot path에서 할당을
+없애는 방법이고, 그래서 호출자당 하나이거나 락 하나다. cs 문서 §9-18이 같은 것을 문서화하라고
+적었다.
 
 **계약이 `AnomalyKind`만 말한다.** 모델이 자기 클래스를 갖고 있으면 인스펙터 안에서 우리 종류로
 옮기거나 보고하지 않는다. 앱에는 "화면이 어떻게 잘못될 수 있는가"에 대한 어휘가 하나뿐이고,
@@ -118,12 +148,39 @@ Flip이 바로 "무엇인지"를 요구하는 종류다.
 구현은 **별도 어셈블리** `src/Onnx/`에 두고 `ProjectReference`로만 연결한다. 본체는 ONNX 타입을
 한 번도 이름으로 부르지 않는다 — 부르는 순간 제거 비용이 올라간다.
 
-### 구현하면서 실제로 나온 것
+### `BgrLetterbox`에 미리 박아 둘 요구사항
 
-`BgrLetterbox`를 쓰면서 테스트가 버그 하나를 잡았다. 역변환이 **공칭 배율**(0.3125)로 나누고
-있었는데, 실제 샘플링은 **축별 비율**(241/772 = 0.31218)로 한다 — 축소 크기가 정수라서 갈린다.
-프레임 아래쪽 끝이 772가 아니라 771.2로 돌아왔고, 모든 좌표가 최대 1.2 px 어긋났다. 좌표를
-산출물로 내놓는 기능에서 조용히 틀리는 종류의 오차다. `ScaleX` / `ScaleY`로 갈라 고쳤다.
+초안을 한 번 써 보면서 나온 것들이다. 코드는 되돌렸고, 다시 쓸 때 이대로 쓴다.
+
+**① 역변환은 공칭 배율이 아니라 축별 비율로 한다.** 이게 제일 중요하다.
+
+```
+공칭 배율   Scale  = min(320/1024, 256/772) = 0.3125
+축소 크기   241 = round(772 × 0.3125) = round(241.25)      ← 정수라서 여기서 갈린다
+실제 비율   ScaleY = 241/772 = 0.31218                      ← 채우기가 샘플링하는 비율
+
+Scale로 역변환하면  프레임 아래 끝 = (7+241−7)/0.3125 = 771.2   ✗  (772여야 한다)
+ScaleY로 역변환하면 프레임 아래 끝 = (7+241−7)/0.31218 = 772.0  ✓
+```
+
+초안은 `Scale` 하나로 나눴고 모든 좌표가 최대 **1.2 px** 어긋났다. 좌표를 산출물로 내놓는
+기능에서 조용히 틀리는 종류라, `ScaleX` / `ScaleY`를 따로 두고 `Scale`에는 "역변환에 쓰지 말
+것"을 적는다. cs §7.3의 off-by-one과 같은 계열이다 — 아무도 안 보면 영원히 안 보인다.
+
+**② 패딩을 먼저 빼고 나눈다.** 순서를 바꾸면 `PadY/Scale` = 22 px 어긋난다.
+
+**③ 패딩은 위아래가 다를 수 있다.** 256 − 241 = 15라 위 7, 아래 8이다. 그래서 **그림의 중심은
+프레임의 중심이 아니다** — 반 픽셀 차이다. 검증할 때 중심이 아니라 **양 끝**을 봐야 한다.
+
+**④ 가장자리는 `width − 1`이 아니라 `width`로 클램프한다.** 1024폭 프레임의 오른쪽 끝은
+1024다. cs §6.10이 같은 것을 지적했다.
+
+**⑤ 축소는 box average.** 1024→320은 3.2배라 bilinear은 목적 픽셀이 덮는 10픽셀 중 4개만
+본다. INTER_AREA와 같은 것이고 비용은 소스 픽셀당 읽기 하나(2.37 MB) 대 추론 2.77 ms다.
+다만 **모델이 bilinear로 학습됐다면 여기가 정확도를 조용히 깎는 지점**이다(cs §6.10, [추정]).
+
+**⑥ 크기가 안 맞는 프레임은 거부한다.** 읽고 넘어가면 decimation을 바꾼 직후에 이전 프레임
+조각이 섞인 그림이 만들어진다.
 
 ## 비용 — 이것이 이 문서의 요점이다
 
