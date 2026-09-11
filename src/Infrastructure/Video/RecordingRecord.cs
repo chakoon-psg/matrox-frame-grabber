@@ -61,6 +61,29 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Frames the grab took, including any this recording did not want.</summary>
         public long AcquiredFrames { get; set; }
 
+        /// <summary>
+        /// The detector's frame number for the first frame in the file, and for the last. 0 when
+        /// the recording does not know - a session made of segments has no single answer.
+        ///
+        /// **Without these a frame in an evidence file cannot be named.** The file is a plain
+        /// sequence and the detector reports faults by frame number, so joining the two needs the
+        /// offset, and the offset was only ever in the log. A log gets rotated; a record beside
+        /// the evidence does not. The relation is
+        ///
+        ///     frame index in file = frame number - first_frame
+        ///
+        /// and it holds exactly when frames_dropped is 0, which is the usual case and is recorded
+        /// right here beside it. When frames were lost to the ring the index shifts by however
+        /// many were lost before it, so the two fields together say "this file is a contiguous
+        /// run from first_frame" only if nothing was dropped.
+        ///
+        /// cs section 7.3 is the same defect one step worse: its camera_frame_id was off by one
+        /// against the video it was meant to join, and nothing said so.
+        /// </summary>
+        public long FirstFrame { get; set; }
+
+        public long LastFrame { get; set; }
+
         /// <summary>Frames actually written to the file.</summary>
         public long FramesWritten { get; set; }
 
@@ -188,6 +211,8 @@ namespace MatroxFrameGrabber.Infrastructure
             Num(sb, "board_first_s", BoardFirstSec, "F6");
             Num(sb, "board_last_s", BoardLastSec, "F6");
             Num(sb, "board_span_s", BoardSpanSec, "F6");
+            Int(sb, "first_frame", FirstFrame);
+            Int(sb, "last_frame", LastFrame);
             Int(sb, "acquired_frames", AcquiredFrames);
             Int(sb, "frames_written", FramesWritten);
             Num(sb, "source_delivered_fps", DeliveredFps, "F4");

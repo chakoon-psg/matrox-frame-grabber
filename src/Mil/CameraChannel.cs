@@ -2630,14 +2630,14 @@ namespace MatroxFrameGrabber.Mil
                                + System.IO.Path.GetFileName(path));
 
                 WriteEvidenceRecord(path, request, started, firstTime, lastTime,
-                                    written, lost, fps);
+                                    written, lost, fps, firstFrame, lastFrame);
             });
         }
 
         /// <summary>The record beside the evidence, in the same shape a recording gets.</summary>
         private void WriteEvidenceRecord(string path, ClipRequest request, DateTimeOffset started,
                                          double firstTime, double lastTime, int written, int lost,
-                                         double fps)
+                                         double fps, long firstFrame, long lastFrame)
         {
             try
             {
@@ -2648,6 +2648,10 @@ namespace MatroxFrameGrabber.Mil
                     Stopped = DateTimeOffset.Now,
                     BoardFirstSec = firstTime,
                     BoardLastSec = lastTime,
+                    // So a frame of the file can be named: index = frame number - FirstFrame,
+                    // exact while FramesDropped is 0.
+                    FirstFrame = firstFrame,
+                    LastFrame = lastFrame,
                     AcquiredFrames = written + lost,
                     FramesWritten = written,
                     SourceDeclaredFps = fps,

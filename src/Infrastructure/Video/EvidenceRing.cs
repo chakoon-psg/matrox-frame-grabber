@@ -22,6 +22,11 @@ namespace MatroxFrameGrabber.Infrastructure
     /// and <see cref="StillHolds"/> says afterwards whether it was still the right frame - copying
     /// 1.7 GB out first would put 0.85 GB/s of memory traffic beside the acquisition, and that is
     /// the load measured to cost frames.
+    ///
+    /// **The lock is held only for index writes.** Neither the incoming memcpy nor the outgoing
+    /// pipe write happens inside it, and slot lookup is a binary search rather than a scan. The
+    /// first version did both the wrong way round and put a 2.37 MB copy and 1456 comparisons in
+    /// the path the acquisition thread has to take 120 times a second.
     /// </summary>
     public sealed class EvidenceRing
     {
@@ -113,15 +118,36 @@ namespace MatroxFrameGrabber.Infrastructure
 
         /// <summary>
         /// Takes a copy of one frame. On the acquisition thread, so it is one memcpy and nothing
-        /// else - no allocation, no locking beyond the index.
+        /// else - no allocation, and **the memcpy is not inside the lock.**
+        ///
+        /// That matters because of who else wants the lock. A dump asks for a frame and then asks
+        /// whether it still holds it, twice per written frame at about 700 frames a second, while
+        /// this runs 120 times a second holding 2.37 MB of copying. Reserving the slot, copying
+        /// outside, then publishing keeps the locked region to two index writes.
+        ///
+        /// The slot is marked unheld (-1) for the duration of the copy, so a reader looking for
+        /// whatever used to be there is told the truth - the ring has overtaken it - rather than
+        /// being handed a frame that is half of two. That is the same answer
+        /// <see cref="StillHolds"/> already existed to give, arriving slightly earlier.
+        ///
+        /// One writer only. Two Adds at once would race on the slot; the acquisition hook is the
+        /// only caller and there is one of it per channel.
         /// </summary>
         public void Add(byte[] frame, long frameNumber, double boardTimeSec)
         {
             if (frame == null || frame.Length < BytesPerFrame) return;
+
+            int slot;
             lock (_gate)
             {
-                int slot = (int)(_written % _frames.Length);
-                Buffer.BlockCopy(frame, 0, _frames[slot], 0, BytesPerFrame);
+                slot = (int)(_written % _frames.Length);
+                _frameNumbers[slot] = -1;        // in flight: nobody holds this slot
+            }
+
+            Buffer.BlockCopy(frame, 0, _frames[slot], 0, BytesPerFrame);
+
+            lock (_gate)
+            {
                 _frameNumbers[slot] = frameNumber;
                 _times[slot] = boardTimeSec;
                 _written++;
@@ -194,10 +220,46 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
+        /// <summary>
+        /// Finds the slot holding a frame number, in O(log n) rather than by scanning.
+        ///
+        /// The scan it replaces was 1456 comparisons, run twice for every frame a dump writes -
+        /// about 2 million comparisons a second, all of it inside the lock the acquisition thread
+        /// needs 120 times a second. Frame numbers only ever ascend, and writes go round the ring
+        /// in order, so the array is sorted along the logical order that starts at the oldest slot
+        /// and wraps: a binary search over that order needs eleven comparisons.
+        ///
+        /// Frame numbers may skip - a missed frame leaves a gap - which is why this searches
+        /// rather than computing `frameNumber % Capacity`.
+        ///
+        /// Called with the lock held.
+        /// </summary>
         private int SlotOf(long frameNumber)
         {
-            for (int i = 0; i < _frames.Length; i++)
-                if (_frameNumbers[i] == frameNumber) return i;
+            if (frameNumber < 0) return -1;
+
+            int cap = _frames.Length;
+            // Before the ring has filled, the written frames are slots 0..written-1 and the rest
+            // are empty. Once it has, the oldest is at the write head and the order wraps there.
+            int count = _written < cap ? (int)_written : cap;
+            if (count < 1) return -1;
+            int oldest = _written < cap ? 0 : (int)(_written % cap);
+
+            int lo = 0, hi = count - 1;
+            while (lo <= hi)
+            {
+                int mid = lo + ((hi - lo) >> 1);
+                int slot = oldest + mid;
+                if (slot >= cap) slot -= cap;
+
+                long here = _frameNumbers[slot];
+                if (here == frameNumber) return slot;
+
+                // A slot being filled right now reads -1. It is the newest, so everything the
+                // search is looking for is older: treat it as larger than any frame number.
+                if (here < 0 || here > frameNumber) hi = mid - 1;
+                else lo = mid + 1;
+            }
             return -1;
         }
     }
