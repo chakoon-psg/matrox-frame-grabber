@@ -568,6 +568,92 @@ namespace MatroxFrameGrabber.Mil
         private string _coherenceInput;
 
         /// <summary>
+        /// Blackout's levels as typed. **Luma, 0-255, not a fraction** - the one thing an operator
+        /// can get wrong here is reading these as Dropout's units, where 0.05 is a sensible
+        /// number and would mean "never fire" in luma.
+        /// </summary>
+        public string BlackoutEnterInput
+        {
+            get => _blackoutEnterInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutEnterLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutEnterInput = value; RaisePropertyChanged(nameof(BlackoutEnterInput)); }
+        }
+
+        public string BlackoutExitInput
+        {
+            get => _blackoutExitInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutExitLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutExitInput = value; RaisePropertyChanged(nameof(BlackoutExitInput)); }
+        }
+
+        public string BlackoutSpreadInput
+        {
+            get => _blackoutSpreadInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutMaxSpread.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutSpreadInput = value; RaisePropertyChanged(nameof(BlackoutSpreadInput)); }
+        }
+
+        private string _blackoutEnterInput;
+        private string _blackoutExitInput;
+        private string _blackoutSpreadInput;
+
+        /// <summary>
+        /// The dwells in the units they act in, and what the panel last read.
+        ///
+        /// The live reading is here because the three levels above are meaningless without it:
+        /// "6 luma" says nothing until you can see that this panel sits at 37 and keeps 40 of
+        /// structure. It is the number that makes the threshold defensible on screen rather than
+        /// in a log nobody opens.
+        /// </summary>
+        public string BlackoutHint
+        {
+            get
+            {
+                BlackoutThresholds t = Detection.ResolveBlackout(AnomalyKind.Blackout);
+                string dwell = $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                if (!AnomalyCatalog.Implemented(AnomalyKind.Blackout))
+                    return dwell;
+                return _blackout != null
+                    ? $"{dwell} · now {BlackoutLuma:0.#} luma, spread {BlackoutSpread:0.#}"
+                      + (InBlackout ? $" · BLACK for {BlackoutRunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Blackout on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Applies the typed Blackout levels. All three or none, like Dropout's pair - a
+        /// half-applied hysteresis is worse than neither.
+        /// </summary>
+        public bool ApplyBlackoutThresholds()
+        {
+            if (!double.TryParse(_blackoutEnterInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double enter) ||
+                !double.TryParse(_blackoutExitInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double exit) ||
+                !double.TryParse(_blackoutSpreadInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double spread))
+                return false;
+
+            KindSettings k = Detection.For(AnomalyKind.Blackout);
+            k.BlackoutEnterLuma = enter;
+            k.BlackoutExitLuma = exit;
+            k.BlackoutMaxSpread = spread;
+            k.Clamp();                     // lifts an exit that is not above the entry
+            Output?.SaveThresholds();
+
+            // Show what was kept, not what was typed.
+            _blackoutEnterInput = null;
+            _blackoutExitInput = null;
+            _blackoutSpreadInput = null;
+            RaisePropertyChanged(nameof(BlackoutEnterInput));
+            RaisePropertyChanged(nameof(BlackoutExitInput));
+            RaisePropertyChanged(nameof(BlackoutSpreadInput));
+            RaisePropertyChanged(nameof(BlackoutHint));
+
+            MilErrorLog.Note($"{Name}: {AnomalyKind.Blackout} levels now dark at or below "
+                           + $"{k.BlackoutEnterLuma:0.#} luma and flat within {k.BlackoutMaxSpread:0.#}, "
+                           + $"back at {k.BlackoutExitLuma:0.#} - takes effect on the next Start");
+            return true;
+        }
+
+        /// <summary>
         /// The thresholds that are not on the pane, in the units they actually act in. Frames are
         /// what the detector counts, but nobody reasons in frames at 124 fps -- and the same frame
         /// count means a different duration at a different exposure, which is exactly the sort of
@@ -611,6 +697,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(BlackoutHint));
             RaisePropertyChanged(nameof(DetectionKindsText));
 
             // Logged as resolved rather than as stored: milliseconds are what a person sets and

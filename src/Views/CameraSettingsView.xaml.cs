@@ -51,6 +51,7 @@ namespace MatroxFrameGrabber.Views
                 case "balance":  ApplyBalance_Click(sender, e); break;
                 case "roi":      ApplyRoi_Click(sender, e); break;
                 case "detect":   ApplyThresholds_Click(sender, e); break;
+                case "blackout": ApplyBlackout_Click(sender, e); break;
                 default: return;
             }
             e.Handled = true;
@@ -115,6 +116,15 @@ namespace MatroxFrameGrabber.Views
             if (!channel.ApplyCalibration())
                 MessageBox.Show(
                     "제안할 값이 없습니다. 정상 패널 앞에서 충분히 긴 실행을 한 번 마쳐야 합니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void ApplyBlackout_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyBlackoutThresholds())
+                MessageBox.Show("Blackout levels must all be numbers, in luma (0-255).",
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
