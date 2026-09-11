@@ -21,11 +21,14 @@ namespace MatroxFrameGrabber.Mil.Video
         FrameExtractor SharedFrames { get; set; }
 
         /// <summary>
-        /// Whether a frame offered now would be queued rather than skipped. The caller asks before
-        /// reading anything out: nothing is extracted while every encoder is behind, which is what
-        /// keeps the live view ahead of the disk.
+        /// Whether this sink wants this particular frame right now - it has room, and the frame
+        /// belongs to it.
+        ///
+        /// Both halves matter and the caller asks before reading anything out. Nothing is extracted
+        /// while every encoder is behind, which keeps the live view ahead of the disk; and nothing
+        /// is extracted for a sink taking every fourth frame on the three frames it does not want.
         /// </summary>
-        bool Accepting { get; }
+        bool WantsFrame(long frameNumber);
 
         /// <summary>
         /// Offers a frame the caller holds a hold on. The sink adds its own hold before queueing it

@@ -61,6 +61,7 @@ namespace MatroxFrameGrabber.Views
                 }
 
                 _viewModel = new MainViewModel(_manager);
+                _viewModel.RecordingStopped += OnStorageStoppedRecording;
                 DataContext = _viewModel;
             }
             catch (Exception ex)
@@ -106,6 +107,16 @@ namespace MatroxFrameGrabber.Views
                 return;
             }
             MessageBox.Show(message, title, MessageBoxButton.OK, icon);
+        }
+
+        /// <summary>
+        /// The storage policy stopped the recording. Surfaced like a failed recording, because to
+        /// an operator it is the same thing - it is not running, and nothing else would say so.
+        /// Raised once per breach, not once per check.
+        /// </summary>
+        private void OnStorageStoppedRecording(string message)
+        {
+            Report($"Recording stopped: {message}", "Local storage", MessageBoxImage.Warning);
         }
 
         private void OnRecordingFailed(CameraChannel channel, string error)

@@ -74,31 +74,63 @@
 
             <!-- ============ RECORDING (the session file) ============ -->
             <TextBlock Text="RECORDING" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,1" />
-            <TextBlock Text="what ● Rec writes, for as long as it is held down"
-                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,5" />
+            <TextBlock Text="what ● Rec writes, for as long as it is held down — H.264, because 24/7 lossless is 5.8 TB a day"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,5" TextWrapping="Wrap"
+                       ToolTip="상시 녹화의 인코딩은 고정입니다&#x0a;3채널 하루: 무압축 19 TB(1 GbE 초과), 무손실 5.8 TB, H.264 실측 1.9~3.2 GB&#x0a;사건 증거는 이 설정을 따르지 않고 무손실입니다" />
 
-            <Grid Margin="0,0,0,4">
+            <Grid Margin="0,0,0,3">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <Label Grid.Column="0" Content="Encoding" />
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <RadioButton GroupName="Encoding" Content="H.264" Margin="0,0,14,0"
-                                 IsChecked="{Binding EncodingIsH264}"
-                                 ToolTip="H.264(AVC) .mp4 — 어디서나 재생되고 작습니다&#x0a;손실 압축이라 이 파일로는 검출이 보고한 편차를 재현할 수 없습니다" />
-                    <RadioButton GroupName="Encoding" Content="Lossless" Margin="0,0,14,0"
-                                 IsChecked="{Binding EncodingIsLossless}"
-                                 ToolTip="Ut Video .mkv — 픽셀이 비트 단위로 같습니다(왕복 해시로 확인)&#x0a;무압축과 같은 화면, 실측 3.2~4.2배 작고 속도는 동일(1089 fps 대 1416 fps)" />
-                    <RadioButton GroupName="Encoding" Content="Uncompressed"
-                                 IsChecked="{Binding EncodingIsUncompressed}"
-                                 ToolTip="rawvideo .mov — 코덱을 전혀 쓰지 않습니다&#x0a;Lossless와 화면은 같고 3.2배 큽니다(실측: 이 장비에서 12초에 3.54 GB)&#x0a;코덱 없는 도구로 읽어야 할 때만 고르십시오" />
+                <Label Grid.Column="0" Content="Rate" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.SessionRateFps, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="원하는 초당 프레임. 0 = 매 프레임&#x0a;이 값은 파일에 적히지 않습니다 — 취득 레이트의 약수가 되고, 파일은 그 결과를 선언합니다(30 → 31.079)" />
+                    <TextBlock Text="fps wanted  ·  0 = every frame"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
                 </StackPanel>
             </Grid>
-            <TextBlock Text="{Binding RecordingCostText}" Margin="0,0,0,8"
+            <TextBlock Text="{Binding SessionRateText}" Margin="0,0,0,8"
                        Foreground="{StaticResource MutedTextBrush}" FontSize="10"
                        TextWrapping="Wrap"
-                       ToolTip="다음 Rec부터 적용됩니다" />
+                       ToolTip="카메라마다 따로 해석됩니다 — 취득 레이트가 카메라마다 다르고 노출에 따라 변하기 때문입니다" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Segment" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding SessionSegmentMinutes, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="파일 하나의 길이(분). 10초~60분&#x0a;이동기가 기다리는 시간을 정합니다. 실측: 세그먼트 경계는 부하도 프레임 손실도 없습니다" />
+                    <TextBlock Text="minutes per file"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Container" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <RadioButton GroupName="Container" Content="MPEG-TS" Margin="0,0,14,0"
+                                 IsChecked="{Binding ContainerIsTs}"
+                                 ToolTip="정전에 강합니다 — 실측: 쓰던 중 죽은 MP4는 0프레임, TS는 1480프레임 전부 회수&#x0a;4% 크고, 옮길 때 -c copy 로 MP4가 됩니다(0.07초)" />
+                    <RadioButton GroupName="Container" Content="MP4"
+                                 IsChecked="{Binding ContainerIsMp4}"
+                                 ToolTip="어느 플레이어에서나 열립니다&#x0a;다만 쓰던 중 죽으면 그 파일은 열리지 않습니다 — 인덱스가 닫을 때 쓰이기 때문입니다" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="a file killed mid-write: MP4 gives back nothing, MPEG-TS gives back everything up to the cut"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
 
             <Grid Margin="0,0,0,10">
                 <Grid.ColumnDefinitions>
@@ -217,6 +249,50 @@
                         ToolTip="사건 클립을 잘라낼 롤링 세그먼트가 쓰이는 곳" />
             </Grid>
             <TextBlock Text="keep this local — a network share becomes skipped frames, and a skipped frame is a hole in the clip"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+
+            <!-- ============ STORAGE ============ -->
+            <TextBlock Text="STORAGE" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,1" />
+            <TextBlock Text="the continuous recording is staged locally until a mover takes it to the NAS"
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,5" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Reserve" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.LocalReserveGb, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="이 여유 아래로 내려가면 정책이 작동합니다&#x0a;운전점이 요구하는 최소값 아래로는 내려가지 않습니다 — 사건 하나를 쓰지 못하면 정책이 무의미하기 때문입니다" />
+                    <TextBlock Text="GB free" Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="{Binding ReserveHintText}" Margin="0,0,0,6"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="When low" />
+                <StackPanel Grid.Column="1">
+                    <RadioButton GroupName="WhenLow" Content="delete the oldest context first"
+                                 IsChecked="{Binding WhenLowIsDelete}"
+                                 ToolTip="무인 운용을 계속합니다&#x0a;내구 시험에서 흥미로운 순간은 과거가 아니라 미래이므로, 최근을 남기는 쪽이 대개 맞습니다" />
+                    <RadioButton GroupName="WhenLow" Content="stop the recording and raise it"
+                                 Margin="0,2,0,0"
+                                 IsChecked="{Binding WhenLowIsStop}"
+                                 ToolTip="사람이 정하기 전에는 아무것도 잃지 않습니다&#x0a;자동 재개는 없습니다 — 그게 이 선택의 요점입니다" />
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Text="{Binding StorageStatusText}" Margin="0,4,0,2"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+            <TextBlock Text="the anomaly evidence is never deleted by either policy — if evidence alone fills the disk, the recording stops and says so"
                        Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
 
             <!-- ============ DISPLAY ============ -->

@@ -26,7 +26,11 @@ namespace MatroxFrameGrabber.Infrastructure
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
         private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
-        private VideoEncoding _recordingEncoding = VideoEncoding.H264;
+        private VideoContainer _sessionContainer = VideoContainer.MpegTs;
+        private int _sessionRateFps = DefaultSessionRateFps;
+        private double _sessionSegmentSeconds = DefaultSessionSegmentSeconds;
+        private double _localReserveGb = DefaultLocalReserveGb;
+        private LowSpacePolicy _whenLow = LowSpacePolicy.DeleteOldestContext;
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
@@ -249,26 +253,96 @@ namespace MatroxFrameGrabber.Infrastructure
         public const double SegmentSeconds = 2.0;
 
         /// <summary>
-        /// What a session recording does to the pixels.
+        /// What the continuous recording does to the pixels. Fixed, not a setting.
         ///
-        /// H.264 by default because a session recording is normally watched, and because the two
-        /// bit-exact options cost between 100 and 500 times the bytes: measured, 17.7 GB per minute
-        /// at 1024x772 and 71 GB per minute at 2064x1544, against 188-261 kb/s for the H.264 clips
-        /// from the same run. The drive matters more than the disk here - 3 channels of raw is
-        /// 884 MB/s, which is 76 TB a day, and a 1 TB TLC SSD is rated for about 750 TB in total.
+        /// It was offered as a choice of three and the measurements closed it. Over 24 hours on
+        /// three channels: uncompressed is 19 TB a day and 221 MB/s, which is twice what 1 GbE
+        /// carries; lossless is 5.8 TB a day and would sit on 60% of the link forever; H.264 is
+        /// 1.9-3.2 GB a day measured here, or about 0.26 TB on lit moving content. Neither
+        /// bit-exact option is defensible for a recording that never stops.
         ///
-        /// This is the session file only. An anomaly's evidence does not follow it: see KeepStills
-        /// and CLAUDE.md - the clip is context and the stills are the measurement, and neither is
-        /// a choice made here.
+        /// It also collided with the container. MPEG-TS carries H.264 and nothing else we write,
+        /// so choosing lossless silently dropped the session back to Matroska - and with it the
+        /// only reason the container was chosen, which is that a file killed mid-write still
+        /// reads back. Two settings quietly overriding each other is worse than one fewer setting.
+        ///
+        /// The capability stays: VideoEncoding and the per-output plumbing in FfmpegArgs are what
+        /// the anomaly evidence will use, and that tier is bit-exact by design rather than by
+        /// preference. What is gone is only the choice on the continuous file.
         /// </summary>
-        public VideoEncoding RecordingEncoding
+        public const VideoEncoding SessionEncoding = VideoEncoding.H264;
+
+        /// <summary>
+        /// Frames per second wanted from the continuous recording. 0 takes every frame.
+        ///
+        /// A *wanted* rate, not a declared one, and that distinction is why this exists at all: an
+        /// earlier setting of the same name wrote 30 into the file header while the camera delivered
+        /// 124.316, which made the file 3.6% slow. This one becomes a divisor - EveryNthFor(124.316,
+        /// 30) is 4 - and the file declares what that actually produces, 31.079. The resolution is
+        /// per camera, because the acquisition rate is per camera and varies with exposure: at
+        /// 100 ms exposure the ceiling is 10 fps and the divisor is 1, so the file is 10 fps and
+        /// says so rather than pretending to be 30.
+        /// </summary>
+        public int SessionRateFps
         {
-            get => _recordingEncoding;
+            get => _sessionRateFps;
             set
             {
-                if (_recordingEncoding == value) return;
-                _recordingEncoding = value;
-                RaiseChanged(nameof(RecordingEncoding));
+                int v = value <= 0 ? 0 : (value < 1 ? 1 : (value > 1000 ? 1000 : value));
+                if (_sessionRateFps == v) return;
+                _sessionRateFps = v;
+                RaiseChanged(nameof(SessionRateFps));
+                Save();
+            }
+        }
+
+        /// <summary>Default wanted rate for the continuous tier.</summary>
+        public const int DefaultSessionRateFps = 30;
+
+        /// <summary>
+        /// Seconds per file in the continuous recording.
+        ///
+        /// It bounds two things: how long a file waits before a mover can take it, and how much is
+        /// exposed to a crash. The second is much smaller than it looks when the container survives
+        /// a kill - see SessionContainer - so this is really about the first. Measured: segmenting
+        /// costs nothing, and the boundary loses no frames (18 segments, 22382 frames fed, 22382 in
+        /// the files).
+        /// </summary>
+        public double SessionSegmentSeconds
+        {
+            get => _sessionSegmentSeconds;
+            set
+            {
+                double v = value <= 0.0 ? 0.0 : (value < 10.0 ? 10.0 : (value > 3600.0 ? 3600.0 : value));
+                if (Math.Abs(_sessionSegmentSeconds - v) < 1e-9) return;
+                _sessionSegmentSeconds = v;
+                RaiseChanged(nameof(SessionSegmentSeconds));
+                Save();
+            }
+        }
+
+        /// <summary>Five minutes: 288 files a day per camera, and a mover never waits long.</summary>
+        public const double DefaultSessionSegmentSeconds = 300.0;
+
+        /// <summary>
+        /// What the continuous recording is wrapped in.
+        ///
+        /// MPEG-TS by default, and the reason is measured: ffmpeg killed 12 s into an MP4 left
+        /// 7.08 MB on disk with **0 frames** readable, because the index is only written at close.
+        /// The same kill against TS gave back all 1480 frames with a correct duration. TS costs 4%
+        /// more bytes and remuxes to MP4 with a stream copy in 0.07 s.
+        ///
+        /// MP4 stays on offer because the choice is about the environment rather than the recording: a
+        /// viewer that cannot open .ts is a real constraint, and only whoever runs the rig knows.
+        /// </summary>
+        public VideoContainer SessionContainer
+        {
+            get => _sessionContainer;
+            set
+            {
+                if (_sessionContainer == value) return;
+                _sessionContainer = value;
+                RaiseChanged(nameof(SessionContainer));
                 Save();
             }
         }
@@ -291,6 +365,63 @@ namespace MatroxFrameGrabber.Infrastructure
             return _outputFolder;
         }
 
+        /// <summary>
+        /// Where the continuous recording is staged, under the output folder.
+        ///
+        /// Its own folder so that the low-space policy can be confined to it structurally. The
+        /// alternative - deciding what may be deleted from a filename - is one typo away from
+        /// deleting an anomaly's evidence, and that is a controlled record.
+        /// </summary>
+        public string EnsureContinuousFolder()
+        {
+            string path = Path.Combine(EnsureFolder(), "continuous");
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        /// <summary>
+        /// Free space to keep on the local disk, in GB. Clamped up to what the operating point
+        /// needs - see StoragePolicy.MinimumReserveGb.
+        /// </summary>
+        public double LocalReserveGb
+        {
+            get => _localReserveGb;
+            set
+            {
+                double v = double.IsNaN(value) ? DefaultLocalReserveGb
+                         : (value < 0.0 ? 0.0 : (value > 100000.0 ? 100000.0 : value));
+                if (Math.Abs(_localReserveGb - v) < 1e-9) return;
+                _localReserveGb = v;
+                RaiseChanged(nameof(LocalReserveGb));
+                Save();
+            }
+        }
+
+        /// <summary>Twenty gigabytes: comfortably above the minimum at any decimation this rig uses.</summary>
+        public const double DefaultLocalReserveGb = 20.0;
+
+        /// <summary>
+        /// What happens when the reserve is breached.
+        ///
+        /// Deleting the oldest context by default: in a durability test the interesting moment is
+        /// in the future, so keeping the recent hours beats keeping the first ones. The other
+        /// choice is for a lab whose rule is that nothing is lost without a person deciding.
+        ///
+        /// Neither touches the anomaly evidence, and that is not offered as an option - making it
+        /// one would let a controlled record be configured away.
+        /// </summary>
+        public LowSpacePolicy WhenLow
+        {
+            get => _whenLow;
+            set
+            {
+                if (_whenLow == value) return;
+                _whenLow = value;
+                RaiseChanged(nameof(WhenLow));
+                Save();
+            }
+        }
+
         #region Persistence
 
         // Plain DTO so (de)serialization never runs through the observable setters (which Save()).
@@ -311,7 +442,11 @@ namespace MatroxFrameGrabber.Infrastructure
             // Also a name rather than the number, for the same reason: an unrecognised value must
             // fall back to H.264, where an out-of-range index could select the one that writes
             // 71 GB a minute.
-            public string RecordingEncoding { get; set; }
+            public string SessionContainer { get; set; }
+            public int? SessionRateFps { get; set; }
+            public double? SessionSegmentSeconds { get; set; }
+            public double? LocalReserveGb { get; set; }
+            public string WhenLow { get; set; }
 
             /// <summary>
             /// Which kinds are watched for, by name. Null means a file written before the flag
@@ -374,7 +509,19 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._videoSink =
                             Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
                                 ? pref : VideoSinkPreference.Auto;
-                        s._recordingEncoding = VideoCodecs.Parse(dto.RecordingEncoding);
+                        s._sessionContainer =
+                            Enum.TryParse(dto.SessionContainer, ignoreCase: true, out VideoContainer sc)
+                                ? sc : VideoContainer.MpegTs;
+                        int wantedRate = dto.SessionRateFps ?? DefaultSessionRateFps;
+                        s._sessionRateFps = wantedRate <= 0
+                            ? 0 : (wantedRate > 1000 ? 1000 : wantedRate);
+                        s._localReserveGb = dto.LocalReserveGb is double res && res >= 0.0
+                            ? (res > 100000.0 ? 100000.0 : res) : DefaultLocalReserveGb;
+                        s._whenLow = Enum.TryParse(dto.WhenLow, ignoreCase: true, out LowSpacePolicy wl)
+                            ? wl : LowSpacePolicy.DeleteOldestContext;
+                        double seg = dto.SessionSegmentSeconds ?? DefaultSessionSegmentSeconds;
+                        s._sessionSegmentSeconds = seg <= 0.0
+                            ? 0.0 : (seg < 10.0 ? 10.0 : (seg > 3600.0 ? 3600.0 : seg));
                         s._displayUpdateFps = dto.DisplayUpdateFps <= 0
                             ? 0
                             : (dto.DisplayUpdateFps < 5 ? 5 : (dto.DisplayUpdateFps > 120 ? 120 : dto.DisplayUpdateFps));
@@ -507,7 +654,11 @@ namespace MatroxFrameGrabber.Infrastructure
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
                     VideoSink = _videoSink.ToString(),
-                    RecordingEncoding = _recordingEncoding.ToString(),
+                    SessionContainer = _sessionContainer.ToString(),
+                    SessionRateFps = _sessionRateFps,
+                    SessionSegmentSeconds = _sessionSegmentSeconds,
+                    LocalReserveGb = _localReserveGb,
+                    WhenLow = _whenLow.ToString(),
                     EnabledKinds = AnomalyKindSet.ToNames(_enabledKinds),
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,

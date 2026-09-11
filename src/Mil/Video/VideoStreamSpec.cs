@@ -45,9 +45,16 @@ namespace MatroxFrameGrabber.Mil.Video
         /// </summary>
         public readonly VideoEncoding Encoding;
 
+        /// <summary>
+        /// What wraps it. The session recording asks for MpegTs so a power cut costs seconds
+        /// instead of the whole file - measured, an MP4 killed mid-write gave back 0 frames.
+        /// </summary>
+        public readonly VideoContainer Container;
+
         public VideoOutputSpec(string label, int everyNthFrame = 1, double segmentSeconds = 0.0,
                                double keyframeSeconds = 0.0, int retainSegments = 0,
-                               VideoEncoding encoding = VideoEncoding.H264)
+                               VideoEncoding encoding = VideoEncoding.H264,
+                               VideoContainer container = VideoContainer.Default)
         {
             if (everyNthFrame < 1) throw new ArgumentOutOfRangeException(nameof(everyNthFrame));
             Label = label ?? string.Empty;
@@ -56,6 +63,7 @@ namespace MatroxFrameGrabber.Mil.Video
             KeyframeSeconds = keyframeSeconds;
             RetainSegments = retainSegments;
             Encoding = encoding;
+            Container = container;
         }
 
         public bool IsSegmented => SegmentSeconds > 0.0;
@@ -64,6 +72,16 @@ namespace MatroxFrameGrabber.Mil.Video
         public static VideoOutputSpec SingleFile(string label = "",
                                                  VideoEncoding encoding = VideoEncoding.H264) =>
             new VideoOutputSpec(label, encoding: encoding);
+
+        /// <summary>
+        /// The continuous session tier: every Nth frame, in segments, in a container that survives
+        /// a kill. Both numbers come from settings resolved against the measured acquisition rate -
+        /// see VideoRatePolicy.
+        /// </summary>
+        public static VideoOutputSpec Session(int everyNthFrame, double segmentSeconds,
+                                              VideoEncoding encoding, VideoContainer container) =>
+            new VideoOutputSpec(string.Empty, everyNthFrame, segmentSeconds,
+                                encoding: encoding, container: container);
     }
 
     /// <summary>

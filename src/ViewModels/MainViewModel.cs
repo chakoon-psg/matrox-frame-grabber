@@ -47,6 +47,7 @@ namespace MatroxFrameGrabber.ViewModels
             {
                 foreach (var channel in _manager.Channels)
                     channel.RefreshStats();
+                CheckStorage();
                 RecordMeasurementRow();
                 RaiseChanged(nameof(AnyRecording));
                 RaiseChanged(nameof(BandwidthText));
@@ -250,19 +251,21 @@ namespace MatroxFrameGrabber.ViewModels
         }
 
         /// <summary>
-        /// What the recording follows from, rather than what it can be set to.
+        /// What the recording is derived from: the geometry and rate the camera delivers.
         ///
-        /// Both used to be settings and neither was a choice: the fastest a recording can go is the
-        /// rate the camera delivers, and the frame size is the size it delivers. Saying so once is
-        /// more use than two boxes whose only honest values are these.
+        /// The frame size is not a setting and cannot be - a preset that never upscales did nothing
+        /// against 1024x772. The rate is a setting, but only as a divisor of this number, which is
+        /// why this line states the number rather than the file's rate. Deliberately not the words
+        /// "every frame": the Rate row above says how many of them this file takes, and the two
+        /// lines contradicting each other is worse than either being terse.
         /// </summary>
         public string RecordingSourceText
         {
             get
             {
                 return TryAcquisition(out int w, out int h, out _, out double fps)
-                    ? $"{w}x{h} at {fps:F3} fps, every frame"
-                    : AnyCameraPresent ? "every frame, at the acquisition size" : "no camera";
+                    ? $"{w}x{h} acquired at {fps:F3} fps"
+                    : AnyCameraPresent ? "the acquisition size and rate" : "no camera";
             }
         }
 
@@ -307,69 +310,228 @@ namespace MatroxFrameGrabber.ViewModels
 
         private IReadOnlyList<AnomalyKindToggle> _detectionKinds;
 
-        // ----- Encoding: what a session recording does to the pixels -----
+        // ----- Local storage: the staging area the mover empties -----
 
-        public bool EncodingIsH264
-        {
-            get => Output.RecordingEncoding == VideoEncoding.H264;
-            set { if (value) SetEncoding(VideoEncoding.H264); }
-        }
+        private StorageWarden _warden;
+        private string _wardenFolder;
+        private DateTime _lastStorageCheck = DateTime.MinValue;
+        private string _storageStatus = "";
+        private bool _storageStopRaised;
+        private string _lastStorageMessage;
 
-        public bool EncodingIsLossless
+        /// <summary>
+        /// The warden for the folder currently configured. Rebuilt when the folder changes, since
+        /// the output path is a setting and the volume may differ.
+        /// </summary>
+        private StorageWarden Warden()
         {
-            get => Output.RecordingEncoding == VideoEncoding.Lossless;
-            set { if (value) SetEncoding(VideoEncoding.Lossless); }
-        }
-
-        public bool EncodingIsUncompressed
-        {
-            get => Output.RecordingEncoding == VideoEncoding.Uncompressed;
-            set { if (value) SetEncoding(VideoEncoding.Uncompressed); }
+            string folder = Output.EnsureContinuousFolder();
+            if (_warden == null || !string.Equals(folder, _wardenFolder, StringComparison.OrdinalIgnoreCase))
+            {
+                _warden = new StorageWarden(folder);
+                _wardenFolder = folder;
+            }
+            return _warden;
         }
 
         /// <summary>
-        /// What the chosen encoding writes, per minute, at the geometry actually being acquired.
-        ///
-        /// Shown because the three options are three orders of magnitude apart and nothing else on
-        /// screen would say so: the H.264 clips from the 2026-09-10 run were 188-261 kb/s, while
-        /// uncompressed at the same geometry is 295 MB/s. An operator picking the third radio
-        /// deserves to see 18 GB/min before the disk fills, not after.
+        /// The smallest reserve this operating point can work with: enough to write a few events
+        /// per camera plus the segment that is too young to delete.
         /// </summary>
-        public string RecordingCostText
+        public double MinimumReserveGb
         {
             get
             {
-                VideoEncoding e = Output.RecordingEncoding;
-                if (!TryAcquisition(out int w, out int h, out int bands, out double fps))
-                    return VideoCodecs.IsLossless(e)
-                        ? "bit-exact, and large - the size depends on the acquisition"
-                        : "compressed, and small";
-
-                string size = VideoCodecs.SizePerMinute(e, w, h, bands, fps);
-                switch (e)
+                int channels = 0;
+                long evidence = 0;
+                foreach (CameraChannel c in _manager.Channels)
                 {
-                    case VideoEncoding.Lossless:
-                        return $"{VideoCodecs.Name(e, bands)}, bit-exact - {size}, "
-                             + "and real frames measured 4.2x smaller than that";
-                    case VideoEncoding.Uncompressed:
-                        return $"rawvideo, bit-exact - {size}, whatever the picture is";
-                    default:
-                        return "libx264 CRF 23, lossy - small, and the deviation cannot be "
-                             + "measured again from it";
+                    if (!c.CameraPresent) continue;
+                    channels++;
+                    if (evidence == 0 && c.TryGetFrameShape(out int w, out int h, out int bands))
+                        evidence = 4L * w * h * Math.Max(1, bands) + 500_000L;   // 4 stills + a clip
                 }
+                return StoragePolicy.MinimumReserveGb(Math.Max(1, channels), evidence,
+                                                      Warden().LargestCandidateBytes());
             }
         }
 
-        private void SetEncoding(VideoEncoding encoding)
+        /// <summary>The reserve actually in force, which is what was asked for or the minimum.</summary>
+        public double EffectiveReserveGb =>
+            StoragePolicy.ClampReserveGb(Output.LocalReserveGb, MinimumReserveGb);
+
+        /// <summary>Room, policy and what is waiting for the mover.</summary>
+        public string StorageStatusText
         {
-            if (Output.RecordingEncoding == encoding) return;
-            Output.RecordingEncoding = encoding;   // persists
-            RaiseChanged(nameof(EncodingIsH264));
-            RaiseChanged(nameof(EncodingIsLossless));
-            RaiseChanged(nameof(EncodingIsUncompressed));
-            RaiseChanged(nameof(RecordingCostText));
-            MilErrorLog.Note($"settings: recording encoding set to {encoding}"
-                           + $" ({VideoCodecs.Name(encoding, 3)}, .{VideoCodecs.Extension(encoding)})"
+            get
+            {
+                StorageWarden w = Warden();
+                string line = StoragePolicy.Describe(w.FreeGb, EffectiveReserveGb, Output.WhenLow)
+                            + " - " + w.PendingText();
+                return string.IsNullOrEmpty(_storageStatus) ? line : line + " - " + _storageStatus;
+            }
+        }
+
+        /// <summary>What the reserve box will actually be clamped to, so the number is not a lie.</summary>
+        public string ReserveHintText
+        {
+            get
+            {
+                double min = MinimumReserveGb;
+                return Output.LocalReserveGb < min
+                    ? $"raised to {min:F1} GB - the minimum this operating point needs"
+                    : $"minimum {min:F1} GB at this operating point";
+            }
+        }
+
+        public bool WhenLowIsDelete
+        {
+            get => Output.WhenLow == LowSpacePolicy.DeleteOldestContext;
+            set { if (value) SetWhenLow(LowSpacePolicy.DeleteOldestContext); }
+        }
+
+        public bool WhenLowIsStop
+        {
+            get => Output.WhenLow == LowSpacePolicy.StopRecording;
+            set { if (value) SetWhenLow(LowSpacePolicy.StopRecording); }
+        }
+
+        private void SetWhenLow(LowSpacePolicy policy)
+        {
+            if (Output.WhenLow == policy) return;
+            Output.WhenLow = policy;
+            RaiseChanged(nameof(WhenLowIsDelete));
+            RaiseChanged(nameof(WhenLowIsStop));
+            RaiseChanged(nameof(StorageStatusText));
+            MilErrorLog.Note($"settings: when local storage is low - {policy}");
+        }
+
+        /// <summary>
+        /// Applies the low-space policy, at most every ten seconds.
+        ///
+        /// On the stats tick rather than a timer of its own, which is this app convention;
+        /// throttled because the answer cannot change meaningfully in half a second and the delete
+        /// path enumerates a folder.
+        /// </summary>
+        private void CheckStorage()
+        {
+            if ((DateTime.Now - _lastStorageCheck).TotalSeconds < 10.0) return;
+            _lastStorageCheck = DateTime.Now;
+
+            StorageAction action = Warden().Apply(EffectiveReserveGb, Output.WhenLow, out string message);
+
+            // Only when it changes. This runs every ten seconds, and a breach that nobody clears
+            // would otherwise write the same line 8640 times a day and push the log's real history
+            // out of its size cap. A deletion still logs each time, because each one is an event
+            // and the message carries its own count.
+            if (message != null && message != _lastStorageMessage)
+                MilErrorLog.Note("storage: " + message);
+            _lastStorageMessage = message;
+
+            if (action == StorageAction.StopRecording)
+            {
+                _storageStatus = "recording stopped - local storage low";
+                foreach (CameraChannel c in _manager.Channels)
+                {
+                    if (!c.IsRecording) continue;
+                    c.StopRecording();
+                    MilErrorLog.Note($"{c.Name}: session recording stopped by the storage policy");
+                }
+
+                // Once per transition, not once per check. This runs every ten seconds, and the
+                // handler is allowed to be a modal dialog - raising it each time would wall the
+                // screen with them and freeze the tick behind the first one.
+                if (!_storageStopRaised && message != null)
+                {
+                    _storageStopRaised = true;
+                    RecordingStopped?.Invoke(message);
+                }
+            }
+            else if (action == StorageAction.DeleteOldest)
+            {
+                _storageStatus = message;
+            }
+            else
+            {
+                // Recovered. Armed again, so the next breach is announced - and deliberately not
+                // resumed automatically: stopping was the policy that says a person decides.
+                _storageStopRaised = false;
+                _storageStatus = "";
+            }
+
+            RaiseChanged(nameof(StorageStatusText));
+        }
+
+        /// <summary>Raised when the storage policy stops the recording. The window shows it.</summary>
+        public event Action<string> RecordingStopped;
+
+        // ----- The continuous tier: rate, segment length, container -----
+
+        /// <summary>
+        /// What the wanted rate resolves to, per camera.
+        ///
+        /// Shown because the wanted number is never the number in the file: 30 out of 124.316 is
+        /// every fourth frame at 31.079, and out of a 10 fps camera it is every frame at 10. The
+        /// resolution is per camera because the acquisition rate is, so cameras that disagree are
+        /// listed separately rather than averaged into a fiction.
+        /// </summary>
+        public string SessionRateText
+        {
+            get
+            {
+                int wanted = Output.SessionRateFps;
+                var seen = new List<string>();
+                foreach (CameraChannel c in _manager.Channels)
+                {
+                    if (!c.CameraPresent || c.DetectionFps <= 1.0) continue;
+                    int everyNth = VideoRatePolicy.EveryNthFor(c.DetectionFps, wanted);
+                    double file = VideoRatePolicy.FileFps(c.DetectionFps, everyNth);
+                    string one = everyNth == 1
+                        ? $"every frame = {file:F3} fps"
+                        : $"every {everyNth}th of {c.DetectionFps:F3} = {file:F3} fps";
+                    if (!seen.Contains(one)) seen.Add(one);
+                }
+                if (seen.Count == 0) return "no camera";
+                if (wanted <= 0) return "every frame";
+                return seen.Count == 1
+                    ? $"{wanted} wanted → {seen[0]}"
+                    : $"{wanted} wanted → " + string.Join(" · ", seen);
+            }
+        }
+
+        /// <summary>Segment length in minutes, which is how anybody thinks about it.</summary>
+        public string SessionSegmentMinutes
+        {
+            get => (Output.SessionSegmentSeconds / 60.0).ToString("0.##",
+                       System.Globalization.CultureInfo.InvariantCulture);
+            set
+            {
+                if (double.TryParse(value, System.Globalization.NumberStyles.Float,
+                                    System.Globalization.CultureInfo.InvariantCulture, out double m))
+                    Output.SessionSegmentSeconds = m * 60.0;
+                RaiseChanged(nameof(SessionSegmentMinutes));
+            }
+        }
+
+        public bool ContainerIsTs
+        {
+            get => Output.SessionContainer == VideoContainer.MpegTs;
+            set { if (value) SetContainer(VideoContainer.MpegTs); }
+        }
+
+        public bool ContainerIsMp4
+        {
+            get => Output.SessionContainer == VideoContainer.Default;
+            set { if (value) SetContainer(VideoContainer.Default); }
+        }
+
+        private void SetContainer(VideoContainer container)
+        {
+            if (Output.SessionContainer == container) return;
+            Output.SessionContainer = container;
+            RaiseChanged(nameof(ContainerIsTs));
+            RaiseChanged(nameof(ContainerIsMp4));
+            MilErrorLog.Note($"settings: session container set to {container}"
                            + " - takes effect on the next Rec");
         }
 
