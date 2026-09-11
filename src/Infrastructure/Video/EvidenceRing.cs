@@ -44,6 +44,12 @@ namespace MatroxFrameGrabber.Infrastructure
             {
                 _frames[i] = new byte[bytesPerFrame];
                 _frameNumbers[i] = -1;
+
+                // Touched now, before the grab starts, so the first pass through the ring does not
+                // pay a page fault per 4 KB beside the acquisition. new byte[] gives back
+                // demand-zero pages: committed on paper, not yet mapped.
+                byte[] slot = _frames[i];
+                for (int p = 0; p < slot.Length; p += 4096) slot[p] = 0;
             }
         }
 

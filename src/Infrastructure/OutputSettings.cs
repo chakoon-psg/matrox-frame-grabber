@@ -206,10 +206,14 @@ namespace MatroxFrameGrabber.Infrastructure
         ///
         /// The cost is RAM and it is not small. The ring holds the window plus the event cap plus
         /// room to write in (see EvidenceRing): at 124.3 fps and 1024x772x3 that is 2.69 GB per
-        /// camera for +-2 s and 5.36 GB for +-5 s, four times that at decim 1 - so +-5 s does not
-        /// fit three cameras on a 32 GB machine, and HostMemory refuses rather than paging beside
-        /// the acquisition. Off by default for the same reason: a feature that quietly takes 8 GB
-        /// should be asked for.
+        /// camera for +-2 s, 3.58 GB for +-3 s and 5.36 GB for +-5 s, four times each at decim 1 -
+        /// so +-5 s does not fit three cameras on a 32 GB machine, and HostMemory refuses rather
+        /// than paging beside the acquisition. Off by default for the same reason: a feature that
+        /// quietly takes 8 GB should be asked for.
+        ///
+        /// The seconds do not change the per-frame cost, only the length of the ring, so the limit
+        /// here is RAM and not time: measured 2026-09-11 on three channels over 120 s, +-3 s lost
+        /// 8/7/8 frames of 15100 while writing 13 GB of evidence, and +-2 s lost 5/1/1.
         /// </summary>
         public double EvidenceSeconds
         {
