@@ -103,6 +103,15 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public readonly struct BlackoutProposal
     {
+        /// <summary>
+        /// How near zero a dead panel is taken to read, in luma.
+        ///
+        /// Not measured - nothing here has ever seen a panel that was off. It is the ceiling a
+        /// proposal will not exceed, so the suggestion stays a statement about the sensor rather
+        /// than about how bright this particular picture happened to be.
+        /// </summary>
+        public const double NearSensorFloor = 10.0;
+
         public BlackoutProposal(double minLuma, double maxFlatSpreadAtDarkest,
                                 long framesJudged, double suggestedEnterLuma,
                                 double suggestedMaxSpread)
@@ -122,10 +131,27 @@ namespace MatroxFrameGrabber.Infrastructure
 
         public long FramesJudged { get; }
 
-        /// <summary>Half the observed floor: a doubling of margin, which is the rest of this repo's habit.</summary>
+        /// <summary>
+        /// A level the measurement can defend, which is not half the floor.
+        ///
+        /// Halving is right for a depth, which is a fraction of a signal, and wrong for this,
+        /// which is an absolute level whose target reads near zero. The 2026-09-11 calibration
+        /// hour floored at 118.9 / 87.8 / 36.2 luma, so halving proposed 59.5 / 43.9 / 18.1 -
+        /// and **59 luma is not a panel that is gone, it is a panel at half brightness**, which
+        /// is what Dropout is for. The flatness gate would have caught most of that, but leaning
+        /// on it alone is thin.
+        ///
+        /// So a quarter of the floor, capped at <see cref="NearSensorFloor"/>. The cap carries
+        /// the meaning: a panel that is off reads near the sensor floor however bright the
+        /// working picture was, so a brighter channel does not earn a higher threshold.
+        ///
+        /// **This bounds false positives and nothing else.** What it takes to catch a real
+        /// blackout cannot come from an hour in which nothing went black - that needs a covered
+        /// camera.
+        /// </summary>
         public double SuggestedEnterLuma { get; }
 
-        /// <summary>Half the spread the darkest healthy frame kept.</summary>
+        /// <summary>A quarter of the structure the darkest healthy frame kept, capped the same way.</summary>
         public double SuggestedMaxSpread { get; }
 
         /// <summary>
@@ -378,8 +404,17 @@ namespace MatroxFrameGrabber.Infrastructure
         {
             double floor = _healthyFloor == double.MaxValue ? 0.0 : _healthyFloor;
             double spread = _healthyFloor == double.MaxValue ? 0.0 : _spreadAtFloor;
-            return new BlackoutProposal(floor, spread, _judged, floor / 2.0, spread / 2.0);
+            return new BlackoutProposal(floor, spread, _judged, Bound(floor), Bound(spread));
         }
+
+        /// <summary>
+        /// A quarter of what was measured, and never above the sensor floor.
+        ///
+        /// The quarter keeps it clear of the working level; the cap keeps a bright channel from
+        /// being handed a high threshold just because its picture is bright.
+        /// </summary>
+        private static double Bound(double measured) =>
+            measured <= 0.0 ? 0.0 : Math.Min(measured / 4.0, BlackoutProposal.NearSensorFloor);
 
         public void Reset()
         {

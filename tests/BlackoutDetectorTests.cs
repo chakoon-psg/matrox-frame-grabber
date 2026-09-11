@@ -348,7 +348,7 @@ namespace MatroxFrameGrabber.Tests
         /// working panel actually reached, so a level set below it cannot fire on a healthy screen.
         /// </summary>
         [Fact]
-        public void A_run_proposes_half_the_floor_it_measured()
+        public void A_run_proposes_a_quarter_of_the_floor_capped_near_the_sensor()
         {
             var d = new BlackoutDetector(Thresholds());
             long f = 1; double t = 0.0;
@@ -360,9 +360,9 @@ namespace MatroxFrameGrabber.Tests
             BlackoutProposal p = d.Propose();
 
             Assert.Equal(20.0, p.MinLuma, 1);
-            Assert.Equal(10.0, p.SuggestedEnterLuma, 1);
+            Assert.Equal(5.0, p.SuggestedEnterLuma, 1);        // 20/4, under the cap of 10
             Assert.Equal(8.0, p.MaxFlatSpreadAtDarkest, 1);
-            Assert.Equal(4.0, p.SuggestedMaxSpread, 1);
+            Assert.Equal(2.0, p.SuggestedMaxSpread, 1);        // 8/4
         }
 
         /// <summary>
