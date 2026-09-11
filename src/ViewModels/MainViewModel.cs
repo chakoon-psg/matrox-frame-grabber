@@ -310,6 +310,41 @@ namespace MatroxFrameGrabber.ViewModels
 
         private IReadOnlyList<AnomalyKindToggle> _detectionKinds;
 
+        /// <summary>
+        /// What the uncompressed evidence window costs in RAM, at the geometry and rate actually
+        /// being acquired.
+        ///
+        /// Shown because the number is large and nothing else on screen would say so: the ring is
+        /// half again longer than the window it serves - see <see cref="EvidenceRing.FramesFor"/> -
+        /// which at 124.3 fps and 1024x772x3 is 2.68 GB per camera for +-2 s. Four times that at
+        /// decim 1, and a channel that does not fit in free RAM starts without a ring and says so.
+        /// </summary>
+        public string EvidenceCostText
+        {
+            get
+            {
+                double around = Output.EvidenceSeconds;
+                if (around <= 0.0)
+                    return "off - the clip stays H.264 and the four stills are the measurement";
+
+                if (!TryAcquisition(out int w, out int h, out int bands, out double fps))
+                    return "kept in RAM - the cost depends on the acquisition";
+
+                long perFrame = (long)w * h * Math.Max(1, bands);
+                // The event cap counts: the window brackets a fault, and a fault runs to it.
+                double maxEventSec = 0.0;
+                foreach (CameraChannel c in _manager.Channels)
+                    if (c.CameraPresent) { maxEventSec = c.DetectionThresholds.MaxEventFrames / fps; break; }
+                long perChannel = EvidenceRing.BytesFor(around, fps, perFrame, maxEventSec);
+                int cameras = 0;
+                foreach (CameraChannel c in _manager.Channels) if (c.CameraPresent) cameras++;
+                if (cameras < 1) cameras = 1;
+
+                return $"{perChannel / 1e9:F2} GB per camera, {perChannel * cameras / 1e9:F2} GB "
+                     + $"for {cameras} - kept in RAM, allocated when the grab starts";
+            }
+        }
+
         // ----- Local storage: the staging area the mover empties -----
 
         private StorageWarden _warden;

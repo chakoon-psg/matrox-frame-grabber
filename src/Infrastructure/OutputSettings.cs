@@ -34,6 +34,7 @@ namespace MatroxFrameGrabber.Infrastructure
         private double _anomalyClipSeconds = DefaultAnomalyClipSeconds;
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
+        private double _evidenceSeconds = DefaultEvidenceSeconds;
         private bool[] _enabledKinds = AnomalyKindSet.Default();
 
         private string _outputFolder = DefaultFolder;
@@ -193,6 +194,55 @@ namespace MatroxFrameGrabber.Infrastructure
         {
             get => _keepStills;
             set { if (_keepStills != value) { _keepStills = value; RaiseChanged(nameof(KeepStills)); Save(); } }
+        }
+
+        /// <summary>
+        /// Seconds either side of a fault kept as uncompressed evidence. 0 turns it off.
+        ///
+        /// Separate from AnomalyClipSeconds, and smaller, because the two answer different
+        /// questions. The clip is for watching and wants context; this is for measuring and wants
+        /// the fault. Measured events ran 108 to 250 frames - 0.87 to 2.0 s - so two seconds either
+        /// side brackets one comfortably.
+        ///
+        /// The cost is RAM and it is not small. The ring holds the window plus the event cap plus
+        /// room to write in (see EvidenceRing): at 124.3 fps and 1024x772x3 that is 2.69 GB per
+        /// camera for +-2 s, 3.58 GB for +-3 s and 5.36 GB for +-5 s, four times each at decim 1 -
+        /// so +-5 s does not fit three cameras on a 32 GB machine, and HostMemory refuses rather
+        /// than paging beside the acquisition. Off by default for the same reason: a feature that
+        /// quietly takes 8 GB should be asked for.
+        ///
+        /// The seconds do not change the per-frame cost, only the length of the ring, so the limit
+        /// here is RAM and not time: measured 2026-09-11 on three channels over 120 s, +-3 s lost
+        /// 8/7/8 frames of 15100 while writing 13 GB of evidence, and +-2 s lost 5/1/1.
+        /// </summary>
+        public double EvidenceSeconds
+        {
+            get => _evidenceSeconds;
+            set
+            {
+                double v = value <= 0.0 ? 0.0 : (value < 0.5 ? 0.5 : (value > 30.0 ? 30.0 : value));
+                if (Math.Abs(_evidenceSeconds - v) < 1e-9) return;
+                _evidenceSeconds = v;
+                RaiseChanged(nameof(EvidenceSeconds));
+                Save();
+            }
+        }
+
+        /// <summary>Off. It costs gigabytes of RAM and nobody should be surprised by that.</summary>
+        public const double DefaultEvidenceSeconds = 0.0;
+
+        /// <summary>
+        /// Where an anomaly's keepers go - clips, stills and the uncompressed evidence.
+        ///
+        /// Its own folder, like the continuous recording has its own: it is what makes the
+        /// low-space policy structurally unable to touch them, and it gives the mover something to
+        /// ship separately with a different retention.
+        /// </summary>
+        public string EnsureEventFolder()
+        {
+            string path = Path.Combine(EnsureFolder(), "events");
+            Directory.CreateDirectory(path);
+            return path;
         }
 
         /// <summary>
@@ -456,6 +506,7 @@ namespace MatroxFrameGrabber.Infrastructure
             public double? AnomalyClipSeconds { get; set; }
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
+            public double? EvidenceSeconds { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -498,6 +549,9 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
                         s._keepStills = dto.KeepStills ?? true;
+                        double ev = dto.EvidenceSeconds ?? DefaultEvidenceSeconds;
+                        s._evidenceSeconds = ev <= 0.0
+                            ? 0.0 : (ev < 0.5 ? 0.5 : (ev > 30.0 ? 30.0 : ev));
                         s._segmentFolder = string.IsNullOrWhiteSpace(dto.SegmentFolder)
                             ? DefaultSegmentFolder : dto.SegmentFolder;
 
@@ -663,6 +717,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     AnomalyClipSeconds = _anomalyClipSeconds,
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,
+                    EvidenceSeconds = _evidenceSeconds,
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelDetection = _channelDetection
                 };

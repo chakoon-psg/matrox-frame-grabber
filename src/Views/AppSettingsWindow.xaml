@@ -185,7 +185,7 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
                     <TextBox Width="52" VerticalContentAlignment="Center"
                              Text="{Binding Output.AnomalyClipSeconds, UpdateSourceTrigger=LostFocus}"
-                             ToolTip="사건 전후로 남길 초. 0 = 사건 클립 끔&#x0a;링 보존 시간은 여기서 유도됩니다 — 따로 두면 창보다 짧은 링이 만들어져 클립이 조용히 짧아집니다" />
+                             ToolTip="사건 전후로 남길 초. 0 = 사건 클립 끔&#x0a;세그먼트 보존 시간은 여기서 유도됩니다 — 따로 두면 구간보다 짧은 링 버퍼가 만들어져 클립이 조용히 짧아집니다" />
                     <TextBlock Text="s before and after  ·  0 = off"
                                Margin="6,0,0,0" VerticalAlignment="Center"
                                Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
@@ -193,6 +193,24 @@
             </Grid>
             <TextBlock Text="the ring keeps this window plus the event cap and one segment; it runs with the grab, not with Rec"
                        Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,6" TextWrapping="Wrap" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Uncompressed" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="52" VerticalContentAlignment="Center"
+                             Text="{Binding Output.EvidenceSeconds, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="사건 전후로 무압축(무손실)으로 남길 초. 0 = 끔&#x0a;RAM에 담습니다 — 링 버퍼는 저장 구간(전후 + 사건 최대 길이)보다 길어야 해서, ±2초가 카메라당 2.7 GB, ±3초가 3.5 GB입니다&#x0a;실측 사건 길이가 0.87~2.0초라 ±2초면 충분히 감쌉니다" />
+                    <TextBlock Text="s either side  ·  0 = off"
+                               Margin="6,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="{Binding EvidenceCostText}" Margin="0,0,0,6"
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
 
             <Grid Margin="0,0,0,3">
                 <Grid.ColumnDefinitions>
@@ -214,7 +232,7 @@
             <TextBlock Margin="0,0,0,10" TextWrapping="Wrap"
                        Foreground="#5A5A5A" FontSize="10"
                        Text="the clip is always H.264 — it is cut from the rolling ring, and a lossless ring would be 884 MB/s across three channels. The stills are the part that can be measured again."
-                       ToolTip="사건 클립은 세션 녹화 설정을 따르지 않습니다&#x0a;링은 그랩이 도는 동안 계속 쓰이므로 무손실로 돌리면 하루 76 TB — SSD 총 수명이 약 750 TB입니다&#x0a;그래서 클립은 문맥이고, 재측정은 무손실 정지화면으로 합니다" />
+                       ToolTip="사건 클립은 세션 녹화 설정을 따르지 않습니다&#x0a;세그먼트 링 버퍼는 그랩이 도는 동안 계속 쓰이므로 무손실로 돌리면 하루 76 TB — SSD 총 수명이 약 750 TB입니다&#x0a;그래서 클립은 문맥이고, 재측정은 무손실 정지화면으로 합니다" />
 
             <!-- ============ FOLDERS ============ -->
             <TextBlock Text="FOLDERS" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
