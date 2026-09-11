@@ -105,6 +105,7 @@ namespace MatroxFrameGrabber
 
         private const string BayerScopeSwitch = "--bayer-scope";
         private const string DecimSwitch = "--decim";
+        private const string ExposureSwitch = "--exposure";
 
         /// <summary>
         /// Channel indices this process should take a digitizer for, from <c>--channels 0,1</c>.
@@ -125,6 +126,17 @@ namespace MatroxFrameGrabber
 
         /// <summary>Decimation to apply to owned channels at startup, from <c>--decim 1</c>. 0 = leave alone.</summary>
         public static int StartupDecimation { get; private set; }
+
+        /// <summary>
+        /// Exposure in microseconds to put on every owned camera at startup, from
+        /// <c>--exposure 8289</c>. 0 leaves each camera as it is.
+        ///
+        /// One value for all of them, because what this is for is putting the channels on the same
+        /// operating point before measuring a shared resource. The rate cap follows exposure on
+        /// this camera - it is the only lever that moves the rate without touching the payload -
+        /// so this is how a run is pinned to a chosen fps.
+        /// </summary>
+        public static double StartupExposureUs { get; private set; }
 
         /// <summary>True while a PWM sweep is driving the app.</summary>
         public static bool PwmSweeping => !string.IsNullOrEmpty(PwmSweepChannel);
@@ -151,6 +163,9 @@ namespace MatroxFrameGrabber
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,
                          CultureInfo.InvariantCulture, out int decim);
             StartupDecimation = decim;
+            double.TryParse(ParseSwitchValue(e.Args, ExposureSwitch), NumberStyles.Float,
+                            CultureInfo.InvariantCulture, out double expo);
+            StartupExposureUs = expo > 0.0 ? expo : 0.0;
 
             // Processes sharing a board must not share a log file — the log's lock is process-local,
             // so they would interleave and drop each other's lines. Only a split run gets a suffix,

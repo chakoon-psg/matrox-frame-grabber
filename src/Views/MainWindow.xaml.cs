@@ -161,6 +161,17 @@ namespace MatroxFrameGrabber.Views
                 MilErrorLog.Note($"startup decimation {App.StartupDecimation} applied");
             }
 
+            // After decimation, because decimation reallocates and the rate cap is read back
+            // against the geometry that ends up in force.
+            if (App.StartupExposureUs > 0.0 && _viewModel != null)
+            {
+                foreach (CameraChannel c in _viewModel.Channels)
+                    if (c.CameraPresent && !c.SetExposureUs(App.StartupExposureUs))
+                        MilErrorLog.Note($"{c.Name}: startup exposure "
+                                       + $"{App.StartupExposureUs:0} us REFUSED");
+                MilErrorLog.Note($"startup exposure {App.StartupExposureUs:0} us applied");
+            }
+
             if (App.BayerScopeTest)
                 RunBayerScopeTest();
             else if (App.PwmSweeping)
