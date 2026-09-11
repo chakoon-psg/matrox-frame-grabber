@@ -118,7 +118,8 @@ research.md                    src/ 심층 분석
 디스플레이 버퍼 + grab 링 버퍼 + `MdigProcess` 훅을 잡고, GenICam 피처 제어까지 한다.
 이 클래스는 **모델이자 뷰모델**이다(`INotifyPropertyChanged`를 구현하고 `RelayCommand`를
 노출하며 pane의 `DataContext`로 직접 바인딩된다) — 그래서 약 2400줄이다. 검출을 붙이면서
-1400줄에서 늘었고, 그 배선을 `Infrastructure`로 내리는 것이 다음 정리 대상이다.
+1400줄에서 늘었고, **MIL과 검출·녹화를 잇는 코드를 `Infrastructure`로 내리는 것**이 다음 정리
+대상이다.
 `MilApplicationManager`는 공유 앱·시스템을 소유하고 채널마다 `CameraChannel`을 하나씩 만든다.
 
 ## 녹화
@@ -198,7 +199,7 @@ research.md                    src/ 심층 분석
 정전 내성이 사라졌다 — 설정 둘이 서로를 덮는 구조였다.
 
 **능력은 남아 있다.** `VideoEncoding`(`H264` / `Lossless` / `Uncompressed`)과 출력별 인코딩
-배선은 그대로이고, **사건 증거가 그것을 쓴다** — 그쪽은 선택이 아니라 설계상 비트 정확이다.
+출력별로 인코딩을 고르는 구조도 그대로이고, **사건 증거가 그것을 쓴다** — 그쪽은 선택이 아니라 설계상 비트 정확이다.
 실측: utvideo는 무압축과 픽셀이 같으면서 3.2~4.2배 작고 더 느리지도 않다(1089 대 1416 fps).
 컨테이너 함정은 `VideoEncoding.cs`에 적어 두었다(특히 **큰 raw AVI는 기본 probe가 120 fps로
 읽어 3.4%를 잃는다** — 그래서 무압축은 `.mov`다).
