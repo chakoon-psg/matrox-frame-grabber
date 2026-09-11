@@ -92,14 +92,15 @@ src/
                                  AnomalyDetector, BrightnessLog, MilErrorLog
     Detection/                   AnomalyKind(+Catalog), AnomalyKindSet,
                                  DetectionSettings(+KindSettings),
-                                 AnomalyClipPolicy(+ClipScheduler)
+                                 AnomalyClipPolicy(+ClipScheduler),
+                                 IScreenInspector(+Null), ScreenFinding, BgrLetterbox
     Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
     Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
                                  VideoEncoding(+VideoCodecs+VideoContainer),
                                  VideoSinkPolicy, RecordingRecord, SharedFramePool,
                                  StoragePolicy(+StorageWarden), EvidenceRing, EvidenceGate,
                                  SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (453개). csproj가 `Infrastructure/**`를
+tests/                         MatroxFrameGrabber.Tests (473개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -528,6 +529,7 @@ memcpy는 공짜이고, 비용은 **덤프가 쉬지 않고 도는 상태**(30�
 
 ADR 둘:
 - `0001-ffmpeg-for-all-encoding.md` — 인코딩은 전부 ffmpeg, MIL 압축 라이선스는 쓰지 않는다.
-- `0002-onnx-classifier-as-a-removable-slice.md` — 학습 검출기(ONNX)를 붙일 자리와 **빼는 비용**.
+- `0002-screen-inspector-as-a-removable-slice.md` — 학습 검출기(ONNX)를 붙일 자리와 **빼는 비용**.
   매 프레임이 아니라 `StillRing`의 사건당 네 장에 붙이고, OpenCV(93.7 MB)와 ClosedXML(8.8 MB)은
-  가져오지 않는다. 아직 들어간 코드는 없다.
+  가져오지 않는다. **계약과 `BgrLetterbox`만 들어가 있고 ONNX는 아직 없다** — 모델이 생기면
+  꽂고, 참조 한 줄을 지우면 빠진다. 이름을 우리 쪽으로 다시 잡은 표가 그 안에 있다.

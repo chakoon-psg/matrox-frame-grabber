@@ -73,20 +73,57 @@ cs는 세션 끝에 xlsx 일괄 저장이고, 문서 §7.1이 실측했다: 행�
 *무엇이* 화면에 있는지를 사건당 한 번 말한다.** 지금 미구현으로 비활성인 Blackout / Washout /
 Flip이 바로 "무엇인지"를 요구하는 종류다.
 
+## 이름 — cs에서 우리 쪽으로
+
+가져오는 것마다 이름을 다시 잡았다. 하나는 **충돌**이고 나머지는 **우리 어휘로 옮긴 것**이다.
+
+| cs | 우리 | 왜 |
+|---|---|---|
+| `Detection` (구조체: 박스+점수) | **`ScreenFinding`** | 🔴 **정면 충돌.** 이 글로서리에서 `Detection`은 "이상이 확정되는 **사건**" — 타임라인 위의 한 시점이다. cs의 것은 그림 위의 사각형이다. 그대로 뒀으면 한 단어에 두 뜻이 앉는다 |
+| `GreenDetector` (클래스) | **`IScreenInspector`** + `OnnxScreenInspector` | 이름에 검출 대상("green")이 박혀 있어 모델을 바꾸면 거짓말이 된다. 그리고 `Detector`는 `AnomalyDetector`가 이미 쓰고 있어 "타일 검출기 / 학습 검출기"가 코드에서 구분되지 않는다 |
+| — | **`NullScreenInspector`** | cs에는 없던 것. 제거 비용을 0으로 만드는 조각이다 |
+| `GreenDetector.Preprocess` | **`BgrLetterbox`** | 클래스로 꺼냈다. OpenCV가 쓰이던 유일한 자리이자, 좌표를 되돌리는 매핑을 들고 있어야 할 자리다 |
+| `GreenDetector.Candidate` | **`PeakCandidate`** | `Candidate`만으로는 무엇의 후보인지 말하지 않는다. 히트맵 피크의 후보다 |
+| `GreenDetector.CandidateComparer` | **`PeakByScore`** | 비교자 이름이 정렬 기준을 말하게 |
+| `GreenDetector.Decode` + `ApplyNms` | **`CenterNetDecoder`** | 별도 클래스로 꺼내 `Infrastructure/`에 둔다. ONNX 타입이 없는 순수 산술이라 **테스트된다** — cs에서는 350줄이 세션 옆에 붙어 테스트 불가였다 |
+| `GreenDetector.Benchmark` | **하니스 명령으로** | 매 실행 13초를 쓰던 것이 앱의 일이 아니다 |
+| `LatestCamera` | **삭제** | `CameraChannel` + `FrameExtractor` + `SharedFramePool` |
+| `DetectionRow` | **삭제** | `RecordingRecord`의 필드로 |
+| `DetectionExcelWriter` | **삭제** | 사이드카 JSON |
+| `GreenCpuDetector` (네임스페이스) | **`MatroxFrameGrabber.Infrastructure`** / `.Onnx` | 계약은 기존 네임스페이스에, 구현만 분리 |
+
+세 낱말을 `CONTEXT.md`에 등록했다 — **Screen inspection**(판독), **Screen finding**(판독 결과),
+**Screen inspector**(판독기). `_피할 말_`까지 같이 적었고, 그중 첫 줄이 "Detection이라 부르지
+않는다"이다.
+
 ## 계약
 
 `Infrastructure/Detection/`에 둔다. ONNX도 OpenCV도 MIL도 이름이 나오지 않으므로 테스트된다.
 
-```
-IFrameClassifier          Describe / InputWidth / InputHeight / Classify(byte[] bgr, ...)
-ClassifierHit             kind, score, box — Detection 구조체의 우리 이름
-NullFrameClassifier       언제나 0건. 모델이 없을 때의 기본값
-ClassifierFactory         시작할 때 고르고 그 이유를 로그에 남긴다 (VideoSinkFactory와 같은 규약)
-BgrLetterbox              플래나 gbrp → 인터리브 BGR + 축소 + 레터박스. 순수 산술, 테스트됨
-```
+| 있음 | 무엇 |
+|---|---|
+| ✅ `ScreenFinding` | `AnomalyKind` + 점수 + 사각형. `Right`/`Bottom`/`Area` |
+| ✅ `IScreenInspector` | `Describe` / `InputWidth` / `InputHeight` / `Reports` / `Inspect(byte[] bgr, Span<ScreenFinding>)` |
+| ✅ `NullScreenInspector` | 언제나 0건. 모델이 없을 때의 기본값 |
+| ✅ `BgrLetterbox` | 플래나 gbrp → 인터리브 BGR + 축소 + 레터박스 + 역매핑. 순수 산술, 테스트 15개 |
+| ⬜ `CenterNetDecoder` | 히트맵 → 후보 → NMS. 다음 포팅 대상 |
+| ⬜ `ScreenInspectorFactory` | 시작할 때 고르고 이유를 로그에 (VideoSinkFactory와 같은 규약) |
+| ⬜ `OnnxScreenInspector` | `src/Onnx/`. ORT 세션과 버퍼만 |
+
+**계약이 `AnomalyKind`만 말한다.** 모델이 자기 클래스를 갖고 있으면 인스펙터 안에서 우리 종류로
+옮기거나 보고하지 않는다. 앱에는 "화면이 어떻게 잘못될 수 있는가"에 대한 어휘가 하나뿐이고,
+설정 창이 그 목록이며, 다른 이름으로 올라온 판독 결과는 **끌 수도 보고할 수도 DUT에 걸 수도
+없다.**
 
 구현은 **별도 어셈블리** `src/Onnx/`에 두고 `ProjectReference`로만 연결한다. 본체는 ONNX 타입을
 한 번도 이름으로 부르지 않는다 — 부르는 순간 제거 비용이 올라간다.
+
+### 구현하면서 실제로 나온 것
+
+`BgrLetterbox`를 쓰면서 테스트가 버그 하나를 잡았다. 역변환이 **공칭 배율**(0.3125)로 나누고
+있었는데, 실제 샘플링은 **축별 비율**(241/772 = 0.31218)로 한다 — 축소 크기가 정수라서 갈린다.
+프레임 아래쪽 끝이 772가 아니라 771.2로 돌아왔고, 모든 좌표가 최대 1.2 px 어긋났다. 좌표를
+산출물로 내놓는 기능에서 조용히 틀리는 종류의 오차다. `ScaleX` / `ScaleY`로 갈라 고쳤다.
 
 ## 비용 — 이것이 이 문서의 요점이다
 
@@ -95,14 +132,14 @@ BgrLetterbox              플래나 gbrp → 인터리브 BGR + 축소 + 레터�
 **제거:** 세 가지뿐이다.
 1. `MatroxFrameGrabber.csproj`에서 `<ProjectReference Include="..\Onnx\..." />` 한 줄 삭제
 2. `src/Onnx/` 폴더 삭제
-3. `ClassifierFactory`가 `NullFrameClassifier`를 돌려준다 — **코드 변경 없음.** 이미 그것이
-   모델을 못 찾았을 때의 동작이다
+3. `ScreenInspectorFactory`가 `NullScreenInspector`를 돌려준다 — **코드 변경 없음.** 이미
+   그것이 모델을 못 찾았을 때의 동작이다
 
 `Infrastructure/`의 계약과 `BgrLetterbox`는 남아도 MIL-free 순수 코드 몇 백 줄이고 테스트가
 붙어 있다. 남겨도 비용이 없고 지워도 된다.
 
 **끄기(제거가 아니라):** 모델 파일이 없으면 그걸로 끝이다. 팩토리가 이유를 로그에 남기고
-`NullFrameClassifier`로 간다. `MilSeqVideoSink`가 "이 장비에서 한 번도 실행된 적 없는 골격"으로
+`NullScreenInspector`로 간다. `MilSeqVideoSink`가 "이 장비에서 한 번도 실행된 적 없는 골격"으로
 존재하면서 아무 비용도 내지 않는 것과 같은 구조다.
 
 ## 가져오면서 고치는 것
@@ -129,7 +166,7 @@ cs 문서가 짚었고 우리가 그대로 옮기면 안 되는 것들.
 ## 먼저 하니스, 나중에 통합
 
 `tools/MilVideoSink/`가 선례다 — 도메인 로직 0의 독립 하네스를 먼저 만들고 거기서 개발·계측한
-뒤에 앱에 붙였다. 같은 순서로 간다: `tools/OnnxClassifier/`가 모델 파일과 PNG 몇 장을 받아
+뒤에 앱에 붙였다. 같은 순서로 간다: `tools/OnnxInspector/`가 모델 파일과 PNG 몇 장을 받아
 판정과 시간을 찍는다. 앱이 없어도 돌고, 붙이기 전에 우리 머신에서의 `IntraOpNumThreads`와
 실제 프레임에서의 정확도를 여기서 정한다.
 
