@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Matrox.MatroxImagingLibrary;
 using MatroxFrameGrabber.Infrastructure;
+using MatroxFrameGrabber.Mil.Video;
 
 namespace MatroxFrameGrabber.Mil
 {
@@ -143,21 +144,14 @@ namespace MatroxFrameGrabber.Mil
         private string _blueRatioInput = "";
         private string _cameraInfo = "";
 
-        // Output naming + recording (delegated to RecordingSession).
+        // Output naming + recording (delegated to an IVideoSink).
         private string _outputName;
-        private RecordingSession _recording;
+        private IVideoSink _recording;
+        private FfmpegVideoSink _ffmpegSink;   // the same object when ffmpeg is the backend, for its status line
+        private StillRing _stills;
+        private long _stillProbeKept;
+        private bool _stillsExported;
 
-        // Continuous, segmented lossless RAW-Bayer recording (band=1 scratch segments → ffmpeg → MP4).
-        private const int RAW_GRAB_BUFFERS = 24;     // deep ring; band=1 frames are ~3x smaller
-        private const int RAW_DISPLAY_EVERY = 6;     // grayscale preview ~30fps at 184fps
-        private volatile RawSegmentSession _rawSegments;   // active recording (hook writes to it), or null
-        private RawSegmentSession _rawFinishing;           // stopped, still transcoding in background
-        private bool _rawRecording;
-        private bool _rawResumeGrab;
-        private bool _rawConverting;
-        private int _rawW, _rawH, _rawDisplayCounter;
-        private long _rawMissed;
-        private DateTime _rawStartTime;
         private long _framesMissed;
         private long _missedAtGrabStart;   // cumulative counter when this grab started
 
@@ -190,9 +184,8 @@ namespace MatroxFrameGrabber.Mil
             _index = index;
             _outputName = $"Camera {_index}";
 
-            // StartGrab throws on MIL failure (StartRawRecording relies on that to restore the
-            // board), so the command binds to the non-throwing wrapper instead — an unhandled
-            // MILException on the UI thread would take the app down.
+            // StartGrab throws on MIL failure, so the command binds to the non-throwing wrapper
+            // instead — an unhandled MILException on the UI thread would take the app down.
             // Start is pointless while already grabbing and Stop while stopped — and the buttons
             // must track that, because Start/Stop All changes it without touching the pane.
             StartCommand = new RelayCommand(() => TryStartGrab(), () => CameraPresent && !IsGrabbing);
@@ -228,22 +221,16 @@ namespace MatroxFrameGrabber.Mil
 
         public MIL_ID DisplayId => _dispId;
 
-        /// <summary>True while EITHER a color or a RAW recording is active (drives the pane banner).</summary>
-        public bool RecordingActive => _rawRecording || IsRecording;
+        /// <summary>True while a recording is active (drives the pane banner).</summary>
+        public bool RecordingActive => IsRecording;
 
         /// <summary>Prominent banner text shown over the live view while recording (mode + timer + missed/drops).</summary>
         public string RecordingBannerText
         {
             get
             {
-                if (_rawRecording && _rawSegments != null)
-                {
-                    var t = DateTime.Now - _rawStartTime;
-                    string missed = _rawMissed > 0 ? $"     ⚠ missed {_rawMissed}" : "";
-                    return $"◆ RAW 무손실 녹화 중 — 프리뷰는 흑백입니다     seg {_rawSegments.SegmentIndex} · 총 {(int)t.TotalMinutes:00}:{t.Seconds:00}{missed}";
-                }
                 if (IsRecording)
-                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_recording?.StatusSuffix()}";
+                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_ffmpegSink?.StatusSuffix()}";
                 return "";
             }
         }
@@ -602,6 +589,13 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Last recording error surfaced to the UI (null if none).</summary>
         public string LastRecordError => _recording?.LastError;
 
+        /// <summary>Path of the file being written, or the last one written. Null before the first.</summary>
+        public string RecordingFilePath =>
+            _recording != null && _recording.FilePaths.Count > 0 ? _recording.FilePaths[0] : null;
+
+        /// <summary>What is doing the encoding, or why nothing can. Shown on the Rec button.</summary>
+        public string RecordBackend { get; private set; } = "not probed";
+
         /// <summary>Whether recording is possible (ffmpeg available).</summary>
         public bool CanRecord { get; private set; }
 
@@ -622,13 +616,7 @@ namespace MatroxFrameGrabber.Mil
                     return "No camera";
                 if (_cameraLost)
                     return "⚠ Camera disconnected — press Stop";
-                if (_rawRecording)
-                    return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
-                         + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
-                         + RawStatusSuffix();
-                if (_rawConverting)
-                    return "Converting raw → MP4…";
-                string rec = _recording?.StatusSuffix() ?? "";
+                string rec = _ffmpegSink?.StatusSuffix() ?? "";
                 if (_isGrabbing)
                     return $"Grabbing  {FrameRate:F1} fps  ({FrameCount} frames)"
                          + (_framesMissed > 0 ? $"  ⚠ {_framesMissed} missed" : "")
@@ -845,7 +833,12 @@ namespace MatroxFrameGrabber.Mil
             MIL.MdispAlloc(_sysId, MIL.M_DEFAULT, "M_DEFAULT", MIL.M_WPF, ref _dispId);
             MIL.MdispControl(_dispId, MIL.M_TITLE, Name);
             MIL.MgraAlloc(_sysId, ref _graId);
-            _recording = new RecordingSession(_sysId);
+            // Which backend is decided here, once, and reported. Nothing downstream knows or
+            // cares which one it got.
+            _recording = VideoSinkFactory.Create(_sysId, Output, Output?.VideoSink ?? VideoSinkPreference.Auto,
+                                                 out string backend);
+            _ffmpegSink = _recording as FfmpegVideoSink;
+            RecordBackend = backend;
 
             AllocateCamera();
 
@@ -907,8 +900,16 @@ namespace MatroxFrameGrabber.Mil
                     try { MIL.MdigControl(_digId, MIL.M_BAYER_CONVERSION, MIL.M_ENABLE); }
                     catch (MILException e) { MilErrorLog.Write($"{Name}: re-assert M_BAYER_CONVERSION", e); }
 
-                    // Recording is done by piping frames to ffmpeg. Enable Rec only if ffmpeg is found.
-                    CanRecord = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath) != null;
+                    // Enable Rec only if something can encode, and keep the reason: a greyed-out
+                    // button with nothing to read was the old behaviour.
+                    CanRecord = VideoSinkFactory.CanRecord(Output,
+                                                           Output?.VideoSink ?? VideoSinkPreference.Auto,
+                                                           out string why);
+                    RecordBackend = why;
+                    RaisePropertyChanged(nameof(RecordBackend));
+                    // Written down because the alternative is a greyed-out Rec button and a guess.
+                    MilErrorLog.Note($"{Name}: recording {(CanRecord ? "via " : "unavailable - ")}{why}"
+                                   + $" (preference {Output?.VideoSink ?? VideoSinkPreference.Auto})");
                     RaisePropertyChanged(nameof(CanRecord));
 
                     // Decimation before AllocateBuffers: the buffer sizes come from
@@ -1046,14 +1047,8 @@ namespace MatroxFrameGrabber.Mil
             _reducer.Bind(_grabBuffers);
         }
 
-        /// <summary>
-        /// Frees the grab ring + display buffer, keeping the digitizer and display alive.
-        /// <paramref name="resetBrightness"/> is false only for the RAW-recording transition
-        /// (start and restore), where the whole point of choosing Rec.601 was a graph that stays
-        /// continuous across the color/Bayer switch. Every other caller (camera free, DCF reload)
-        /// keeps the default, since the display genuinely goes blank there.
-        /// </summary>
-        private void FreeBuffers(bool resetBrightness = true)
+        /// <summary>Frees the grab ring + display buffer, keeping the digitizer and display alive.</summary>
+        private void FreeBuffers()
         {
             // Before the ring, not after: a band child outliving its parent is a failure this
             // codebase already documents.
@@ -1069,8 +1064,7 @@ namespace MatroxFrameGrabber.Mil
             if (_dispId != MIL.M_NULL)
                 MIL.MdispSelect(_dispId, MIL.M_NULL);
 
-            if (resetBrightness)
-                _brightness.Reset();
+            _brightness.Reset();
 
             if (_dispBufId != MIL.M_NULL)
             {
@@ -1082,18 +1076,16 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Frees the digitizer, grab buffers, and display buffer (keeps the display).</summary>
         private void FreeCamera()
         {
-            // Stop any raw capture first so the board's Bayer conversion is restored to color
-            // (it's a persistent setting) and the current segment is flushed before we free MIL.
-            if (_rawRecording)
-                StopRawRecording();
-            // Give in-flight segment conversions a bounded chance to finish on shutdown (unconverted
-            // .raw segments are otherwise left in the scratch folder as a lossless fallback).
-            if (_rawFinishing != null) { try { _rawFinishing.WaitConversions(15000); } catch { } }
-
             StopGrab();   // also stops recording (kicks off async finalize)
 
-            // Wait for any in-flight recording finalize before freeing MIL buffers/system.
+            // Wait for any in-flight recording finalize before freeing MIL buffers/system:
+            // finalization touches the sink's MIL buffers.
             _recording?.WaitFinalize(15000);
+            _recording?.Dispose();
+            _recording = null;
+            _ffmpegSink = null;
+            _stills?.Free();
+            _stills = null;
 
             FreeBuffers();
 
@@ -1176,6 +1168,17 @@ namespace MatroxFrameGrabber.Mil
             // A fresh detector per run. Carrying a baseline across a stop would judge the opening
             // frames of the new run against the light of the old one, and the exposure or the
             // region may well have changed in between -- during the exposure scan both did.
+            if (App.StillProbe && _stills == null && _dispBufId != MIL.M_NULL)
+            {
+                var ring = new StillRing();
+                if (ring.Allocate(_sysId, _dispBufId, out string stillErr))
+                    _stills = ring;
+                else
+                    MilErrorLog.Note($"{Name}: still buffers not allocated - {stillErr}");
+            }
+            _stillProbeKept = 0;
+            _stillsExported = false;
+
             _detector = new AnomalyDetector(DetectionThresholds);
             _reducer.ResetCost();
             _history.Clear();
@@ -1196,8 +1199,8 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>
         /// Starts acquisition without throwing: a MIL failure is reported through
         /// <see cref="GrabFailed"/> and returned as false. Use this from UI/bulk callers —
-        /// <see cref="StartGrab"/> itself still throws, because <see cref="StartRawRecording"/>
-        /// depends on catching that to put the board back into colour mode.
+        /// <see cref="StartGrab"/> itself still throws, so a caller that needs to undo something
+        /// on failure can still catch it.
         /// </summary>
         public bool TryStartGrab()
         {
@@ -1245,6 +1248,15 @@ namespace MatroxFrameGrabber.Mil
             AnomalyEvent? tail = _detector?.Flush();
             if (tail.HasValue)
                 RecordAnomaly(tail.Value);
+
+            if (_stills != null && _stills.IsAllocated)
+            {
+                MilErrorLog.Note($"{Name}: stills - {_stills.Copies} kept, "
+                               + $"copy mean {_stills.MeanCopyUs:F0} us / max {_stills.MaxCopyUs:F0} us "
+                               + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period; "
+                               + $"{_stills.Exports} PNG written, "
+                               + $"max {_stills.MaxExportMs:F1} ms, total {_stills.ExportMsSum:F1} ms");
+            }
 
             // Before releasing it: LogGrabSummary reads these, and a detector that is gone reports
             // nothing rather than what it found.
@@ -1311,8 +1323,15 @@ namespace MatroxFrameGrabber.Mil
                 catch (MILException e) { MilErrorLog.Write($"{Name}: read missed-frame counter", e); }
                 // This run's losses, not the digitizer's lifetime total (see StartGrab).
                 _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
-                if (_rawRecording)
-                    _rawMissed = _framesMissed;   // same number the status line shows
+
+                StillRing stills = _stills;
+                if (stills != null && !_stillsExported && _stillProbeKept >= 4 && Output != null)
+                {
+                    _stillsExported = true;
+                    int n = stills.ExportAll(Output.EnsureFolder(), SafeName(), out string sErr);
+                    MilErrorLog.Note($"{Name}: stills exported - {n} files"
+                                   + (sErr != null ? $", error: {sErr}" : string.Empty));
+                }
 
                 // Anomalies are surfaced here rather than from the hook: a handler running on the
                 // acquisition thread would put the grab behind whatever it decides to do, and the
@@ -1382,26 +1401,6 @@ namespace MatroxFrameGrabber.Mil
                 RecordingFailed?.Invoke(this, err ?? "Recording stopped unexpectedly.");
             }
 
-            // A RAW segment writer/convert died (disk full, NAS error, ffmpeg fail) mid-recording —
-            // stop now; the finish-polling below then surfaces the error to the UI.
-            if (_rawRecording && _rawSegments != null && _rawSegments.Failed)
-                StopRawRecording();
-
-            // Poll a stopped session's background segment conversions; surface the result once done.
-            if (_rawFinishing != null && _rawFinishing.WaitConversions(0))
-            {
-                RawSegmentSession s = _rawFinishing;
-                _rawFinishing = null;
-                _rawConverting = false;
-                bool ok = !s.Failed;
-                string msg = ok
-                    ? $"{s.SegmentsCompleted}개 세그먼트 저장 완료 → {Output?.OutputFolder}"
-                    : ("일부 세그먼트 변환/저장 오류: " + (s.LastError ?? "unknown"));
-                s.Dispose();
-                RaisePropertyChanged(nameof(StatusText));
-                RawRecordingFinished?.Invoke(this, ok, msg);
-            }
-
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
             RaisePropertyChanged(nameof(FramesMissed));
@@ -1446,32 +1445,14 @@ namespace MatroxFrameGrabber.Mil
         private void OnGrabbedFrame(MIL_ID grabbedBuffer, MIL_ID displayBuffer,
                                     long frameNumber, double timeStampSec)
         {
-            // Detection first, and in both modes. It reads about 150 kB of the region where RAW
-            // writes 1.6 MB of the whole frame, so it is the cheaper half of either path -- and a
-            // RAW recording is exactly when a fault most needs to be on record.
+            // Detection first: it reads about 150 kB of the region, which is small beside the
+            // 2.3 MB display copy below.
             RunDetection(grabbedBuffer, frameNumber, timeStampSec);
-
-            // ---- Lossless RAW capture: write EVERY frame to the current segment; grayscale preview ----
-            RawSegmentSession seg = _rawSegments;
-            if (seg != null)
-            {
-                byte[] buf = seg.Rent();             // rolls to a new segment if the current one is full
-                // MbufGet2d copies the logical W×H region PACKED. MbufGet would copy the row-padded
-                // buffer (pitch 2112 > width 2064), shearing the raw when read back as tight 2064 rows.
-                MIL.MbufGet2d(grabbedBuffer, 0, 0, _rawW, _rawH, buf);
-                seg.Feed(buf);
-                if (++_rawDisplayCounter >= RAW_DISPLAY_EVERY)
-                {
-                    _rawDisplayCounter = 0;
-                    MIL.MbufCopy(grabbedBuffer, displayBuffer);   // band1 → band1 (grayscale)
-                }
-                return;
-            }
 
             // ---- Per-frame processing / display update ----
             // The display copy is 2.3 MB (cropped colour) and triggers a UI-thread update, so it
             // runs at DisplayUpdateFps rather than every frame. Recording is unaffected:
-            // RecordingSession.Feed works from the grab buffer, never the display buffer.
+            // the sink is fed from the grab buffer, never the display buffer.
             int dispFps = Output?.DisplayUpdateFps ?? 0;
             bool copyToDisplay = true;
             if (dispFps > 0)
@@ -1486,8 +1467,17 @@ namespace MatroxFrameGrabber.Mil
             if (copyToDisplay)
                 MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
-            // ---- Recording feed (RecordingSession guards start/stop vs feed internally) ----
-            _recording?.Feed(grabbedBuffer);
+            // ---- Lossless stills (probe: rotate every slot rather than wait for an event) ----
+            StillRing stills = _stills;
+            if (stills != null && frameNumber % StillRing.ReferenceEveryFrames == 0)
+            {
+                stills.Keep((StillRing.Slot)(_stillProbeKept % 4), grabbedBuffer,
+                            frameNumber, timeStampSec, 0.0);
+                _stillProbeKept++;
+            }
+
+            // ---- Recording feed (the sink guards start/stop vs feed internally) ----
+            _recording?.Feed(grabbedBuffer, frameNumber);
         }
 
         /// <summary>
@@ -1735,7 +1725,7 @@ namespace MatroxFrameGrabber.Mil
 
         #endregion
 
-        #region Recording (delegated to RecordingSession)
+        #region Recording (delegated to an IVideoSink)
 
         /// <summary>
         /// Starts recording this camera to {OutputName}_{timestamp}.mp4 in the output folder,
@@ -1743,10 +1733,22 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         public bool StartRecording()
         {
-            if (!CameraPresent || _recording == null || _rawRecording)
+            if (!CameraPresent || _recording == null)
                 return false;
-            double fps = _frameRate > 1.0 ? _frameRate : InquireNominalFps();
-            bool ok = _recording.Start(_dispBufId, Output, SafeName(), fps, out _);
+            // The camera's own answer first. The measured rate does not exist yet - RefreshStats
+            // fills _frameRate on the stats tick, up to 500 ms from now, and never clears it between
+            // runs, so it is either zero or the last run's. And M_SELECTED_FRAME_RATE reports the
+            // configured AcquisitionFrameRate (184 on this camera), not what the exposure allows
+            // (124.3 at 8000 us) - a header written from it made a 120.0 s recording read as 81.07 s
+            // and play 1.48x too fast, with every frame present. Measured 2026-09-10.
+            double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
+                       ? resulting
+                       : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
+            var spec = new VideoStreamSpec(
+                _dispBufId, fps, Output.EnsureFolder(), SafeName(),
+                Output.ScaleFactorFor(MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL)),
+                new[] { VideoOutputSpec.SingleFile() });
+            bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
@@ -1779,14 +1781,9 @@ namespace MatroxFrameGrabber.Mil
 
         #endregion
 
-        #region Lossless RAW-Bayer recording
+        #region Board Bayer conversion
 
-        /// <summary>True while a lossless raw-Bayer capture is in progress.</summary>
-        public bool IsRawRecording => _rawRecording;
 
-        /// <summary>Raised (on the UI thread, via RefreshStats) when a raw recording's MP4 conversion
-        /// finishes; ok=false carries an error message.</summary>
-        public event Action<CameraChannel, bool, string> RawRecordingFinished;
 
         /// <summary>
         /// Reads back the board's Bayer conversion state for this channel, as "on"/"off", or "?"
@@ -1821,163 +1818,10 @@ namespace MatroxFrameGrabber.Mil
             catch (MILException) { return false; }
         }
 
-        /// <summary>
-        /// Starts a continuous lossless capture: disables hardware Bayer conversion (raw band=1), grabs
-        /// every frame with a deep DMA ring, and writes rolling N-second RAW segments to the local
-        /// scratch folder — each of which a background thread transcodes to a color MP4 in the output
-        /// folder (then deletes the .raw). Shows a throttled grayscale preview. Runs until
-        /// <see cref="StopRawRecording"/>.
-        /// </summary>
-        public bool StartRawRecording(out string error)
-        {
-            error = null;
-            if (_digId == MIL.M_NULL) { error = "No camera."; return false; }
-            if (_rawRecording) return true;
-            if (IsRecording) { error = "Stop the color recording first."; return false; }
-            if (!CanRecord) { error = "ffmpeg was not found (needed to convert the recording)."; return false; }
 
-            string outDir, scratch;
-            try { outDir = Output?.EnsureFolder(); scratch = Output?.EnsureScratchFolder(); }
-            catch (Exception e) { error = "Output folder error: " + e.Message; return false; }
-            if (string.IsNullOrEmpty(outDir) || string.IsNullOrEmpty(scratch)) { error = "No output folder set."; return false; }
-            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output?.FfmpegPath);
-            if (ffmpeg == null) { error = "ffmpeg was not found."; return false; }
 
-            _rawResumeGrab = _isGrabbing;
-            if (_isGrabbing) StopGrab();
 
-            // Everything below mutates the board (Bayer OFF), buffers, and the session. Any failure
-            // here — especially a MILException from StartGrab — must NOT leave the board in raw mode
-            // or leak the session, so the whole sequence is guarded and restores color on fault.
-            try
-            {
-                SetBayerConversion(false);          // board sends raw Bayer band=1 (~3x smaller)
-                FreeBuffers(resetBrightness: false); // keep the graph continuous across the color/Bayer switch
-                AllocateBuffers(RAW_GRAB_BUFFERS);  // band=1 display + deep band=1 grab ring
 
-                _rawW = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_X, MIL.M_NULL);
-                _rawH = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_Y, MIL.M_NULL);
-                int band = (int)MIL.MdigInquire(_digId, MIL.M_SIZE_BAND, MIL.M_NULL);
-
-                if (band != 1)
-                {
-                    // Camera has no Bayer filter (mono) or the board ignored the request — abort safely.
-                    error = "This camera does not support raw Bayer (band=1) capture.";
-                    RestoreColorAfterRaw();
-                    return false;
-                }
-
-                int segSecs = Output?.RawSegmentSeconds ?? 60;
-                _rawSegments = new RawSegmentSession(ffmpeg, scratch, outDir, SafeName(),
-                    _rawW, _rawH, _rawW * _rawH * band, segSecs, InquireBayerPixelFormat());
-                _rawDisplayCounter = 0;
-                _rawMissed = 0;
-                _rawStartTime = DateTime.Now;
-                _rawRecording = true;
-                StartGrab();
-            }
-            catch (Exception e)
-            {
-                error = "Failed to start RAW recording: " + e.Message;
-                var s = _rawSegments;
-                _rawSegments = null;
-                _rawRecording = false;
-                if (s != null) { try { s.Finish(); s.WaitConversions(2000); s.Dispose(); } catch { } }
-                RestoreColorAfterRaw();   // guarantees Bayer conversion is turned back ON
-                return false;
-            }
-
-            RaisePropertyChanged(nameof(IsRawRecording));
-            RaisePropertyChanged(nameof(StatusText));
-            RaisePropertyChanged(nameof(RecordingActive));
-            RaisePropertyChanged(nameof(RecordingBannerText));
-            return true;
-        }
-
-        /// <summary>
-        /// Stops the capture and restores color grabbing. The final segment plus any still-pending
-        /// segments keep transcoding on the session's background thread; RefreshStats surfaces the
-        /// result via <see cref="RawRecordingFinished"/> once they finish.
-        /// </summary>
-        public void StopRawRecording()
-        {
-            if (!_rawRecording)
-                return;
-
-            if (_isGrabbing) StopGrab();   // stops the hook; safe to finalize the session
-
-            RawSegmentSession s = _rawSegments;
-            _rawSegments = null;
-            _rawRecording = false;
-
-            if (s != null)
-            {
-                s.Finish();            // finalize the current segment; conversions continue in background
-                _rawFinishing = s;     // RefreshStats polls this to surface completion/errors
-                _rawConverting = true;
-            }
-
-            RestoreColorAfterRaw();
-            RaisePropertyChanged(nameof(StatusText));
-        }
-
-        /// <summary>Re-enables color Bayer conversion, restores normal buffers, and resumes grabbing.</summary>
-        private void RestoreColorAfterRaw()
-        {
-            _rawSegments = null;
-            _rawRecording = false;
-            SetBayerConversion(true);   // critical: do this FIRST so color is restored even if the rest faults
-            FreeBuffers(resetBrightness: false); // keep the graph continuous across the color/Bayer switch
-            AllocateBuffers(REQUESTED_GRAB_BUFFERS);
-            if (_rawResumeGrab) TryStartGrab();   // reports rather than silently swallowing
-            RaisePropertyChanged(nameof(IsRawRecording));
-            RaisePropertyChanged(nameof(StatusText));
-            RaisePropertyChanged(nameof(RecordingActive));
-            RaisePropertyChanged(nameof(RecordingBannerText));
-        }
-
-        /// <summary>
-        /// Maps the digitizer's Bayer mosaic to the matching ffmpeg raw pixel format. MIL names a
-        /// pattern by the first two pixels of the first line (M_BAYER_GR = G,R -> GRBG), which is
-        /// exactly what ffmpeg's bayer_*8 names encode. Falls back to bayer_rggb8 — the previous
-        /// hard-coded value — if the digitizer doesn't report a pattern.
-        /// </summary>
-        private string InquireBayerPixelFormat()
-        {
-            const string fallback = "bayer_rggb8";
-            if (_digId == MIL.M_NULL)
-                return fallback;
-
-            // Cameras without a mosaic have no such setting.
-            try
-            {
-                MIL_INT pattern = MIL.MdigInquire(_digId, MIL.M_BAYER_PATTERN, MIL.M_NULL);
-                long masked = (long)pattern & MIL.M_BAYER_MASK;   // strip unrelated flag bits
-                if (masked == MIL.M_BAYER_RG) return "bayer_rggb8";
-                if (masked == MIL.M_BAYER_GR) return "bayer_grbg8";
-                if (masked == MIL.M_BAYER_BG) return "bayer_bggr8";
-                if (masked == MIL.M_BAYER_GB) return "bayer_gbrg8";
-                return fallback;
-            }
-            catch (MILException)
-            {
-                return fallback;
-            }
-        }
-
-        private string RawStatusSuffix()
-        {
-            if (_rawRecording && _rawSegments != null)
-            {
-                var t = DateTime.Now - _rawStartTime;
-                // Missed frames are reported by StatusText itself now, from the same inquiry that
-                // feeds _rawMissed — printing them here too put the same number on one line twice.
-                return $"  ● REC RAW seg{_rawSegments.SegmentIndex}  {(int)t.TotalMinutes:00}:{t.Seconds:00}";
-            }
-            if (_rawConverting)
-                return "  (converting segments → MP4…)";
-            return "";
-        }
 
         private double InquireNominalFps()
         {
@@ -2376,6 +2220,21 @@ namespace MatroxFrameGrabber.Mil
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period, "
                                + $"{_reducer.Accepted}/{_reducer.Reductions} grids accepted"
                                + (ReducerFailures > 0 ? $", {ReducerFailures} consecutive failures" : string.Empty));
+
+            // What recording cost and what it lost. The extraction here is the whole frame, and
+            // it runs in the acquisition hook - so this is also the measurement for whether a
+            // preroll ring of frames is affordable at all, since such a ring would have to pay the
+            // same extraction on every frame whether or not an event ever follows.
+            VideoSinkStats rec = _recording?.Stats ?? default;
+            if (rec.FramesFed > 0 || rec.FramesSkipped > 0)
+            {
+                MilErrorLog.Note($"{Name}: recording ({_recording.Name}) - {rec.FramesFed} fed, "
+                               + $"{rec.FramesSkipped} skipped (encoder full), {rec.FramesDropped} dropped, "
+                               + $"{rec.WrittenFps:F1} fps written vs {rec.DeclaredFps:F2} fps declared "
+                               + $"over {rec.ElapsedSeconds:F1} s, "
+                               + $"extract mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
+                               + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period");
+            }
 
             // The board's stamps for this run, in milliseconds. Whether these share one clock across
             // channels is the whole of cross-channel correlation: the cameras free-run, so nothing

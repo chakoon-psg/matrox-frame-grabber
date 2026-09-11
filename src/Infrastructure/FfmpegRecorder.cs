@@ -134,20 +134,18 @@ namespace MatroxFrameGrabber.Infrastructure
             return null;
         }
 
-        /// <summary>Launches ffmpeg for a raw-video pipe of the given geometry/format.</summary>
-        /// <param name="pixFmt">ffmpeg input pixel format, e.g. "bgr24" or "gray".</param>
-        public bool Start(string ffmpegPath, string outPath, int width, int height, double fps, string pixFmt, out string error)
+        /// <summary>
+        /// Launches ffmpeg with the given command line and opens the frame pipe.
+        ///
+        /// The arguments come from the caller because one process can serve several outputs at
+        /// different rates, which is how the event tier and the long session file share a single
+        /// pipe and a single extraction. Build them with <see cref="FfmpegArgs"/>, which is tested.
+        /// </summary>
+        public bool Start(string ffmpegPath, string args, out string error)
         {
             error = null;
             try
             {
-                string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
-                string args =
-                    $"-hide_banner -loglevel error -f rawvideo -pixel_format {pixFmt} " +
-                    $"-video_size {width}x{height} -framerate {fpsStr} -i pipe:0 -an " +
-                    $"-vf \"crop=trunc(iw/2)*2:trunc(ih/2)*2\" " +
-                    $"-c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart -y \"{outPath}\"";
-
                 var psi = new ProcessStartInfo(ffmpegPath, args)
                 {
                     RedirectStandardInput = true,
@@ -155,6 +153,7 @@ namespace MatroxFrameGrabber.Infrastructure
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
+                MilErrorLog.Note($"ffmpeg: {args}");
                 _proc = Process.Start(psi);
                 if (_proc == null) { error = "Failed to start ffmpeg."; return false; }
 

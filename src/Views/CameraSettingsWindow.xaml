@@ -1,0 +1,19 @@
+<Window x:Class="MatroxFrameGrabber.Views.CameraSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:MatroxFrameGrabber.Views"
+        Title="Settings" Width="700" SizeToContent="Height"
+        MinWidth="480" MaxHeight="900"
+        Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
+        ShowInTaskbar="False" WindowStartupLocation="Manual">
+    <!--
+      Not modal, on purpose. Commissioning means changing an exposure while watching what it does
+      to the image, and a modal window blocks the pane it is being judged against.
+
+      Sized to its content in height and given real width: the Calib row runs to about 600 px and
+      a pane is 360, which is why this window exists.
+    -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10">
+        <local:CameraSettingsView x:Name="Settings" />
+    </ScrollViewer>
+</Window>

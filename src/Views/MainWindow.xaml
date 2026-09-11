@@ -38,19 +38,14 @@
 
                     <Border Width="1" Height="22" Background="{StaticResource BorderBrushColor}" Margin="8,0" VerticalAlignment="Center" />
 
-                    <!-- Recording (red = live H.264, orange = RAW lossless) -->
+                    <!-- Recording -->
                     <ToggleButton Content="● Rec All" Style="{StaticResource RecToggle}" Padding="10,4"
                                   Margin="0,0,4,0" Click="RecordAll_Click" IsChecked="{Binding AnyRecording, Mode=OneWay}"
                                   IsEnabled="{Binding AnyCanRecord}"
                                   ToolTip="Record all running cameras (live color H.264, may drop frames at high fps)" />
-                    <ToggleButton Content="◆ RAW All" Style="{StaticResource RawToggle}" Padding="10,4"
-                                  Margin="0,0,4,0" Click="RawAll_Click" IsChecked="{Binding AnyRawRecording, Mode=OneWay}"
-                                  IsEnabled="{Binding AnyCanRecord}"
-                                  ToolTip="Lossless RAW record all cameras: every frame at full fps → color MP4" />
-
-                    <!-- Recording settings popup (RAW auto-stop / segment length / output resolution) -->
+                    <!-- Recording settings popup (output resolution / ffmpeg / display fps) -->
                     <Button x:Name="RecSettingsButton" Padding="8,4" Click="RecSettings_Click"
-                            ToolTip="Recording settings — RAW auto-stop, segment length, output resolution">
+                            ToolTip="Recording settings — output resolution, ffmpeg, display rate">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center" />
                             <TextBlock Text="Rec" Margin="5,0,0,0" VerticalAlignment="Center" />
@@ -72,49 +67,27 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="RAW auto-stop"
-                                               VerticalAlignment="Center" Margin="0,0,12,7" Foreground="#D0D0D0" />
-                                    <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,7">
-                                        <TextBox Width="46" VerticalContentAlignment="Center"
-                                                 Text="{Binding RawSeconds, UpdateSourceTrigger=PropertyChanged}"
-                                                 ToolTip="RAW recording auto-stop, in seconds (0 = manual / continuous)" />
-                                        <TextBlock Text="s (0=∞)" VerticalAlignment="Center" Margin="5,0,0,0"
-                                                   Foreground="{StaticResource MutedTextBrush}" />
-                                    </StackPanel>
-
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="RAW segment"
-                                               VerticalAlignment="Center" Margin="0,0,12,7" Foreground="#D0D0D0" />
-                                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,7">
-                                        <TextBox Width="46" VerticalContentAlignment="Center"
-                                                 Text="{Binding RawSegSeconds, UpdateSourceTrigger=PropertyChanged}"
-                                                 ToolTip="Length of each RAW MP4 segment, in seconds (min 5)." />
-                                        <TextBlock Text="s" VerticalAlignment="Center" Margin="5,0,0,0"
-                                                   Foreground="{StaticResource MutedTextBrush}" />
-                                    </StackPanel>
-
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Resolution"
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Resolution"
                                                VerticalAlignment="Center" Margin="0,0,12,0" Foreground="#D0D0D0" />
-                                    <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Left" Width="110"
+                                    <ComboBox Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" Width="110"
                                               VerticalContentAlignment="Center"
                                               ItemsSource="{Binding ResolutionOptions}"
                                               SelectedItem="{Binding Output.Resolution}" />
 
-                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="ffmpeg"
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="ffmpeg"
                                                VerticalAlignment="Center" Margin="0,7,12,0" Foreground="#D0D0D0" />
-                                    <TextBlock Grid.Row="3" Grid.Column="1" MaxWidth="180" Margin="0,7,0,0"
+                                    <TextBlock Grid.Row="1" Grid.Column="1" MaxWidth="180" Margin="0,7,0,0"
                                                Text="{Binding FfmpegPathText}"
                                                ToolTip="{Binding FfmpegPathText}"
                                                TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"
                                                Foreground="{StaticResource MutedTextBrush}" />
 
-                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="표시 fps"
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="표시 fps"
                                                VerticalAlignment="Center" Margin="0,7,12,0" Foreground="#D0D0D0" />
-                                    <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,7,0,0">
+                                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,7,0,0">
                                         <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
                                                  Text="{Binding Output.DisplayUpdateFps, UpdateSourceTrigger=LostFocus}" />
                                         <TextBlock Text="0 = 무제한 · 취득 fps와 무관"

@@ -29,6 +29,10 @@ namespace MatroxFrameGrabber.Views
         public CameraPaneView()
         {
             InitializeComponent();
+
+            // Re-raised, so MainWindow goes on subscribing to the pane wherever the settings are
+            // actually being shown - inline here, or in a window of their own.
+            InlineSettings.ApplyToAllRequested += (s, e) => ApplyToAllRequested?.Invoke(this, EventArgs.Empty);
             // The rectangle and its handles are built in code so this pane and the fullscreen
             // overlay show the same thing without the visuals being declared twice.
             _roi = new RoiEditSurface(ViewBorder, ViewContentGrid, () => Channel, "pane");
@@ -186,190 +190,61 @@ namespace MatroxFrameGrabber.Views
             }
         }
 
-        // ----- Settings strip -----
-
-        /// <summary>
-        /// Enter in a settings field applies that row, so the operator does not have to reach for
-        /// the Apply button. The row is identified by the box's Tag, set in XAML — keeping the
-        /// mapping in the markup next to the field it belongs to.
-        /// </summary>
-        private void SettingsField_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.Key != Key.Enter) return;
-            if (!(sender is FrameworkElement box) || !(box.Tag is string row)) return;
-
-            switch (row)
-            {
-                case "exposure": ApplyExposure_Click(sender, e); break;
-                case "acqrate":  ApplyAcqRate_Click(sender, e); break;
-                case "balance":  ApplyBalance_Click(sender, e); break;
-                case "roi":      ApplyRoi_Click(sender, e); break;
-                case "detect":   ApplyThresholds_Click(sender, e); break;
-                default: return;
-            }
-            e.Handled = true;
-        }
-
-        private void ApplyExposure_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!channel.ApplyExposure())
-                MessageBox.Show("Failed to set exposure (value out of range or feature unavailable).",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-
-        private void ApplyAcqRate_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!channel.ApplyAcqRate())
-                MessageBox.Show("Failed to set acquisition rate (value out of range or feature unavailable).",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-
-        private void Decimation_Changed(object sender, SelectionChangedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!(sender is ComboBox combo) || !(combo.SelectedItem is int factor)) return;
-            if (factor == channel.Decimation) return;   // echo of our own OneWay binding
-            // ApplyDecimation returns false when the camera did not take the value. Say so rather
-            // than leaving the combo asserting a factor the hardware refused — this camera returns
-            // success for geometry writes it ignores, which is why the check exists at all.
-            if (!channel.ApplyDecimation(factor))
-            {
-                // Put the combo back to what the camera actually has. A user selection writes a
-                // local value, which detaches the OneWay binding — so without this the combo would
-                // keep asserting a factor the hardware refused, which is the exact silent lie this
-                // handler exists to prevent. The echo guard above makes the re-entrant
-                // SelectionChanged a no-op, so this cannot loop.
-                combo.SelectedItem = channel.Decimation;
-                MessageBox.Show(
-                    "디시메이션을 적용하지 못했습니다. 카메라가 값을 받아들이지 않았습니다.",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-        }
-
-        private void ApplyRoi_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!channel.ApplyAnalysisRoiFromInputs())
-                MessageBox.Show("ROI를 적용하지 못했습니다. 네 값이 모두 정수여야 합니다.",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-
-        private void ClearRoi_Click(object sender, RoutedEventArgs e) => Channel?.ClearAnalysisRoi();
-
-        private void ApplyCalibration_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!channel.ApplyCalibration())
-                MessageBox.Show(
-                    "제안할 값이 없습니다. 정상 패널 앞에서 충분히 긴 실행을 한 번 마쳐야 합니다.",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-
-        private void ApplyThresholds_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!channel.ApplyDetectionThresholds())
-                MessageBox.Show("임계값을 적용하지 못했습니다. 두 값이 모두 숫자여야 합니다.",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-
-        // Copy this camera's capture settings (exposure / acq rate / trigger / WB) to every other camera.
-        private void ApplyAll_Click(object sender, RoutedEventArgs e) =>
-            ApplyToAllRequested?.Invoke(this, EventArgs.Empty);
-
-        private System.Windows.Threading.DispatcherTimer _rawTimer;
-
         private void Stop_Click(object sender, RoutedEventArgs e)
         {
             var channel = Channel;
             if (channel == null) return;
 
             // Stopping ends any in-progress recording (irreversible) — confirm, but only while recording.
-            if ((channel.IsRecording || channel.IsRawRecording) &&
+            if (channel.IsRecording &&
                 MessageBox.Show("이 카메라가 녹화 중입니다. 중지하면 녹화가 종료됩니다. 계속할까요?",
                     channel.Name, MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
 
-            StopRawTimer();
-            if (channel.IsRawRecording) channel.StopRawRecording();
-            channel.StopGrab();   // also stops a color recording
+            channel.StopGrab();   // also stops the recording
         }
 
-        private void RawRecord_Click(object sender, RoutedEventArgs e)
+        private CameraSettingsWindow _settingsWindow;
+
+        /// <summary>
+        /// Opens this camera's settings in a window of its own, and closes the inline copy.
+        ///
+        /// The window exists because the pane is too narrow for one of the rows: the Calib text
+        /// runs to about 600 px against a pane's 360, so inline it is clipped and has to be read
+        /// from a tooltip. Widening the pane is not available - four of them share the window.
+        ///
+        /// One window per pane. A second click focuses the one already open rather than opening
+        /// another view of the same channel, which would leave two sets of fields disagreeing about
+        /// what had been typed but not yet applied.
+        /// </summary>
+        private void PopOut_Click(object sender, RoutedEventArgs e)
         {
+            // The header sits inside a ToggleButton, so without this the expander toggles too.
+            e.Handled = true;
+
             var channel = Channel;
             if (channel == null) return;
 
-            if (channel.IsRawRecording)
+            if (_settingsWindow != null)
             {
-                StopRawTimer();
-                channel.StopRawRecording();
+                _settingsWindow.Activate();
                 return;
             }
 
-            if (!channel.StartRawRecording(out string error))
+            _settingsWindow = new CameraSettingsWindow(channel, Window.GetWindow(this));
+            _settingsWindow.ApplyToAllRequested += (s, args) => ApplyToAllRequested?.Invoke(this, EventArgs.Empty);
+            _settingsWindow.Closed += (s, args) =>
             {
-                MessageBox.Show(error ?? "Failed to start RAW recording.", channel.Name,
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            int seconds = channel.Output?.RawDurationSeconds ?? 0;
-            if (seconds > 0)
-            {
-                _rawTimer = new System.Windows.Threading.DispatcherTimer
-                {
-                    Interval = TimeSpan.FromSeconds(seconds)
-                };
-                _rawTimer.Tick += (s, a) => { StopRawTimer(); Channel?.StopRawRecording(); };
-                _rawTimer.Start();
-            }
-        }
-
-        private void StopRawTimer()
-        {
-            if (_rawTimer != null) { _rawTimer.Stop(); _rawTimer = null; }
-        }
-
-        private void SoftTrigger_Click(object sender, RoutedEventArgs e) => Channel?.FireSoftwareTrigger();
-
-        private void WhiteBalanceOnce_Click(object sender, RoutedEventArgs e) => Channel?.WhiteBalanceOnce();
-
-        private void ApplyBalance_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-            if (!channel.ApplyBalanceRatios())
-                MessageBox.Show("Failed to apply white-balance ratios.", channel.Name,
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-
-        private void FeatureBrowser_Click(object sender, RoutedEventArgs e) => Channel?.OpenFeatureBrowser();
-
-        private void LoadDcf_Click(object sender, RoutedEventArgs e)
-        {
-            var channel = Channel;
-            if (channel == null) return;
-
-            var dialog = new OpenFileDialog
-            {
-                Title = $"{channel.Name}: select a DCF (camera configuration) file",
-                Filter = "Matrox DCF (*.dcf)|*.dcf|All files (*.*)|*.*"
+                _settingsWindow = null;
+                SettingsExpander.IsEnabled = true;
             };
-            if (dialog.ShowDialog() != true || !File.Exists(dialog.FileName))
-                return;
 
-            if (!channel.ReloadWithDcf(dialog.FileName))
-                MessageBox.Show("Reallocated with the selected DCF, but no camera was detected.",
-                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+            // The inline copy is closed and disabled while the window is up, for the same reason
+            // only one window is allowed.
+            SettingsExpander.IsExpanded = false;
+            SettingsExpander.IsEnabled = false;
+            _settingsWindow.Show();
         }
+
     }
 }

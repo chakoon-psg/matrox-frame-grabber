@@ -10,8 +10,8 @@
 ## 0. 한 줄 요약
 
 Matrox **Rapixo CXP**(CoaXPress) 프레임그래버 1장에 물린 **최대 4대**의 카메라를 **MIL 10.70** .NET
-바인딩으로 라이브 그랩·표시하고, GenICam 피처로 제어하며, 스냅샷 / H.264 라이브 녹화 /
-**무손실 RAW-Bayer 세그먼트 녹화** 3가지 산출물을 만드는 단일 프로세스
+바인딩으로 라이브 그랩·표시하고, GenICam 피처로 제어하며, 스냅샷과 H.264 라이브 녹화를
+산출하는 단일 프로세스
 **WPF(net10.0-windows, x64)** 데스크톱 앱.
 
 용도가 정해진 뒤로 **AVN 화면 이상 검지** 쪽 코드가 붙었다. 분석 ROI, 밝기 측정, PWM 노출 스윕,
@@ -31,10 +31,10 @@ App.xaml ──> Views/MainWindow.xaml
                  │                                      ├─ MdigAlloc(M_DEV0+i)
                  │                                      ├─ MdispAlloc(M_WPF)  ─┐
                  │                                      ├─ 표시버퍼(M_DISP)     │
-                 │                                      ├─ 그랩링(M_GRAB) 4/24 │
+                 │                                      ├─ 그랩링(M_GRAB) × 4   │
                  │                                      ├─ GenICamFeatures     │
-                 │                                      ├─ RecordingSession    │
-                 │                                      └─ RawSegmentSession   │
+                 │                                      ├─ TileReducer         │
+                 │                                      └─ RecordingSession    │
                  └─ CameraPaneView × 4 ── MILWPFDisplay(DisplayId) ────────────┘
 ```
 
@@ -48,7 +48,7 @@ App.xaml ──> Views/MainWindow.xaml
 | `Infrastructure/` | `MatroxFrameGrabber.Infrastructure` | ffmpeg, 파일 I/O, 설정, Win32 interop, **판정 순수 로직** | **MIL 무의존** |
 
 > `Infrastructure`의 MIL 무의존은 컨벤션에서 **계약**으로 바뀌었다. 테스트 프로젝트가 이 파일들을
-> `ProjectReference`가 아니라 소스로 포함하므로(→ §2.19), 여기에 MIL 참조가 들어가면 **보드 없는
+> `ProjectReference`가 아니라 소스로 포함하므로(→ §2.17), 여기에 MIL 참조가 들어가면 **보드 없는
 > 머신에서 테스트가 돌지 않는다.** ROI 규칙, 밝기 표본 배치, PWM 계산, 타일 검지기가 전부
 > 이 계층에 있는 이유다.
 
@@ -84,17 +84,17 @@ App.xaml ──> Views/MainWindow.xaml
 **`Views/Styles.xaml`** (370줄)
 - 다크 테마 팔레트(`#1E1E1E` 배경 / `#2A2A2A` 패널 / `#0E639C` 액센트)와
   `Button` / `TextBox` / `ComboBox` / `CheckBox` / `Label` / `Expander` 암시적 스타일.
-- **`RecToggle`**(체크 시 빨강 `#C62828`) vs **`RawToggle`**(체크 시 주황 `#E65100`) —
-  "라이브 H.264 녹화"와 "무손실 RAW 녹화"를 **색으로 구분**하는 것이 이 앱의 핵심 UX 규약이다.
-  같은 규약이 패널 배너(`RecBrush` / `RawBrush`)에서도 반복된다.
+- **`RecToggle`**은 체크되면 빨강 `#C62828`이 된다. 같은 색이 패널 배너(`RecBrush`)에도 쓰여
+  "지금 녹화 중"이 한 가지 색으로 읽힌다. 무손실 RAW 녹화를 주황으로 구분하던 `RawToggle` /
+  `RawBrush`는 그 기능과 함께 제거했다.
 - `ComboBox`는 템플릿 재정의 없이 프로퍼티 레벨만 다크 처리(주석에 명시) — 드롭다운 팝업 일부에
   시스템 기본 스타일이 남는 것을 감수한 타협.
 
 ### 2.2 `Views/MainWindow.xaml(.cs)` (217 + 912줄)
 
 **툴바 구성** (커밋 `121d605` → `07e9cbc`에서 단순화)
-- 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` / `◆ RAW All` / `⚙ Rec` 팝업 │ `Open` / `Browse…`
-- 가끔 쓰는 설정(RAW 자동정지 초, 세그먼트 길이, 출력 해상도)은 `RecSettingsPopup` 뒤로 숨김.
+- 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` / `⚙ Rec` 팝업 │ `Open` / `Browse…`
+- 가끔 쓰는 설정(출력 해상도, ffmpeg 경로, 표시 fps)은 `RecSettingsPopup` 뒤로 숨김.
 - 오른쪽 끝에 `SystemStatus`(할당된 시스템 디스크립터 + 디지타이저 수) 고정.
 
 **생명주기 (중요한 순서 규약)**
@@ -102,7 +102,7 @@ App.xaml ──> Views/MainWindow.xaml
 ```csharp
 public MainWindow() {
     _manager = new MilApplicationManager(); _manager.Allocate();  // ① 먼저 MIL 할당
-    ... RecordingFailed / CameraLost / RawRecordingFinished 구독 ...
+    ... RecordingFailed / CameraLost / AnomalyDetected 구독 ...
     DataContext = _viewModel;                                     // ② 그 다음 DataContext
     InitializeComponent();                                        // ③ 마지막에 비주얼 트리
 }
@@ -145,30 +145,29 @@ M_KEYBOARD_USE가 켜진 MILWPFDisplay는 MIL이 최상위 HWND를 서브클래�
 MIL이 ESC를 다시 처리하지 못하게 막는다.
 
 **안전장치**: `StopAll_Click`은 녹화 중일 때만 한국어 확인 대화상자를 띄운다(되돌릴 수 없는 동작이므로).
-`OnRawRecordingFinished`는 **실패만** 알린다(성공은 그냥 출력 폴더에 mp4가 생기는 것으로 충분).
+
 
 ### 2.3 `Views/CameraPaneView.xaml(.cs)` (248 + 355줄)
 
 한 카메라 패널. `DataContext`는 `CameraChannel`.
 
 - **헤더**: `[CAM0]` 고정 포트 태그(현장에서 물리 포트를 짚기 위한 것) + 편집 가능한 `OutputName`(파랑) +
-  `▶Start / ■Stop / ●Rec / ◆RAW / Snap / Fit / 1:1 / ⤢`.
+  `▶Start / ■Stop / ●Rec / Snap / Fit / 1:1 / ⤢`.
 - **`Expander`(기본 접힘)** 안에 세부 설정: "이 설정을 전체 카메라에 적용" 버튼, Name, Exposure,
   Acq Rate, Trigger, White Balance, DCF/Features. 라이브 뷰 면적을 최대로 두려는 의도.
-- **녹화 배너**: `RecordingActive`가 true면 뷰 상단에 상시 표시. `IsRawRecording` `DataTrigger`로
+- **녹화 배너**: `RecordingActive`가 true면 뷰 상단에 상시 표시. 배경은 `RecBrush` 하나이며(
   배경이 주황으로 바뀐다. 텍스트는 `RecordingBannerText`(한국어, 모드+세그먼트+경과시간+드롭 수).
 
 **코드비하인드가 하는 일 = "뷰 컨텍스트가 필요한 것만"**
 - `Start / Fit / 1:1`은 XAML에서 `Command` 바인딩(`StartCommand` 등) — 대화상자 불필요.
-- `Stop / Rec / RAW / Snap / Apply* / LoadDcf / Features`는 `Click` 핸들러 — MessageBox나
+- `Stop / Rec / Snap / Apply* / LoadDcf / Features`는 `Click` 핸들러 — MessageBox나
   파일 대화상자가 필요하기 때문. 이 분리가 이 프로젝트의 명확한 컨벤션이다(커밋 `d870884`).
 - `_display` 생성은 `DataContextChanged`에서 **한 번만**, 그리고 `DisplayId != M_NULL`일 때만.
-- `_rawTimer`: 패널별 RAW 자동정지 타이머(`Output.RawDurationSeconds > 0`일 때만 arm).
-- `Stop_Click`은 녹화 중이면 한국어 확인 → `StopRawTimer` → `StopRawRecording` → `StopGrab`.
+- `Stop_Click`은 녹화 중이면 한국어로 확인한 뒤 `StopGrab`(녹화도 함께 끝난다).
 
 ### 2.4 `ViewModels/MainViewModel.cs` (329줄)
 
-- `DispatcherTimer` 500ms → 모든 채널 `RefreshStats()` + `AnyRecording` / `AnyRawRecording` 알림.
+- `DispatcherTimer` 500ms → 모든 채널 `RefreshStats()` + `AnyRecording` 알림.
   **세션 내내 계속 돈다**(패널별 Start도 fps를 갱신해야 하므로 — 주석에 명시).
 - `StartAllCommand` / `StopAllCommand`는 **항상 Enabled** — 패널별 시작/정지와 상태가 어긋나는 것을
   막기 위해 의도적으로 게이팅하지 않음(주석에 명시).
@@ -179,9 +178,7 @@ MIL이 ESC를 다시 처리하지 못하게 막는다.
   - AcqRate: Enable 토글 먼저 → `CanSetAcqRate`일 때만 값 복사
   - Trigger: On/Off + 소스(비어있지 않을 때만)
   - WhiteBalance: Auto 먼저 → 소스가 수동일 때만 R/B 비율 복사
-- `ToggleRawAll()`: 전 채널 RAW 시작 → **하나라도 성공했을 때만** 자동정지 타이머를 arm.
   실패는 `"{channel.Name}: {err}"`로 합쳐 반환 → MainWindow가 MessageBox.
-- `RawSeconds` / `RawSegSeconds`는 문자열 프로퍼티(TextBox 바인딩) → 파싱 실패 시 조용히 무시.
 - `Shutdown()`은 타이머만 정지(MIL 해제는 MainWindow 담당).
 
 ### 2.5 `Mil/MilApplicationManager.cs` (155줄)
@@ -234,9 +231,11 @@ Allocate(sys, cameraAvailable, dcf)
 1. **빈 포트 프로브** — Rapixo CXP는 카메라가 없어도 디지타이저 4개를 보고한다. 빈 포트에
    `MdigAlloc`하면 `M_THROW_EXCEPTION` 상태에서도 **네이티브 모달 대화상자**가 뜬다.
    → `MappControl(M_DEFAULT, M_ERROR, M_PRINT_DISABLE)`로 감싸고 **`finally`에서 반드시 복구**.
-2. **Bayer 변환의 영속성** — `M_BAYER_CONVERSION`은 **보드에 남는 설정**이다. RAW 녹화를 위해 껐다가
+2. **Bayer 변환의 영속성** — `M_BAYER_CONVERSION`은 **보드에 남는 설정**이다. 한 번 꺼진 채로
    앱이 죽으면 다음 실행에서도 꺼진 채라, 컬러 파이프라인이 mono/raw 데이터를 타일/깨진 이미지로
    오해한다. 그래서 **`M_SIZE_BAND`를 조회하기 전에** 매번 다시 `M_ENABLE` (커밋 `568839f`).
+   이걸 끄던 RAW 녹화는 제거했지만 그 복원은 남는다 — 옛 빌드가 꺼 놓은 보드가 있을 수 있고,
+   이제 여기가 유일한 복원 지점이다.
 3. **비페이지드(DMA) 메모리 고갈** — 그랩 버퍼는 희소한 non-paged 풀을 쓴다. 요청은
    `REQUESTED_GRAB_BUFFERS = 4`지만 **실패해도 중단하지 않고 얻은 만큼만** 쓴다(루프 안 개별
    try/catch, 실패 시 `break`). 2개 미만이면 상태 텍스트가 `Low memory: only N grab buffer(s)`로 바뀐다.
@@ -259,70 +258,40 @@ StopGrab:  StopRecording() → MdigProcess(M_STOP) → GCHandle.Free()
 
 `_hookDelegate`를 필드로 잡아두는 것이 필수다(GC가 콜백을 수거하면 네이티브 호출이 크래시).
 
-**훅 본체 `OnGrabbedFrame(grabbed, display)` — 두 갈래**
+**훅 본체 `OnGrabbedFrame(grabbed, display, frame, stamp)`**
 
 ```
-RAW 세션 활성?  ── YES ──> buf = seg.Rent()                 (필요하면 세그먼트 롤오버)
-                          MbufGet2d(grabbed, 0,0, W,H, buf)  ★ MbufGet 아님
-                          seg.Feed(buf)
-                          6프레임마다 MbufCopy → 흑백 프리뷰 (RAW_DISPLAY_EVERY)
-                          return
-                ── NO ───> MbufCopy(grabbed → display)
-                          _recording?.Feed(grabbed)
+RunDetection(grabbed, frame, stamp)      ★ 리듀서가 검출 영역만 읽어 8×8로 축약
+MbufCopy(grabbed → display)              (DisplayUpdateFps로 스로틀)
+_recording?.Feed(grabbed)
 ```
 
-★ **`MbufGet2d`를 쓰는 이유(커밋 `f2fde52`)**: `MbufGet`은 행 패딩(pitch 2112 > width 2064)을 포함해
-복사하므로, 나중에 2064바이트 행으로 되읽으면 **영상이 사선으로 밀린다(shearing)**.
-`MbufGet2d`는 논리적 W×H 영역을 **packed**로 복사한다.
+★ 리듀서는 `MbufGet2d`를 쓴다. `MbufGet`은 행 패딩(pitch 2112 > width 2064)을 포함해 복사하므로,
+나중에 2064바이트 행으로 되읽으면 **영상이 사선으로 밀린다(shearing)**. `MbufGet2d`는 논리적
+W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형태이기도 하다.
 
 #### `RefreshStats()` — UI 타이머가 500ms마다 호출하는 폴링 허브
 
 1. `M_PROCESS_FRAME_RATE` → `_frameRate`
-2. RAW 중이면 `M_PROCESS_FRAME_MISSED` → `_rawMissed`
-   ("무손실"이라 해놓고 실제로 유실된 프레임을 숨기지 않고 배너에 `⚠ dropped N`으로 노출)
+2. `M_PROCESS_FRAME_MISSED` → `_framesMissed`(이번 실행분만. 누적값에서 시작 시점을 뺀다)
 3. **카메라 분리 감지**: `M_CAMERA_PRESENT`가 **2회 연속** 실패해야 `_cameraLost`(일시 블립 방지).
    감지 시 **녹화만 중지하고 `StopGrab`은 사용자에게 맡긴다** — 죽은 포트에 `M_STOP`을 거는 것이
    위험하다는 판단(주석 명시). 다시 붙으면 `_cameraLost` 해제.
 4. ffmpeg가 죽었으면(`_recording.Failed && IsActive`) 정리 후 `RecordingFailed` 이벤트
-5. RAW 세그먼트 세션이 실패했으면 `StopRawRecording()`
-6. `_rawFinishing.WaitConversions(0)`으로 백그라운드 변환 완료를 폴링 → `RawRecordingFinished` 이벤트
-7. 마지막에 `FrameRate / FrameCount / StatusText / RecordingActive / RecordingBannerText` 알림
+5. 확정된 이상을 큐에서 꺼내 로그·CSV·`AnomalyDetected`로 내보낸다
+6. 마지막에 `FrameRate / FrameCount / StatusText / RecordingActive / RecordingBannerText` 알림
 
-#### 두 가지 녹화 모드 (반드시 구분)
+#### 녹화
 
-| | **Rec (컬러 라이브)** | **RAW (무손실)** |
-|---|---|---|
-| 클래스 | `RecordingSession` | `RawSegmentSession` |
-| 소스 | 표시 버퍼(3-band 컬러) | 그랩 버퍼(1-band Bayer) |
-| 경로 | MIL → 메모리 → ffmpeg **stdin 파이프** | MIL → 로컬 `.raw` 세그먼트 → ffmpeg **배치 변환** |
-| 픽셀 포맷 | `gbrp`(컬러) / `gray`(mono) | `bayer_rggb8` |
-| x264 preset | `veryfast` | `ultrafast` |
-| 프레임 유실 | **있음**(큐 가득 차면 드롭) | 없음이 목표(백프레셔), 보드 드롭은 계측 |
-| 프리뷰 | 정상 컬러 | **흑백**, 6프레임마다 |
-| 보드 설정 변경 | 없음 | `M_BAYER_CONVERSION = M_DISABLE` |
-| 그랩 링 | 4 | 24 (`RAW_GRAB_BUFFERS`) |
-| 저장 위치 | 출력 폴더 직접 | 스크래치(로컬 NVMe) → 출력 폴더 |
-| 상호배타 | RAW 중엔 시작 불가 | Rec 중엔 시작 불가 |
+`RecordingSession` 하나뿐이다. 표시 버퍼(3-band 컬러)를 메모리로 받아 ffmpeg **stdin 파이프**로
+보내고, 픽셀 포맷은 `gbrp`(1-band일 때 `gray`), x264 preset은 `veryfast`. 큐가 가득 차면
+**프레임을 드롭**한다 — 라이브 뷰가 우선이라는 판단이며, 출력 폴더에 직접 쓴다.
 
-**`StartRawRecording`의 안전 시퀀스** (이 파일에서 가장 조심스럽게 쓰인 부분):
-
-```
-사전 검증(디지타이저 / 중복 / IsRecording / CanRecord / 출력·스크래치 폴더 / ffmpeg)
-_rawResumeGrab = _isGrabbing;  if (_isGrabbing) StopGrab();
-try {
-    SetBayerConversion(false); FreeBuffers(); AllocateBuffers(24);
-    band != 1 이면 → "raw Bayer 미지원" + RestoreColorAfterRaw() 후 실패 반환
-    new RawSegmentSession(...); _rawRecording = true; StartGrab();
-} catch {
-    세션 Finish / WaitConversions(2000) / Dispose → RestoreColorAfterRaw()   ★ 컬러 반드시 복구
-}
-```
-
-`RestoreColorAfterRaw()`는 **`SetBayerConversion(true)`를 가장 먼저** 호출한다 —
-그 뒤(FreeBuffers/AllocateBuffers/StartGrab)가 실패해도 보드는 컬러로 돌아가도록.
-
-`FreeCamera()`도 같은 이유로 **RAW 중지 → 남은 변환 최대 15초 대기 → StopGrab → 녹화 finalize 15초 대기**
-순서로 종료한다.
+무손실 RAW-Bayer 세그먼트 녹화가 있었고 제거했다(`RawSegmentSession` / `RawFrameWriter`,
+`◆ RAW` / `◆ RAW All`, 자동정지·세그먼트 길이·스크래치 폴더 설정). 그 경로만이
+`M_BAYER_CONVERSION`을 껐지만, **그 설정은 보드에 남으므로 복원은 그대로 필요하다** —
+`AllocateCamera`가 매번 다시 켜는 것이 이제 유일한 복원 지점이고, 옛 빌드가 꺼 놓은 보드가
+남아 있을 수 있으므로 지우면 안 된다.
 
 #### GenICam 제어 표면
 
@@ -389,48 +358,12 @@ try {
 - `Stop()`: 큐 완료 → 라이터 3초 조인 → stdin 닫기(EOF로 ffmpeg가 mp4 finalize) →
   8초 대기 후 미종료면 `Kill()` → `Cleanup()`에서 이벤트 해제·Dispose.
 
-### 2.10 `Infrastructure/RawFrameWriter.cs` (87줄)
-
-- 고정 크기 프레임을 **전용 스레드**로 파일에 쓴다. `BlockingCollection`(기본 용량 64) +
-  `ConcurrentQueue<byte[]>` 버퍼 풀(`Rent()` / `Enqueue()`).
-- **정책이 `FfmpegRecorder`와 정반대**: 큐가 가득 차면 `Add`가 **블로킹**한다
-  = 프레임을 버리지 않고 취득 스레드에 백프레셔를 건다(무손실이 목적이므로).
-  대신 보드 쪽에서 프레임이 밀릴 수 있고, 그것을 `M_PROCESS_FRAME_MISSED`로 계측해 노출한다.
-- 라이터가 예외로 죽으면 `Failed`(volatile) 세팅 후 **`CompleteAdding()`으로 생산자를 깨워**
-  훅이 영원히 블록되는 것을 막는다. 이후 `Enqueue`는 `InvalidOperationException`을 삼킨다.
-  (`Failed`를 volatile로 쓰는 것이 `LastError` 문자열을 다른 스레드에 publish 하는 장치)
-- `FileStream`: 1MB 버퍼, `FileOptions.SequentialScan`. `CompleteAndWait`에서 `Flush(true)`.
-
-### 2.11 `Infrastructure/RawSegmentSession.cs` (226줄)
-
-연속 무손실 녹화의 오케스트레이터.
-
-**스레드 모델(주석에 명시된 계약)**
-
-```
-훅 스레드(단일 생산자)  : "현재" writer 를 배타 소유 — Rent / Feed / Roll (락 불필요)
-변환 스레드(단일 소비자): 큐에서 꺼낸 "완료된" writer 를 배타 소유
-→ 두 스레드가 같은 writer 를 만지지 않으므로 핸드오프가 race-free
-```
-
-**세그먼트 롤오버**
-- `Rent()` 호출 시 `CurrentSegmentSeconds >= _segmentSeconds`면 `Roll()`.
-- `Roll()`: 새 세그먼트를 **먼저 열고**(실패 시 `Failed` + `_cur = null`), 이전 writer를 변환 큐에 넣는다.
-- 파일명: 스크래치 `{base}_{yyyyMMdd_HHmmss}_p{NNN}.raw` → 결과 `{base}_{세그먼트시작시각}.mp4`.
-- 변환: `ffmpeg -f rawvideo -pixel_format bayer_rggb8 -video_size WxH -framerate {실측fps}
-  -c:v libx264 -preset ultrafast -pix_fmt yuv420p -movflags +faststart`
-  → **fps는 `frames / 실제경과초`로 역산**(공칭 fps가 아니라 실측이라 재생 속도가 맞는다).
-- 성공하면 `.raw` 삭제, **실패하면 `.raw`를 남긴다**(수동 복구용). 이 비대칭이 의도적이다.
-- `Finish()`는 **그랩이 멈춘 뒤에만** 호출해야 한다(마지막 세그먼트를 큐에 넣고 `CompleteAdding`).
-- 스크래치 폴더가 출력 폴더와 분리된 이유(주석): RAW는 너무 빨라 네트워크 스토리지에 못 쓴다 →
-  로컬 NVMe에 쓰고, 압축된 MP4만 (NAS일 수 있는) 출력 폴더로 보낸다.
-
-### 2.12 `Infrastructure/OutputSettings.cs` (311줄)
+### 2.10 `Infrastructure/OutputSettings.cs` (311줄)
 
 - 저장 위치: `%LocalAppData%\MatroxFrameGrabber\settings.json`
 - 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `Resolution`(Original / P1080 / P720),
-  `FfmpegPath`, `RawDurationSeconds`(0 = 수동), `RawSegmentSeconds`(최소 5),
-  `RawScratchFolder`(기본 `%LocalAppData%\MatroxFrameGrabber\rawscratch`)
+  `FfmpegPath`, `DisplayUpdateFps`, 채널별 `ChannelRois` / `ChannelDecimation` /
+  `ChannelThresholds`
 - **모든 setter가 값 변경 시 즉시 `Save()`** — 별도 저장 버튼이 없다.
 - 방어 장치 두 개가 핵심이다:
   1. **`_loading` 플래그**로 `Load()`가 값을 적용하는 동안 재저장을 억제
@@ -438,7 +371,7 @@ try {
 - `Load()` / `Save()` 모두 예외를 삼킨다("설정이 이번엔 저장 안 될 뿐" = 비치명적).
 - `ScaleFactorFor(h)`: 업스케일 금지, 원본이 목표보다 작으면 1.0. `TargetHeight`는 `[JsonIgnore]`.
 
-### 2.13 `Infrastructure/NativeMethods.cs` (36줄) / `RelayCommand.cs` (38줄)
+### 2.11 `Infrastructure/NativeMethods.cs` (36줄) / `RelayCommand.cs` (38줄)
 
 - `UseImmersiveDarkTitleBar`: `DwmSetWindowAttribute` 속성 **20**(Win10 2004+), 실패하면 **19**
   (1809/1903)로 재시도, 그것도 실패하면 조용히 포기. `Window_SourceInitialized`에서 호출
@@ -446,7 +379,7 @@ try {
 - `RelayCommand`: 최소 구현. `CanExecuteChanged`는 `CommandManager`가 아니라
   **수동 `RaiseCanExecuteChanged()`** 방식이다 (→ §6-2).
 
-### 2.14 분석 ROI 관련 (2026-08 추가)
+### 2.12 분석 ROI 관련 (2026-08 추가)
 
 카메라 크롭이 이 장비에서 동작하지 않는다는 것이 확인된 뒤(→ §8), **어느 화소를 판정에 쓸지**를
 소프트웨어로 지정하는 경로가 생겼다. 규칙은 전부 `Infrastructure`에 순수 함수로 있다.
@@ -477,7 +410,7 @@ try {
 - 사각형이 그려지지 않을 때 그 이유를 로그에 남긴다. 전이만 로깅하던 초기 구현은
   **한 번도 그려지지 않은 표면에 대해 아무 말도 하지 않았다.**
 
-### 2.15 밝기 측정 (2026-08 추가)
+### 2.13 밝기 측정 (2026-08 추가)
 
 **`Mil/BrightnessMeter.cs`** (209줄)
 - 표시 버퍼에서 strip을 읽어 평균 luma·포화율·흑화율을 낸다.
@@ -498,7 +431,7 @@ try {
 **`Infrastructure/BrightnessHistory.cs`** (79줄)
 - 240개 링 버퍼. `BrightnessSample`(luma / clip% / black%).
 
-### 2.16 PWM 노출 스윕 (2026-08 추가)
+### 2.14 PWM 노출 스윕 (2026-08 추가)
 
 **`Infrastructure/PwmSweep.cs`** (771줄)
 - 백라이트 PWM 주파수를 노출 스윕으로 찾는 계산 전부. MIL 무의존, 단위 테스트 대상.
@@ -513,7 +446,7 @@ try {
 - 권장 fps를 노출에서 유도한다. 노출이 허용하는 최대치보다 낮게 캡을 걸면 노출 사이에
   사각지대가 생긴다(5000 µs를 184 fps로 제한하면 8%).
 
-### 2.17 타일 검지기 (2026-08 추가, 미완)
+### 2.15 타일 검지기 (2026-08 추가, 미완)
 
 프레임 단위 이상 검지의 순수 로직. **MIL 접착부(`TileReducer`)와 분석 스레드는 아직 없다.**
 
@@ -537,7 +470,7 @@ try {
   스스로를 지우고, 후자가 없으면 패널을 어둡게 한 뒤 모든 프레임이 이상이 된다.
 - `Flush()`가 없으면 grab 종료 시점에 열려 있던 사건이 보고되지 않는다.
 
-### 2.18 `Infrastructure/MilErrorLog.cs` (112줄)
+### 2.16 `Infrastructure/MilErrorLog.cs` (112줄)
 
 MIL 오류는 실패한 스레드 위에 **모달 대화상자**로 뜬다(→ §5). 출력을 끄고 여기로 보낸다.
 
@@ -549,7 +482,7 @@ MIL 오류는 실패한 스레드 위에 **모달 대화상자**로 뜬다(→ �
 
 ---
 
-### 2.19 테스트 프로젝트 (`tests/`, 153개)
+### 2.17 테스트 프로젝트 (`tests/`, 153개)
 
 `Infrastructure`가 MIL 무의존이라 **보드 없이 검증 가능한 유일한 계층**이다.
 
@@ -577,7 +510,7 @@ TileGridTests            FrameMetricsTests      AnomalyDetectorTests
 `nuget.config`는 nuget.org도 남겨둔다(전이 의존성용, 주석에 `System.Drawing.Common` 예시).
 
 **NuGet에 없는 외부 의존성이 하나 더 있다: `ffmpeg.exe`** — 런타임에 탐색하며,
-없으면 `CanRecord = false`로 Rec / RAW 버튼이 모두 비활성화된다. 즉 **녹화 기능 전체가
+없으면 `CanRecord = false`로 Rec 버튼이 비활성화된다. 즉 **녹화 기능 전체가
 ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 
 **프레임워크 / 빌드**
@@ -610,12 +543,12 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 7. 숫자 파싱·포매팅은 `CultureInfo.InvariantCulture`.
 8. 필드는 `_camelCase`, 로컬 상수는 `UPPER_SNAKE`, GenICam 이름 상수는 `F_FEATURE_NAME`.
 9. **명령 바인딩 vs Click 핸들러**: 대화상자가 필요 없으면 `RelayCommand`, 필요하면 코드비하인드.
-10. **UI 문자열은 영어/한국어 혼재**하되 규칙이 있다: 정보·상태·툴바 = 영어,
+8. **UI 문자열은 영어/한국어 혼재**하되 규칙이 있다: 정보·상태·툴바 = 영어,
     **되돌릴 수 없는 동작의 확인 문구와 녹화 배너 = 한국어**(현장 오조작 방지 우선).
-11. 스레드 소유권을 **주석으로 명시**한다(`// Owned by the hook thread only:`).
-12. `volatile` / `Interlocked` / `Volatile.Read`를 크로스 스레드 플래그·카운터에 일관되게 사용.
+9. 스레드 소유권을 **주석으로 명시**한다(`// Owned by the hook thread only:`).
+10. `volatile` / `Interlocked` / `Volatile.Read`를 크로스 스레드 플래그·카운터에 일관되게 사용.
 13. 상태 변경은 거의 전부 `RefreshStats()`(500ms 폴링)에서 UI로 흘린다 — 이벤트 기반 push는
-    실패 알림(`RecordingFailed` / `CameraLost` / `RawRecordingFinished`) 세 가지뿐.
+    실패 알림(`RecordingFailed` / `CameraLost`)과 이상 검출(`AnomalyDetected`)뿐.
 
 ---
 
@@ -630,23 +563,16 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 | 5 | 카메라가 특정 GenICam 피처 미지원 | `Available()` 확인 → `Supports*` 바인딩으로 컨트롤 비활성화 |
 | 6 | 피처 값 범위 초과 쓰기 | `false` 반환 → "value out of range or feature unavailable" MessageBox |
 | 7 | 카메라 케이블 분리 | `M_CAMERA_PRESENT` 2연속 실패 → **녹화만** 중지 + 경고, StopGrab은 사용자 몫 |
-| 8 | ffmpeg 미설치 | `CanRecord=false` → Rec/RAW 버튼 비활성화 + 시작 시 사유 메시지 |
+| 8 | ffmpeg 미설치 | `CanRecord=false` → Rec 버튼 비활성화 + 시작 시 사유 메시지 |
 | 9 | ffmpeg 프로세스 사망 | `Exited` → `Failed` 이벤트 → `RefreshStats`가 정리 + `RecordingFailed` MessageBox |
 | 10 | 인코더가 못 따라감(라이브) | `HasRoom` false면 추출 스킵, 큐 full이면 드롭 + `DroppedFrames` 표시 |
-| 11 | 디스크가 못 따라감(RAW) | `BlockingCollection.Add` 블로킹(백프레셔) → 보드 드롭은 `M_PROCESS_FRAME_MISSED` → 배너 `⚠ dropped N` |
-| 12 | RAW 쓰기 스레드 사망 | `Failed` + `CompleteAdding()`으로 생산자 해제 → `RefreshStats`가 `StopRawRecording` |
-| 13 | 세그먼트 변환 실패 | `.raw`를 **삭제하지 않고 보존**, `Failed`/`LastError` → 완료 폴링 시 MessageBox |
-| 14 | RAW 시작 도중 예외 | 세션 정리 + `RestoreColorAfterRaw()`로 **보드 Bayer 변환 강제 복구** |
-| 15 | mono 카메라에서 RAW 시도 | `band != 1` 검사 → "raw Bayer 미지원" + 컬러 복구 |
-| 16 | Rec ↔ RAW 동시 시도 | 서로 상대 모드를 검사해 거부 |
-| 17 | 앱 종료 중 변환/finalize 미완 | `FreeCamera`에서 각각 최대 15초 대기, 미완 `.raw`는 스크래치에 남김 |
-| 18 | 설정 파일 손상 | `Load()`가 예외를 삼키고 기본값 유지 |
-| 19 | 전체화면에서 ESC를 MIL이 삼킴 | `ComponentDispatcher.ThreadFilterMessage` 후크 |
-| 20 | 8비트 초과 픽셀 깊이 | 디스플레이 `M_BIT_SHIFT`, 녹화는 `MimShift(-shift)`로 8비트 축소 |
-| 21 | 녹화 중 Stop 클릭 | 한국어 확인 대화상자(패널 단위 · 전체 단위 모두) |
-| 22 | 두 카메라가 같은 `OutputName` | `SafeName()`이 `_ch{index}` 접미사를 항상 붙임 |
-| 23 | 홀수 해상도 + H.264 | `w &= ~1; h &= ~1` + ffmpeg `crop=trunc(iw/2)*2:...` 이중 방어 |
-| 24 | 구형 Windows(dwmapi 없음) | `UseImmersiveDarkTitleBar`가 조용히 실패, 기본 타이틀바 유지 |
+| 11 | 설정 파일 손상 | `Load()`가 예외를 삼키고 기본값 유지 |
+| 12 | 전체화면에서 ESC를 MIL이 삼킴 | `ComponentDispatcher.ThreadFilterMessage` 후크 |
+| 13 | 8비트 초과 픽셀 깊이 | 디스플레이 `M_BIT_SHIFT`, 녹화는 `MimShift(-shift)`로 8비트 축소 |
+| 14 | 녹화 중 Stop 클릭 | 한국어 확인 대화상자(패널 단위 · 전체 단위 모두) |
+| 15 | 두 카메라가 같은 `OutputName` | `SafeName()`이 `_ch{index}` 접미사를 항상 붙임 |
+| 16 | 홀수 해상도 + H.264 | `w &= ~1; h &= ~1` + ffmpeg `crop=trunc(iw/2)*2:...` 이중 방어 |
+| 17 | 구형 Windows(dwmapi 없음) | `UseImmersiveDarkTitleBar`가 조용히 실패, 기본 타이틀바 유지 |
 
 ---
 
@@ -658,8 +584,8 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
    `CameraChannel.StartGrab`은 핸들을 정리한 뒤 `throw`했고, 이것이 `StartCommand`(`RelayCommand`)나
    `MilApplicationManager.StartAll()`을 통해 호출되면 **처리되지 않은 예외 → 앱 크래시**가 됐다.
    비throw 래퍼 `TryStartGrab()`을 추가해 UI·일괄 호출 경로가 이를 쓰도록 바꾸고, 실패는
-   `GrabFailed` 이벤트로 알린다. `StartGrab` 자체는 계속 던진다 —
-   `StartRawRecording`이 그 예외를 잡아 보드를 컬러로 되돌리기 때문. `App.xaml.cs`에
+   `GrabFailed` 이벤트로 알린다. `StartGrab` 자체는 계속 던진다 — 실패 시 되돌릴 것이 있는
+   호출자가 잡을 수 있어야 한다(당시에는 RAW 녹화가 보드를 컬러로 복구했다). `App.xaml.cs`에
    `DispatcherUnhandledException` 백스톱도 추가했다.
 
 2. ~~**`RelayCommand.RaiseCanExecuteChanged()`를 호출하는 곳이 전혀 없다.**~~ — **해결됨**
@@ -682,30 +608,19 @@ ffmpeg에 걸려 있고, MIL 압축 라이선스는 쓰지 않는다.**
 6. **`RecordingSession.Feed()`가 `_lock`을 잡은 채 MIL 추출(3회 `MbufGet` + 복사)을 수행**한다.
    같은 락을 UI 스레드의 `Stop()`이 기다리므로, 대형 프레임에서 정지 클릭이 순간적으로 블록될 수 있다.
 
-7. ~~**`bayer_rggb8` 하드코딩**~~ — **해결됨**
-   카메라의 실제 Bayer 패턴(GRBG/BGGR/GBRG)을 조회하지 않아, 패턴이 다른 센서에서는 RAW 산출물의
-   색이 뒤바뀌었다(컬러 Rec 경로는 보드가 변환하므로 무관). `InquireBayerPixelFormat()`이
-   `M_BAYER_PATTERN`을 `M_BAYER_MASK`로 마스킹해 조회한 뒤 ffmpeg `bayer_*8` 이름으로 매핑하고,
-   `RawSegmentSession`에 주입한다. 조회 실패 시에는 기존 동작대로 `bayer_rggb8`로 폴백한다.
-   **미검증**: 매핑 자체는 하드웨어에서 확인하지 못했다(§6 하단 참조).
-
-8. **`RawSegmentSession.Roll()`의 `_convertQueue.Add`가 이론상 던질 수 있다.**
-   `Finish()`가 `CompleteAdding()`을 부른 뒤 훅이 한 번 더 도는 경우인데, 현재 호출 순서
-   (`StopGrab` → `Finish`)에서는 발생하지 않는다. 다만 방어 코드가 없다.
-
-9. **`OutputSettings.Save()`가 setter마다 동기 파일 쓰기**를 한다. 관련 TextBox가
+7. **`OutputSettings.Save()`가 setter마다 동기 파일 쓰기**를 한다. 관련 TextBox가
    `UpdateSourceTrigger=PropertyChanged`라서 **타이핑 한 글자마다 JSON을 다시 쓴다.**
 
-10. ~~**자동 테스트가 전혀 없다.**~~ — **해결됨.** `tests/` 에 153개가 있다(→ §2.19).
-    다만 대상은 `Infrastructure` 뿐이다(→ §2.19). 여기 적었던 `OutputSettings`, `SafeName()`,
+8. ~~**자동 테스트가 전혀 없다.**~~ — **해결됨.** `tests/` 에 153개가 있다(→ §2.17).
+    다만 대상은 `Infrastructure` 뿐이다(→ §2.17). 여기 적었던 `OutputSettings`, `SafeName()`,
     `FfmpegRecorder.ResolveFfmpegPath` 는 **아직 테스트가 없다.** 새로 추가된 순수 로직
     (ROI, 밝기 표본, PWM, 타일 검지기) 쪽으로 먼저 갔다.
 
-11. ~~`docs/`에는 스크린샷 1장만 있고 설계 문서가 없다.~~ — **해결됨.**
+9. ~~`docs/`에는 스크린샷 1장만 있고 설계 문서가 없다.~~ — **해결됨.**
     `CONTEXT.md`(용어), `docs/adr/`, `docs/superpowers/specs/`(이상 검지 설계),
     `docs/GUI 가이드.md`, `docs/measurements/` 가 생겼다.
 
-12. **`research.md` 자신이 뒤처지기 쉽다.** 2026-08 갱신 시점에 View 절이 파일 크기 기준으로
+10. **`research.md` 자신이 뒤처지기 쉽다.** 2026-08 갱신 시점에 View 절이 파일 크기 기준으로
     3배 이상 차이가 났고, `Infrastructure` 의 10개 파일이 문서에 없었다. 파일을 추가할 때
     §2 에 항목을 함께 넣는 습관이 필요하다.
 

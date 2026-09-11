@@ -81,6 +81,33 @@ namespace MatroxFrameGrabber
         /// <summary>Seconds to hold each exposure, from <c>--dwell 30</c>.</summary>
         public static int DwellSeconds { get; private set; } = DefaultDwellSeconds;
 
+        private const string StillsSwitch = "--stills";
+
+        /// <summary>
+        /// <c>--stills</c>: keep frames in MIL buffers during an <c>--autostart</c> run and write
+        /// them as PNG, to measure what a lossless still costs.
+        ///
+        /// MbufExport with M_PNG already runs in this app for snapshots, so the question is not
+        /// whether it works but what it costs and whether the picture survives the round trip:
+        /// how long a MIL-to-MIL keep takes inside the acquisition hook, how long the PNG write
+        /// takes on the stats tick, and whether the file's mean luma matches what the brightness
+        /// meter reported for the same run.
+        /// </summary>
+        public static bool StillProbe { get; private set; }
+
+        private const string RecordSwitch = "--rec";
+
+        /// <summary>
+        /// <c>--rec</c>: record every present camera for the whole of an <c>--autostart</c> run.
+        ///
+        /// This exists for one measurement. Recording extracts the entire frame inside the
+        /// acquisition hook, which is exactly what a preroll ring of frames would have to do, so a
+        /// timed run with recording on says whether that extraction fits in the frame period - and
+        /// whether the encoder keeps up at the acquisition rate, which decides whether the file's
+        /// time axis can be trusted enough to cut an event window out of it.
+        /// </summary>
+        public static bool RecordDuringAutoRun { get; private set; }
+
         private const string NoDetectSwitch = "--no-detect";
 
         /// <summary>
@@ -132,6 +159,8 @@ namespace MatroxFrameGrabber
             OwnedChannels = ParseChannels(ParseSwitchValue(e.Args, ChannelsSwitch));
             BayerScopeTest = HasSwitch(e.Args, BayerScopeSwitch);
             DetectionOff = HasSwitch(e.Args, NoDetectSwitch);
+            RecordDuringAutoRun = HasSwitch(e.Args, RecordSwitch);
+            StillProbe = HasSwitch(e.Args, StillsSwitch);
             ExposureScan = ParseExposures(ParseSwitchValue(e.Args, ExposureScanSwitch));
             DwellSeconds = ParseDwellSeconds(e.Args);
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,

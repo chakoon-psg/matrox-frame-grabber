@@ -75,6 +75,8 @@ namespace MatroxFrameGrabber.Mil
                              $"system {AllocatedSystemDescriptor}, {DigitizerCount} digitizers, " +
                              $"channels {(OwnedChannels == null ? "all" : string.Join(",", OwnedChannels))}");
 
+            ProbeVideoSinks();
+
             for (int i = 0; i < ChannelCount; i++)
             {
                 var channel = new CameraChannel(i);
@@ -133,6 +135,77 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>Frees all MIL resources in reverse order of allocation.</summary>
+        /// <summary>
+        /// Records which MIL modules this installation is licensed for, and whether the board has
+        /// its own encoder.
+        ///
+        /// Both were measured once and written into docs/adr/0001-ffmpeg-for-all-encoding.md, which
+        /// is where the decision to encode only through ffmpeg comes from. A document cannot notice
+        /// when it stops being true - a licence bought later, or a different board, would leave the
+        /// app still routing everything through ffmpeg for a reason that had expired. Logging it
+        /// each start costs two inquiries and keeps the premise checkable.
+        /// </summary>
+        /// <summary>
+        /// Whether MIL accepts a compression context on this installation, asked once at startup.
+        ///
+        /// One of the two facts behind MilReadiness, and not the same as whether a MIL sink exists:
+        /// a sink written for this machine has to be runnable here even while the licence refuses,
+        /// or it can never be tested. Why the answer is what it is belongs to whoever supplies the
+        /// board - see docs/adr/0001-ffmpeg-for-all-encoding.md.
+        /// </summary>
+        public static bool MilContextAvailable { get; private set; }
+
+        /// <summary>MIL's own reason when a context is refused, for the settings window to show.</summary>
+        public static string MilContextReason { get; private set; } = "not probed";
+
+        private void ProbeVideoSinks()
+        {
+            try
+            {
+                MIL_INT boardType = _sysId != MIL.M_NULL
+                    ? MIL.MsysInquire(_sysId, MIL.M_BOARD_TYPE, MIL.M_NULL)
+                    : 0;
+
+                // Asked of the sink rather than here: the allocation it probes with is the one it
+                // would use, so the two cannot drift apart as the implementation changes.
+                MilContextAvailable = Video.MilSeqVideoSink.Probe(out string reason);
+                MilContextReason = reason;
+
+                MilErrorLog.Note($"board type 0x{(long)boardType:x}; "
+                               + $"MIL compression context {(MilContextAvailable ? "available" : "refused - " + reason)}; "
+                               + $"MIL sink {(Video.MilSeqVideoSink.Implemented ? "implemented" : "not implemented")}");
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write("probe the video sinks", e);
+            }
+        }
+
+
+        /// <summary>
+        /// MIL's current error as text. Errors are print-disabled process-wide so a failure that
+        /// does not throw leaves nothing anywhere unless it is read out deliberately.
+        /// </summary>
+        private static string CurrentMilError()
+        {
+            try
+            {
+                MIL_INT code = 0;
+                MIL.MappGetError(MIL.M_DEFAULT, MIL.M_CURRENT, ref code);
+
+                var msg = new System.Text.StringBuilder(MIL.M_ERROR_MESSAGE_SIZE);
+                MIL.MappGetError(MIL.M_DEFAULT, MIL.M_CURRENT + MIL.M_MESSAGE, msg);
+                var sub = new System.Text.StringBuilder(MIL.M_ERROR_MESSAGE_SIZE);
+                MIL.MappGetError(MIL.M_DEFAULT, MIL.M_CURRENT_SUB_1 + MIL.M_MESSAGE, sub);
+
+                string a = msg.ToString().Trim();
+                string b = sub.ToString().Trim();
+                return $"MIL error 0x{(long)code:x}: {a}" + (b.Length > 0 ? " / " + b : string.Empty);
+            }
+            catch (MILException e) { return "could not read the MIL error: " + e.Message.Trim(); }
+        }
+
+
         public void Free()
         {
             foreach (var channel in _channels)

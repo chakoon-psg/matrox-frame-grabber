@@ -28,54 +28,17 @@ namespace MatroxFrameGrabber.Infrastructure
         private static readonly string DefaultFolder =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "MatroxCapture");
 
-        private static readonly string DefaultScratch =
-            Path.Combine(SettingsDir, "rawscratch");
-
         /// <summary>Acquisition slots on the board — always 4, camera present or not.</summary>
         public const int ChannelCount = 4;
 
         private readonly ChannelRoi[] _channelRois = new ChannelRoi[ChannelCount];
         private int _displayUpdateFps = 30;
+        private VideoSinkPreference _videoSink = VideoSinkPreference.Auto;
 
         private string _outputFolder = DefaultFolder;
         private OutputResolution _resolution = OutputResolution.Original;
         private string _ffmpegPath = "";
-        private int _rawDurationSeconds = 10;
-        private int _rawSegmentSeconds = 60;
-        private string _rawScratchFolder = DefaultScratch;
         private bool _loading;   // suppresses Save() while Load() applies persisted values
-
-        /// <summary>Auto-stop duration for lossless RAW recording, in seconds. 0 = manual stop.</summary>
-        public int RawDurationSeconds
-        {
-            get => _rawDurationSeconds;
-            set { int v = value < 0 ? 0 : value; if (_rawDurationSeconds != v) { _rawDurationSeconds = v; RaiseChanged(nameof(RawDurationSeconds)); Save(); } }
-        }
-
-        /// <summary>Length of each RAW recording segment (one .mp4 per segment), in seconds. Min 5.</summary>
-        public int RawSegmentSeconds
-        {
-            get => _rawSegmentSeconds;
-            set { int v = value < 5 ? 5 : value; if (_rawSegmentSeconds != v) { _rawSegmentSeconds = v; RaiseChanged(nameof(RawSegmentSeconds)); Save(); } }
-        }
-
-        /// <summary>
-        /// Local (fast NVMe) folder for temporary RAW segment files before conversion. Kept separate
-        /// from <see cref="OutputFolder"/> because RAW is far too fast for network storage; only the
-        /// converted MP4s go to the (possibly NAS) output folder.
-        /// </summary>
-        public string RawScratchFolder
-        {
-            get => _rawScratchFolder;
-            set { string v = string.IsNullOrWhiteSpace(value) ? DefaultScratch : value; if (_rawScratchFolder != v) { _rawScratchFolder = v; RaiseChanged(nameof(RawScratchFolder)); Save(); } }
-        }
-
-        /// <summary>Ensures the RAW scratch folder exists; returns it.</summary>
-        public string EnsureScratchFolder()
-        {
-            Directory.CreateDirectory(_rawScratchFolder);
-            return _rawScratchFolder;
-        }
 
         /// <summary>Optional explicit path to ffmpeg.exe. Empty = auto-detect.</summary>
         public string FfmpegPath
@@ -183,6 +146,17 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
+        /// <summary>
+        /// Which backend records. Auto uses MIL when it is known to work here and ffmpeg otherwise;
+        /// an explicit choice is honoured with no fallback, which is what makes a delivered MIL sink
+        /// testable - see VideoSinkPolicy.
+        /// </summary>
+        public VideoSinkPreference VideoSink
+        {
+            get => _videoSink;
+            set { if (_videoSink != value) { _videoSink = value; RaiseChanged(nameof(VideoSink)); Save(); } }
+        }
+
         /// <summary>Target height in pixels for the preset (0 = keep original).</summary>
         [JsonIgnore]
         public int TargetHeight => _resolution switch
@@ -220,11 +194,12 @@ namespace MatroxFrameGrabber.Infrastructure
             [JsonConverter(typeof(JsonStringEnumConverter))]
             public OutputResolution Resolution { get; set; }
             public string FfmpegPath { get; set; }
-            public int RawDurationSeconds { get; set; } = 10;
-            public int RawSegmentSeconds { get; set; } = 60;
-            public string RawScratchFolder { get; set; }
             public RoiDto[] ChannelRois { get; set; }
             public int DisplayUpdateFps { get; set; } = 30;
+
+            // A name, not the enum's number: an unrecognised string falls back to Auto, where an
+            // out-of-range index would select a backend nobody asked for.
+            public string VideoSink { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -259,9 +234,9 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._outputFolder = string.IsNullOrWhiteSpace(dto.OutputFolder) ? DefaultFolder : dto.OutputFolder;
                         s._resolution = dto.Resolution;
                         s._ffmpegPath = dto.FfmpegPath ?? "";
-                        s._rawDurationSeconds = dto.RawDurationSeconds < 0 ? 0 : dto.RawDurationSeconds;
-                        s._rawSegmentSeconds = dto.RawSegmentSeconds < 5 ? 5 : dto.RawSegmentSeconds;
-                        s._rawScratchFolder = string.IsNullOrWhiteSpace(dto.RawScratchFolder) ? DefaultScratch : dto.RawScratchFolder;
+                        s._videoSink =
+                            Enum.TryParse(dto.VideoSink, ignoreCase: true, out VideoSinkPreference pref)
+                                ? pref : VideoSinkPreference.Auto;
                         s._displayUpdateFps = dto.DisplayUpdateFps <= 0
                             ? 0
                             : (dto.DisplayUpdateFps < 5 ? 5 : (dto.DisplayUpdateFps > 120 ? 120 : dto.DisplayUpdateFps));
@@ -331,11 +306,9 @@ namespace MatroxFrameGrabber.Infrastructure
                     OutputFolder = _outputFolder,
                     Resolution = _resolution,
                     FfmpegPath = _ffmpegPath,
-                    RawDurationSeconds = _rawDurationSeconds,
-                    RawSegmentSeconds = _rawSegmentSeconds,
-                    RawScratchFolder = _rawScratchFolder,
                     ChannelRois = rois,
                     DisplayUpdateFps = _displayUpdateFps,
+                    VideoSink = _videoSink.ToString(),
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelThresholds = _channelThresholds
                 };

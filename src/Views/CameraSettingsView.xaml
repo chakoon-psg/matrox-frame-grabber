@@ -1,0 +1,239 @@
+<UserControl x:Class="MatroxFrameGrabber.Views.CameraSettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Grid.IsSharedSizeScope="True">
+    <!--
+      One camera's settings, hosted either inside its pane's Settings expander or in a window of
+      its own. The same control and the same CameraChannel either way: the window is a second view
+      of one view-model rather than a reparented control, so nothing moves in the visual tree.
+
+      Why a window at all. The Calib row's text runs to about 600 px and a pane is 360, so in the
+      pane it is clipped and has to be read from a tooltip. Widening the pane is not available -
+      four of them share the window - and shortening the text would remove the provenance that is
+      the point of it. The spare width also lets the rows that had to hide figures in tooltips show
+      them: the frame period behind a debounce, the PWM null behind an exposure.
+
+      Rows are grouped by what they belong to rather than left in one flat stack of eleven, and the
+      label column is shared (SharedSizeGroup) so every group lines up on one left edge.
+    -->
+    <StackPanel>
+        <!-- Copy this camera's capture settings (exposure / acq rate / trigger / WB) to every
+             other present camera at once. -->
+        <Button HorizontalAlignment="Left" Margin="0,0,0,6" Click="ApplyAll_Click"
+                IsEnabled="{Binding CameraPresent}"
+                ToolTip="이 카메라의 노출·Acq Rate·트리거·화이트밸런스를 다른 모든 카메라에 적용">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE8C8;" FontFamily="Segoe MDL2 Assets" FontSize="11" VerticalAlignment="Center" />
+                <TextBlock Text="이 설정을 전체 카메라에 적용" Margin="6,0,0,0" VerticalAlignment="Center" />
+            </StackPanel>
+        </Button>
+
+        <!-- ─────────────── Camera ─────────────── -->
+        <TextBlock Text="CAMERA" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,3" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" SharedSizeGroup="SettingsLabel" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Label Grid.Row="0" Grid.Column="0" Content="Exp" />
+            <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBox Width="60" FontSize="11" VerticalContentAlignment="Center"
+                         Text="{Binding ExposureInput, UpdateSourceTrigger=PropertyChanged}"
+                         IsEnabled="{Binding CanSetExposureManually}"
+                         Tag="exposure" KeyDown="SettingsField_KeyDown" />
+                <TextBlock Text="{Binding ExposureRangeHint}" Margin="4,0,6,0"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                <Button Content="Apply" Click="ApplyExposure_Click"
+                        IsEnabled="{Binding CanSetExposureManually}" />
+                <CheckBox Content="Auto" Margin="4,0,0,0"
+                          IsChecked="{Binding ExposureAuto}"
+                          IsEnabled="{Binding SupportsExposureAuto}" />
+            </StackPanel>
+
+            <Label Grid.Row="1" Grid.Column="0" Content="Acq Rate" />
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <CheckBox Content="Limit" Width="52" IsChecked="{Binding AcqRateEnabled}"
+                          IsEnabled="{Binding SupportsAcqRateEnable}" />
+                <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                         Text="{Binding AcqRateInput, UpdateSourceTrigger=PropertyChanged}"
+                         IsEnabled="{Binding CanSetAcqRate}"
+                         Tag="acqrate" KeyDown="SettingsField_KeyDown" />
+                <TextBlock Text="{Binding AcqRateHint}" Margin="4,0,6,0"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                <Button Content="Apply" Click="ApplyAcqRate_Click"
+                        IsEnabled="{Binding CanSetAcqRate}" />
+            </StackPanel>
+
+            <!-- On-board decimation. The only lever that reduces host DMA traffic on this camera —
+                 cropping is accepted and ignored (see CLAUDE.md). Changing it reallocates the
+                 digitizer and buffers, so the grab briefly stops. -->
+            <Label Grid.Row="2" Grid.Column="0" Content="Decim" />
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <ComboBox Width="52" FontSize="11"
+                          ItemsSource="{Binding DecimationOptions}"
+                          SelectedItem="{Binding Decimation, Mode=OneWay}"
+                          SelectionChanged="Decimation_Changed"
+                          IsEnabled="{Binding SupportsDecimation}" />
+                <TextBlock Text="{Binding DecimationHint}" Margin="6,0,0,0"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+            </StackPanel>
+        </Grid>
+
+        <!-- ─────────────── Detection ─────────────── -->
+        <TextBlock Text="DETECTION" Foreground="#6F6F6F" FontSize="10" Margin="0,6,0,3" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" SharedSizeGroup="SettingsLabel" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Detection region: which pixels the anomaly metrics are computed over. Software
+                 only — no reallocation, and the camera cannot refuse it. 0 width or height means
+                 the whole frame. The green overlay rectangle in the pane shows the result, which
+                 is why the drag-to-edit toggle stays there and only the numbers live here. -->
+            <Label Grid.Row="0" Grid.Column="0" Content="ROI" />
+            <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBox Width="44" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="roi" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding RoiInX, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="OffsetX in frame coordinates" />
+                <TextBox Width="44" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="roi" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding RoiInY, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="OffsetY in frame coordinates" />
+                <TextBlock Text="+" Margin="3,0" VerticalAlignment="Center" Foreground="#9A9A9A" />
+                <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="roi" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding RoiInW, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Width (0 = whole frame)" />
+                <TextBox Width="50" Margin="2,0,0,0" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="roi" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding RoiInH, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Height (0 = whole frame)" />
+                <TextBlock Text="{Binding AnalysisRoiHint}" Margin="4,0,6,0"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                <Button Content="Apply" Click="ApplyRoi_Click" />
+                <Button Content="Full" Margin="2,0,0,0" Click="ClearRoi_Click"
+                        ToolTip="Measure the whole frame" />
+            </StackPanel>
+
+            <!-- Detection thresholds. Per channel because the cameras do not see the same thing:
+                 measured against one clip, the dimmest of three produced nine shallow false
+                 positives where the other two produced none. Takes effect on the next Start. -->
+            <Label Grid.Row="1" Grid.Column="0" Content="Detect" />
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="depth" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="detect" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding DepthInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="How far brightness must fall to count, as a fraction of the baseline" />
+                <TextBlock Text="coh" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="detect" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding CoherenceInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="How much the tiles must agree before a fall is believed" />
+                <TextBlock Text="{Binding DetectionHint}" Margin="6,0,6,0"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                <Button Content="Apply" Click="ApplyThresholds_Click"
+                        ToolTip="Saved to settings; takes effect on the next Start" />
+            </StackPanel>
+
+            <!-- Where the depth threshold came from, and what the last run would propose instead.
+                 Applying is a separate act on purpose: the histogram is collected on every run
+                 because it costs nothing, but only a person can say the run was on a healthy
+                 panel. TextTrimming rather than a fixed width, so a window shows all of it and a
+                 pane shows as much as it has room for. -->
+            <Label Grid.Row="2" Grid.Column="0" Content="Calib" />
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal">
+                <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10"
+                           TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding CalibrationText}" />
+                <Button Content="Use proposal" Margin="6,0,0,0" Click="ApplyCalibration_Click"
+                        IsEnabled="{Binding CanCalibrate}"
+                        ToolTip="Only after a run on a known-good panel" />
+            </StackPanel>
+        </Grid>
+
+        <!-- ─────────────── Advanced ─────────────── -->
+        <!-- Collapsed by default: none of these is touched after the rig is commissioned. -->
+        <Expander Header="ADVANCED" Foreground="#6F6F6F" FontSize="10"
+                  IsExpanded="False" Margin="0,6,0,0">
+            <Grid Margin="0,4,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" SharedSizeGroup="SettingsLabel" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Output name (used as snapshot/recording filename prefix) -->
+                <Label Grid.Row="0" Grid.Column="0" Content="Name" />
+                <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                    <TextBox Width="140" FontSize="11" VerticalContentAlignment="Center"
+                             Text="{Binding OutputName, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="File name prefix for snapshots/recordings" />
+                    <TextBlock Text="_yyyyMMdd_HHmmss.png / .mp4" Margin="6,0,0,0"
+                               VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                </StackPanel>
+
+                <Label Grid.Row="1" Grid.Column="0" Content="Trig" />
+                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                    <CheckBox Content="On" Width="38" IsChecked="{Binding TriggerOn}"
+                              IsEnabled="{Binding SupportsTrigger}" />
+                    <ComboBox Width="96" Margin="0,0,6,0" FontSize="11"
+                              ItemsSource="{Binding TriggerSources}"
+                              SelectedItem="{Binding SelectedTriggerSource}"
+                              IsEnabled="{Binding SupportsTrigger}" />
+                    <Button Content="Soft Trig" Click="SoftTrigger_Click"
+                            IsEnabled="{Binding SupportsTrigger}" />
+                </StackPanel>
+
+                <Label Grid.Row="2" Grid.Column="0" Content="WB" />
+                <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                    <CheckBox Content="Auto" Width="52" IsChecked="{Binding WhiteBalanceAuto}"
+                              IsEnabled="{Binding SupportsWhiteBalance}" />
+                    <Button Content="Once" Click="WhiteBalanceOnce_Click"
+                            IsEnabled="{Binding SupportsWhiteBalance}" />
+                    <Label Content="R" />
+                    <TextBox Width="42" FontSize="11" Text="{Binding RedRatioInput, UpdateSourceTrigger=PropertyChanged}"
+                             IsEnabled="{Binding CanSetBalanceManually}"
+                             Tag="balance" KeyDown="SettingsField_KeyDown" />
+                    <Label Content="B" Margin="4,0,0,0" />
+                    <TextBox Width="42" FontSize="11" Text="{Binding BlueRatioInput, UpdateSourceTrigger=PropertyChanged}"
+                             IsEnabled="{Binding CanSetBalanceManually}"
+                             Tag="balance" KeyDown="SettingsField_KeyDown" />
+                    <Button Content="Apply" Margin="4,0,0,0" Click="ApplyBalance_Click"
+                            IsEnabled="{Binding CanSetBalanceManually}" />
+                </StackPanel>
+
+                <Label Grid.Row="3" Grid.Column="0" Content="DCF" />
+                <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal">
+                    <TextBlock Text="{Binding DcfName}" Width="130" FontSize="11"
+                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                               Foreground="#9A9A9A" />
+                    <Button Content="Load DCF…" Click="LoadDcf_Click" />
+                    <Button Content="Features…" Click="FeatureBrowser_Click"
+                            IsEnabled="{Binding CameraPresent}" />
+                </StackPanel>
+            </Grid>
+        </Expander>
+    </StackPanel>
+</UserControl>

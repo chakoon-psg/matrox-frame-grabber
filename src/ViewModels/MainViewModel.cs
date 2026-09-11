@@ -55,7 +55,6 @@ namespace MatroxFrameGrabber.ViewModels
                     channel.RefreshStats();
                 RecordMeasurementRow();
                 RaiseChanged(nameof(AnyRecording));
-                RaiseChanged(nameof(AnyRawRecording));
                 RaiseChanged(nameof(BandwidthText));
                 StatsRefreshed?.Invoke();
             };
@@ -222,12 +221,10 @@ namespace MatroxFrameGrabber.ViewModels
 
         private void StopAll()
         {
-            StopRawAll();   // finalize any RAW recordings (+ cancel the auto-stop timer) first
             _manager.StopAll();
             foreach (var channel in _manager.Channels)
                 channel.RefreshStats();
             RaiseChanged(nameof(AnyRecording));
-            RaiseChanged(nameof(AnyRawRecording));
         }
 
         /// <summary>
@@ -302,82 +299,11 @@ namespace MatroxFrameGrabber.ViewModels
             return false;
         }
 
-        /// <summary>True if any camera is currently doing a lossless RAW recording.</summary>
-        public bool AnyRawRecording
-        {
-            get
-            {
-                foreach (var channel in _manager.Channels)
-                    if (channel.IsRawRecording)
-                        return true;
-                return false;
-            }
-        }
 
-        /// <summary>Auto-stop duration (seconds) for RAW recording; 0 = manual. Persisted via Output.</summary>
-        public string RawSeconds
-        {
-            get => Output.RawDurationSeconds.ToString();
-            set
-            {
-                if (int.TryParse(value, out int s))
-                    Output.RawDurationSeconds = s;
-                RaiseChanged(nameof(RawSeconds));
-            }
-        }
 
-        /// <summary>Length of each RAW MP4 segment (seconds). Persisted via Output.</summary>
-        public string RawSegSeconds
-        {
-            get => Output.RawSegmentSeconds.ToString();
-            set
-            {
-                if (int.TryParse(value, out int s))
-                    Output.RawSegmentSeconds = s;
-                RaiseChanged(nameof(RawSegSeconds));
-            }
-        }
 
-        private DispatcherTimer _rawAllTimer;
 
-        /// <summary>
-        /// Starts a lossless RAW recording on every present camera, or stops all if any are.
-        /// Returns a combined error message for channels that failed to start (null if all OK).
-        /// </summary>
-        public string ToggleRawAll()
-        {
-            if (AnyRawRecording)
-            {
-                StopRawAll();
-                return null;
-            }
 
-            var errors = new List<string>();
-            foreach (var channel in _manager.Channels)
-                if (channel.CameraPresent && !channel.StartRawRecording(out string err))
-                    errors.Add($"{channel.Name}: {err}");
-            RaiseChanged(nameof(AnyRawRecording));
-
-            // Only arm the auto-stop timer if at least one camera actually started.
-            int seconds = Output.RawDurationSeconds;
-            if (seconds > 0 && AnyRawRecording)
-            {
-                _rawAllTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(seconds) };
-                _rawAllTimer.Tick += (s, e) => StopRawAll();
-                _rawAllTimer.Start();
-            }
-
-            return errors.Count > 0 ? string.Join("\n", errors) : null;
-        }
-
-        private void StopRawAll()
-        {
-            if (_rawAllTimer != null) { _rawAllTimer.Stop(); _rawAllTimer = null; }
-            foreach (var channel in _manager.Channels)
-                if (channel.IsRawRecording)
-                    channel.StopRawRecording();
-            RaiseChanged(nameof(AnyRawRecording));
-        }
 
         /// <summary>Starts recording on all grabbing cameras, or stops all if any are recording.</summary>
         public void ToggleRecordAll()
