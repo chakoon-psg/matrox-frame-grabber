@@ -183,6 +183,18 @@ namespace MatroxFrameGrabber.Mil
         private ClipScheduler _evidenceClips;
         private int _evidenceBusy;
         private long _evidenceWritten;
+        private long _evidenceQueued;
+        private double _evidenceWorstWaitSec;
+
+        /// <summary>
+        /// How long a dump waits behind another channel before giving its window up.
+        ///
+        /// Generous on purpose. Three channels can only ever queue three dumps - the per-channel
+        /// busy flag stops a fourth - and one takes 0.6 to 1.5 s, so the real worst case is about
+        /// 3 s. Anything past 30 s is ffmpeg stuck, and waiting longer would only lose the next
+        /// window as well.
+        /// </summary>
+        private const int EvidenceGateTimeoutMs = 30000;
 
         // When the session recording started, for the record written beside it. The sink knows its
         // own elapsed time but not the wall clock it began at, and a record has to say when.
@@ -2232,6 +2244,8 @@ namespace MatroxFrameGrabber.Mil
             _evidence = null;
             _evidenceClips = null;
             _evidenceWritten = 0;
+            _evidenceQueued = 0;
+            _evidenceWorstWaitSec = 0.0;
 
             double around = Output?.EvidenceSeconds ?? 0.0;
             if (around <= 0.0) return;
@@ -2308,7 +2322,11 @@ namespace MatroxFrameGrabber.Mil
                 MilErrorLog.Note($"{Name}: evidence - a dump was still running after 20 s, "
                                + "the file it was writing is short");
             else if (_evidenceWritten > 0)
-                MilErrorLog.Note($"{Name}: evidence - {_evidenceWritten} window(s) written this run");
+                MilErrorLog.Note($"{Name}: evidence - {_evidenceWritten} window(s) written this run"
+                               + (_evidenceQueued > 0
+                                  ? $", {_evidenceQueued} of them queued behind another channel "
+                                    + $"(worst {_evidenceWorstWaitSec:F2} s)"
+                                  : ", none queued behind another channel"));
 
             _evidence = null;
             _evidenceClips = null;
@@ -2476,6 +2494,12 @@ namespace MatroxFrameGrabber.Mil
         /// the ring first; each frame is written straight from its slot and checked afterwards,
         /// because copying 1.7 GB out would put 0.85 GB/s beside the acquisition and that is the
         /// load measured to cost frames.
+        ///
+        /// One channel at a time, through <see cref="EvidenceGate"/>. Three of these at once ask
+        /// the disk for 2 GB/s and the acquisition is what gives way. The gate is taken on the
+        /// worker thread, never on the tick, and **the window is resolved after the wait** - so a
+        /// dump that queued behind another writes what the ring still holds and reports how long
+        /// it waited, rather than reading from slots that moved on while it was queued.
         /// </summary>
         private void BeginEvidenceDump(ClipRequest request)
         {
@@ -2492,40 +2516,68 @@ namespace MatroxFrameGrabber.Mil
                 return;
             }
 
-            // Clamped to what the ring can serve and still be written. The scheduler merges,
-            // so a run of faults can ask for a window several times the ring - measured, 22 merged
-            // occurrences wanted 18.8 s. The recent end is kept: it is nearest the fault that
-            // closed the window.
-            double from = request.FromSec;
-            double usable = ring.UsableSpanSec(fps);
-            if (usable > 0.0 && request.ToSec - from > usable)
-            {
-                from = request.ToSec - usable;
-                MilErrorLog.Note($"{Name}: evidence - window {request.ToSec - request.FromSec:F2} s "
-                               + $"is wider than the ring can write, keeping the last {usable:F2} s");
-            }
-
-            if (!ring.TryWindow(from, request.ToSec,
-                                out long firstFrame, out long lastFrame, out int held))
-            {
-                MilErrorLog.Note($"{Name}: evidence - the ring no longer holds "
-                               + $"{from:F3}-{request.ToSec:F3} s, nothing written");
-                Interlocked.Exchange(ref _evidenceBusy, 0);
-                return;
-            }
-
-            string path = System.IO.Path.Combine(
-                Output.EnsureEventFolder(),
-                $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{request.Kind}_evidence.mkv");
+            string folder = Output.EnsureEventFolder();
             var started = DateTimeOffset.Now;
 
             Task.Run(() =>
             {
+                // Before anything is named or opened: a dump that never gets the gate must not
+                // leave a zero-byte file behind.
+                if (!EvidenceGate.Shared.Enter(EvidenceGateTimeoutMs, out double waited))
+                {
+                    MilErrorLog.Note($"{Name}: evidence - gave up after "
+                                   + $"{EvidenceGateTimeoutMs / 1000} s behind another channel, "
+                                   + "nothing written");
+                    Interlocked.Exchange(ref _evidenceBusy, 0);
+                    return;
+                }
+
                 var recorder = new FfmpegRecorder();
                 int written = 0, lost = 0;
                 double firstTime = 0.0, lastTime = 0.0;
+                string path = null;
+                long firstFrame = 0, lastFrame = 0;
+                int held = 0;
                 try
                 {
+                    // Resolved here, after the wait, because the ring kept filling while we were
+                    // queued. Clamped to what it can serve and still be written: the scheduler
+                    // merges, so a run of faults can ask for several times the ring - measured,
+                    // 22 merged occurrences wanted 18.8 s. The recent end is kept, being nearest
+                    // the fault that closed the window.
+                    double from = request.FromSec;
+                    double usable = ring.UsableSpanSec(fps);
+                    if (usable > 0.0 && request.ToSec - from > usable)
+                    {
+                        from = request.ToSec - usable;
+                        MilErrorLog.Note($"{Name}: evidence - window "
+                                       + $"{request.ToSec - request.FromSec:F2} s is wider than "
+                                       + $"the ring can write, keeping the last {usable:F2} s");
+                    }
+
+                    if (!ring.TryWindow(from, request.ToSec, out firstFrame, out lastFrame, out held))
+                    {
+                        MilErrorLog.Note($"{Name}: evidence - the ring no longer holds "
+                                       + $"{from:F3}-{request.ToSec:F3} s"
+                                       + (waited > 0.05
+                                          ? $" after {waited:F2} s behind another channel"
+                                          : string.Empty)
+                                       + ", nothing written");
+                        return;
+                    }
+
+                    if (waited > 0.05)
+                    {
+                        _evidenceQueued++;
+                        if (waited > _evidenceWorstWaitSec) _evidenceWorstWaitSec = waited;
+                        MilErrorLog.Note($"{Name}: evidence - waited {waited:F2} s behind another "
+                                       + $"channel, {held} frame(s) still held");
+                    }
+
+                    path = System.IO.Path.Combine(
+                        folder,
+                        $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{request.Kind}_evidence.mkv");
+
                     string args = FfmpegArgs.Build(w, h, bands, fps, new[]
                     {
                         new FfmpegOutput(path, fps, encoding: VideoEncoding.Lossless),
@@ -2563,8 +2615,11 @@ namespace MatroxFrameGrabber.Mil
                 finally
                 {
                     try { recorder.Stop(); } catch { }
+                    EvidenceGate.Shared.Exit();
                     Interlocked.Exchange(ref _evidenceBusy, 0);
                 }
+
+                if (path == null) return;   // the ring had nothing left; nothing was opened
 
                 long bytes = System.IO.File.Exists(path) ? new System.IO.FileInfo(path).Length : 0;
                 _evidenceWritten++;
