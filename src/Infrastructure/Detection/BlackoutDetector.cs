@@ -16,11 +16,13 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>
         /// Tile-median luma at or below which a frame is dark enough to be a candidate.
         ///
-        /// Provisional. Measured 2026-09-10 on the unlit bench, the three channels' ROI luma read
-        /// 17.2 / 13.6 / 7.8 with the panels alive and showing a dark screen, so a threshold that
-        /// clears the darkest of them has under two luma of margin. **The optical setup and the
-        /// quiet hour have to land before this number means anything** - until then the flatness
-        /// gate is doing most of the work.
+        /// Measured 2026-09-11 at the 120 fps operating point, the three working panels floored
+        /// at **121.6 / 90.4 / 36.9** luma, so 6 clears the darkest of them by a factor of six.
+        /// That is far more headroom than the earlier reading suggested - 17.2 / 13.6 / 7.8 on the
+        /// unlit bench on 2026-09-10, which would have left under two luma - and the difference
+        /// is the exposure and what the panels were showing. **A level this far below the floor is
+        /// safe against false positives and says nothing about whether it catches a real fault**;
+        /// a panel that dies reads near zero, so the question is only whether anything else does.
         /// </summary>
         public double EnterLuma { get; set; } = 6.0;
 
@@ -133,11 +135,25 @@ namespace MatroxFrameGrabber.Infrastructure
         public bool IsUsable => FramesJudged >= AnomalyDetector.MinCalibrationFrames
                              && MinLuma > 0.0 && SuggestedEnterLuma > 0.0;
 
+        /// <summary>
+        /// Whether the run ever saw a frame that was not already dark.
+        ///
+        /// False means the panel was gone for the whole run - or the threshold is above what a
+        /// working panel reads, which is how a forced test looks. Either way there is no floor to
+        /// report, and printing 0.0 would read as "the panel floors at zero" rather than "nothing
+        /// was measured". Found in the log of the first end-to-end test, 2026-09-11.
+        /// </summary>
+        public bool SawHealthyFrame => MinLuma > 0.0;
+
         public override string ToString() =>
-            $"blackout proposal - enter {SuggestedEnterLuma:F1} luma, spread {SuggestedMaxSpread:F1} "
-          + $"(panel floor {MinLuma:F1} luma, spread there {MaxFlatSpreadAtDarkest:F1}, "
-          + $"{FramesJudged} frames judged)"
-          + (IsUsable ? string.Empty : " - NOT ENOUGH TO PROPOSE FROM");
+            !SawHealthyFrame
+                ? $"blackout proposal - no frame was outside a blackout, so there is no floor to "
+                + $"propose from ({FramesJudged} frames judged). Either the panel was gone for the "
+                + $"whole run, or the entry level is above what a working panel reads."
+                : $"blackout proposal - enter {SuggestedEnterLuma:F1} luma, spread {SuggestedMaxSpread:F1} "
+                + $"(panel floor {MinLuma:F1} luma, spread there {MaxFlatSpreadAtDarkest:F1}, "
+                + $"{FramesJudged} frames judged)"
+                + (IsUsable ? string.Empty : " - NOT ENOUGH TO PROPOSE FROM");
     }
 
     /// <summary>
@@ -213,6 +229,15 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>Frames judged, which is what the proposal needs enough of.</summary>
         public long Judged => _judged;
 
+        /// <summary>
+        /// Whether a frame period has been measured yet, which takes two consecutive frames.
+        ///
+        /// Nothing is confirmed before it is true. A dwell in milliseconds is not checkable
+        /// against a rate of zero, and the safe answer at the start of a grab is to judge nothing
+        /// rather than to judge with a dwell of one frame.
+        /// </summary>
+        public bool RateKnown => _framePeriodSec > 0.0;
+
         /// <summary>Frames skipped because the numbering jumped. The dwell restarts across a hole.</summary>
         public long FramesSkippedForGaps { get; private set; }
 
@@ -282,7 +307,14 @@ namespace MatroxFrameGrabber.Infrastructure
                 _lastFrame = frame;
                 _lastTime = timeStampSec;
 
-                if (!_reported && _darkRun >= _t.EnterFrames(Fps()))
+                // RateKnown first. The dwell is a claim about elapsed time and there is no way
+                // to convert it to frames before a frame period has been measured - which takes
+                // two frames. Without this guard EnterFrames(0) collapses to 1 and the first flat
+                // dark frame of a grab is reported as a blackout, and the start of a grab is
+                // exactly when the picture can legitimately be black: the panel may not be
+                // showing yet and the display buffer still holds the last run's frame. Found by
+                // the startup log reading "dwell 1f in / 1f out" on hardware, 2026-09-11.
+                if (!_reported && RateKnown && _darkRun >= _t.EnterFrames(Fps()))
                 {
                     _inBlackout = true;
                     _reported = true;
@@ -302,7 +334,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 if (back)
                 {
                     _clearRun++;
-                    if (_clearRun >= _t.RecoverFrames(Fps()))
+                    if (RateKnown && _clearRun >= _t.RecoverFrames(Fps()))
                     {
                         if (_inBlackout) RecoveredThisFrame = true;
                         _inBlackout = false;

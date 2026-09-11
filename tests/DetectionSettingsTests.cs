@@ -322,7 +322,10 @@ namespace MatroxFrameGrabber.Tests
             Assert.InRange(t.EnterLuma, 1.0, 254.0);      // luma, not a fraction
             Assert.True(t.ExitLuma > t.EnterLuma, "the pair has to be a hysteresis");
             Assert.True(t.MaxSpread > 0.0);
-            Assert.Equal(s.For(AnomalyKind.Blackout).DebounceMs, t.EnterMs, 3);
+            // Its own field, not DebounceMs. Sharing that one meant sharing its default, which
+            // is Dropout's calibrated 161 ms - a third of what a sustained kind should wait.
+            Assert.Equal(s.For(AnomalyKind.Blackout).BlackoutEnterMs, t.EnterMs, 3);
+            Assert.True(t.EnterMs >= 500.0, "a sustained kind waits half a second, not 161 ms");
         }
 
         [Fact]

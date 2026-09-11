@@ -99,7 +99,7 @@ src/
                                  VideoSinkPolicy, RecordingRecord, SharedFramePool,
                                  StoragePolicy(+StorageWarden), EvidenceRing, EvidenceGate,
                                  SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (470개). csproj가 `Infrastructure/**`를
+tests/                         MatroxFrameGrabber.Tests (505개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -445,6 +445,15 @@ cs 문서 §6.6("락 안에서 921 KB 복사")을 우리 코드에 대입해 찾
   전혀 없는 증상이다. 고친 뒤 같은 조건이 1024×772 · 124.3 fps · 유실 0이 됐다.
   **`Load()`/`Save()`의 실패는 이제 로그에 남는다.** 설정을 삼키는 `catch`를 새로 쓰지 말 것 —
   "파일이 없는 첫 실행"과 구별할 수 없게 된다.
+- **`dotnet test`는 앱 exe를 갱신하지 않는다.** 테스트 프로젝트가 `Infrastructure/**`를
+  ProjectReference가 아니라 **소스로 포함**하기 때문이다 — `Infrastructure`를 고치면 그 수정이
+  테스트 어셈블리에는 컴파일되어 **테스트는 통과하는데 `srcin`의 exe는 낡은 채로 남는다.**
+  실기 실행이 고친 동작을 보이지 않아 로드 경로를 두 번 더 파고들었고, 원인은 재빌드였다.
+  **실기에서 확인할 때는 `dotnet build ... -t:Rebuild`를 먼저 할 것.**
+- **`KindSettings`에 필드를 더하면 `CopyFrom`과 `Clamp`에도 더해야 한다.** 안 하면 값이
+  settings.json에 있고, 로드도 되고, 채널로 가는 길에 조용히 버려진다 — 로그는 기본값을 찍고
+  아무것도 실패하지 않는다. Blackout 노브 다섯 개가 정확히 그랬다.
+  `KindSettingsCopyTests`가 리플렉션으로 모든 public setter를 훑어 다음 필드는 자동으로 잡는다.
 - 보드는 **연결된 카메라가 더 적어도 디지타이저 4개를 보고한다.** 비어 있는 포트에
   `MdigAlloc`을 하면 `M_THROW_EXCEPTION` 아래에서도 모달 MIL 오류 대화상자가 뜬다. 그래서 탐지
   구간을 `MappControl(M_ERROR, M_PRINT_DISABLE/ENABLE)`로 감쌌다 — 이걸 유지하고, 반드시
