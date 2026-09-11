@@ -184,8 +184,9 @@ A와 B, 그리고 세 채널이 **같은 인스턴스 하나**를 쓰고 호출�
 ```csharp
 public readonly struct ScreenFinding
 {
-    public AnomalyKind Kind { get; }     // 모델의 클래스가 아니라 우리 종류
-    public float Score { get; }          // 0..1
+    public AnomalyKind Kind  { get; }    // 앱이 행동하는 근거 — 우리 어휘
+    public string      Label { get; }    // 모델이 말한 그대로 — 기록용, 행동하지 않는다
+    public float       Score { get; }    // 0..1
     public float X, Y, Width, Height;    // 취득 프레임 좌표 (분석 ROI와 같은 계)
     public float Right  => X + Width;    // x2가 아니라 가장자리 이름으로
     public float Bottom => Y + Height;
@@ -206,10 +207,65 @@ public interface IScreenInspector : IDisposable
 없애는 방법이고, 그래서 호출자당 하나이거나 락 하나다. cs 문서 §9-18이 같은 것을 문서화하라고
 적었다.
 
-**계약이 `AnomalyKind`만 말한다.** 모델이 자기 클래스를 갖고 있으면 인스펙터 안에서 우리 종류로
-옮기거나 보고하지 않는다. 앱에는 "화면이 어떻게 잘못될 수 있는가"에 대한 어휘가 하나뿐이고,
-설정 창이 그 목록이며, 다른 이름으로 올라온 판독 결과는 **끌 수도 보고할 수도 DUT에 걸 수도
-없다.**
+### 앱이 행동하는 것은 `Kind`, 기록에 남는 것은 `Label`도 (2026-09-11 확정)
+
+**`Kind`가 앱의 어휘다.** `AnomalyKind`는 11개 파일이 소비한다 — 타임라인, 설정 창,
+`ChannelHealth`, 클립 정책, 사이드카. 여기를 모델 마음대로의 문자열로 열면 그 전부가 모르는
+값을 받는다. 무엇을 끄고, 무슨 색으로 그리고, 고장인지 아닌지를 답할 수 없게 된다.
+
+**그런데 `Kind`만 두면 사이드카가 거짓말을 한다.** 모델이 "vertical_line_defect"라고 했는데
+제일 가까운 것이 `ColorShift`라서 그렇게 적으면, 기록은 우리가 한 번역을 모델의 말인 것처럼
+남긴다. IATF 추적성 맥락에서 가벼운 문제가 아니다.
+
+그래서 **둘 다 든다.** 두 진실이 아니라 **결정과 그 근거**다 — `RecordingRecord`가
+`SourceDeclaredFps` / `FileDeclaredFps` / `DeliveredFps`를 다 들고 있고 감사 한 줄이 그
+**비교**인 것과 같은 구조다.
+
+```json
+"kind":  "ColorShift",
+"label": "vertical_line_defect",
+"score": 0.82
+```
+
+**`Label`은 신뢰하지 않는 입력이다.** 모델 파일에서 오고 JSON 사이드카에 들어간다. 그러므로
+길이를 자르고(64자), 화이트리스트 문자만 남기고(`[A-Za-z0-9_.-]`), **파일 경로에는 절대 쓰지
+않는다.** 파일명은 지금처럼 `Kind`로 짓는다.
+
+### 종류 인덱스는 재사용하지 않는다
+
+이게 검토에서 나온 두 번째 지점이고, 안 짚었으면 설정 창이 망가졌을 자리다.
+
+**`AnomalyKind`는 라벨이 아니라 인덱스다** — `PerKind[AnomalyCatalog.Index(kind)]`가
+`KindSettings` 한 줄을 가리키고, 그 줄에 `Deviation` · `Coherence` · `DebounceMs` ·
+`MaxEventMs` · `MaxOnsetSpreadMs` · `MinOnsetTiles` · `CalibrationFloor` 등 **열 개**가 딸려
+온다. 전부 타일 통계의 노브이고 **판독기에 의미 있는 것은 하나도 없다.** 판독기가 갖는 것은
+점수 컷 하나다.
+
+그래서 **판독 결과는 `DetectionSettings.PerKind`를 거치지 않는다.**
+
+- `Kind`는 **라우팅·필터·보고용 라벨로만** 쓴다.
+- 점수 임계값은 **판독기 설정에 따로** 둔다. `KindSettings`에 칸을 만들지 않는다.
+- `AnomalyKindSet`(감시 종류)만 재사용한다 — 그건 켜고 끄는 목록일 뿐 임계값을 끌고 오지
+  않는다. 감시하지 않는 종류는 판독기도 보고하지 않는다.
+- 카메라별 설정 창의 임계값 행은 **타일 검출기가 잴 수 있는 종류만** 그린다.
+
+### 어느 종류에도 안 맞을 때 — `Unknown`
+
+모델이 본 것을 우리 일곱 종류 중 어디에도 넣을 수 없으면 **`AnomalyKind.Unknown = 7`** 로
+보고한다. 신뢰성 시험에서 "이름 붙일 수 없는 이상"은 버릴 것이 아니라 사람이 봐야 할 것이다.
+`Label`이 함께 남으므로 무엇이었는지도 남는다.
+
+세 가지가 딸려 온다.
+
+- **`AnomalyCatalog.Count`가 7 → 8이 된다.** 안전하다 — `Normalize()`가 배열을 버리지 않고
+  **늘린다.** 이건 5→7에서 캘리브레이션을 날릴 뻔한 뒤에 그렇게 고친 것이고, 그 주석이
+  "kind를 추가하는 바로 그때 일어났을 일이고, 이미 두 번 일어났다"고 적고 있다. 세 번째다.
+- **`AnomalyCatalog.Implemented`가 더 이상 참/거짓이 아니다.** 지금은
+  `kind == Dropout`이고, 설정 창이 나머지를 "미구현 — …"으로 그린다. `Unknown`은 미구현이
+  아니라 **판독기가 있으면 구현된 것**이다. 그러므로 "누가 구현하는가"로 바꿔야 한다 —
+  타일 / 판독기 / 없음. Blackout·Washout·Flip도 나중에 판독기가 맡으면 같은 길을 간다.
+- **`Unknown`은 판독기 전용이다.** 타일 검출기는 이것을 만들 수 없다. 카탈로그가 그렇게
+  말해야 하고, 카메라별 임계값 행도 그리지 않는다.
 
 구현은 **별도 어셈블리** `src/Onnx/`에 두고 `ProjectReference`로만 연결한다. 본체는 ONNX 타입을
 한 번도 이름으로 부르지 않는다 — 부르는 순간 제거 비용이 올라간다.
