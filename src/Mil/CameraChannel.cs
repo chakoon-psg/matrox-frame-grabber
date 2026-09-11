@@ -104,6 +104,11 @@ namespace MatroxFrameGrabber.Mil
         private long _rejectedSeen;
         private AnomalyDetector _detector;
 
+        // The sustained-kind detector, beside the event-kind one rather than inside it. They
+        // cannot share a state machine: Dropout measures a fall against a running baseline and
+        // confirms on one frame, Blackout measures an absolute level with hysteresis and must not.
+        private BlackoutDetector _blackout;
+
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
         private readonly ConcurrentQueue<AnomalyEvent> _anomalies = new ConcurrentQueue<AnomalyEvent>();
@@ -563,6 +568,92 @@ namespace MatroxFrameGrabber.Mil
         private string _coherenceInput;
 
         /// <summary>
+        /// Blackout's levels as typed. **Luma, 0-255, not a fraction** - the one thing an operator
+        /// can get wrong here is reading these as Dropout's units, where 0.05 is a sensible
+        /// number and would mean "never fire" in luma.
+        /// </summary>
+        public string BlackoutEnterInput
+        {
+            get => _blackoutEnterInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutEnterLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutEnterInput = value; RaisePropertyChanged(nameof(BlackoutEnterInput)); }
+        }
+
+        public string BlackoutExitInput
+        {
+            get => _blackoutExitInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutExitLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutExitInput = value; RaisePropertyChanged(nameof(BlackoutExitInput)); }
+        }
+
+        public string BlackoutSpreadInput
+        {
+            get => _blackoutSpreadInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutMaxSpread.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutSpreadInput = value; RaisePropertyChanged(nameof(BlackoutSpreadInput)); }
+        }
+
+        private string _blackoutEnterInput;
+        private string _blackoutExitInput;
+        private string _blackoutSpreadInput;
+
+        /// <summary>
+        /// The dwells in the units they act in, and what the panel last read.
+        ///
+        /// The live reading is here because the three levels above are meaningless without it:
+        /// "6 luma" says nothing until you can see that this panel sits at 37 and keeps 40 of
+        /// structure. It is the number that makes the threshold defensible on screen rather than
+        /// in a log nobody opens.
+        /// </summary>
+        public string BlackoutHint
+        {
+            get
+            {
+                BlackoutThresholds t = Detection.ResolveBlackout(AnomalyKind.Blackout);
+                string dwell = $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                if (!AnomalyCatalog.Implemented(AnomalyKind.Blackout))
+                    return dwell;
+                return _blackout != null
+                    ? $"{dwell} · now {BlackoutLuma:0.#} luma, spread {BlackoutSpread:0.#}"
+                      + (InBlackout ? $" · BLACK for {BlackoutRunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Blackout on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Applies the typed Blackout levels. All three or none, like Dropout's pair - a
+        /// half-applied hysteresis is worse than neither.
+        /// </summary>
+        public bool ApplyBlackoutThresholds()
+        {
+            if (!double.TryParse(_blackoutEnterInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double enter) ||
+                !double.TryParse(_blackoutExitInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double exit) ||
+                !double.TryParse(_blackoutSpreadInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double spread))
+                return false;
+
+            KindSettings k = Detection.For(AnomalyKind.Blackout);
+            k.BlackoutEnterLuma = enter;
+            k.BlackoutExitLuma = exit;
+            k.BlackoutMaxSpread = spread;
+            k.Clamp();                     // lifts an exit that is not above the entry
+            Output?.SaveThresholds();
+
+            // Show what was kept, not what was typed.
+            _blackoutEnterInput = null;
+            _blackoutExitInput = null;
+            _blackoutSpreadInput = null;
+            RaisePropertyChanged(nameof(BlackoutEnterInput));
+            RaisePropertyChanged(nameof(BlackoutExitInput));
+            RaisePropertyChanged(nameof(BlackoutSpreadInput));
+            RaisePropertyChanged(nameof(BlackoutHint));
+
+            MilErrorLog.Note($"{Name}: {AnomalyKind.Blackout} levels now dark at or below "
+                           + $"{k.BlackoutEnterLuma:0.#} luma and flat within {k.BlackoutMaxSpread:0.#}, "
+                           + $"back at {k.BlackoutExitLuma:0.#} - takes effect on the next Start");
+            return true;
+        }
+
+        /// <summary>
         /// The thresholds that are not on the pane, in the units they actually act in. Frames are
         /// what the detector counts, but nobody reasons in frames at 124 fps -- and the same frame
         /// count means a different duration at a different exposure, which is exactly the sort of
@@ -606,6 +697,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(BlackoutHint));
             RaisePropertyChanged(nameof(DetectionKindsText));
 
             // Logged as resolved rather than as stored: milliseconds are what a person sets and
@@ -696,6 +788,18 @@ namespace MatroxFrameGrabber.Mil
         /// have to be chosen from the distribution these take on a healthy panel.
         /// </summary>
         public double DetectionDepth => _detector?.LastDepth ?? 0.0;
+
+        /// <summary>Tile-median luma of the last frame judged, which is what Blackout judges on.</summary>
+        public double BlackoutLuma => _blackout?.LastLuma ?? 0.0;
+
+        /// <summary>Range of the tile means - how much structure the picture still has.</summary>
+        public double BlackoutSpread => _blackout?.LastSpread ?? 0.0;
+
+        /// <summary>Whether the picture is gone right now. A sustained fault is a state, not an event.</summary>
+        public bool InBlackout => _blackout?.InBlackout ?? false;
+
+        /// <summary>How long it has been gone, in ms, or 0.</summary>
+        public double BlackoutRunningMs => _blackout?.RunningMs ?? 0.0;
         public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
         public double DetectionBaseline => _detector?.Baseline ?? 0.0;
 
@@ -1435,8 +1539,33 @@ namespace MatroxFrameGrabber.Mil
             // leave this channel unwatched. And --no-detect goes through the same gate, so that
             // switch reports DetectionOff as well instead of a channel that looks Healthy while
             // judging nothing.
-            bool watching = DetectionEnabled && Detection.EnabledCount > 0;
-            _detector = watching ? new AnomalyDetector(DetectionThresholds) : null;
+            // Per kind, not one flag for both. EnabledCount tells us somebody is watching
+            // something implemented; it does not say which, and building the event detector
+            // because Blackout is on would leave a Dropout judge nobody asked for reporting on
+            // the same frames.
+            bool wantDropout = DetectionEnabled && Detection.For(AnomalyKind.Dropout).Enabled
+                            && AnomalyCatalog.Implemented(AnomalyKind.Dropout);
+            bool wantBlackout = DetectionEnabled && Detection.For(AnomalyKind.Blackout).Enabled
+                             && AnomalyCatalog.Implemented(AnomalyKind.Blackout);
+
+            _detector = wantDropout ? new AnomalyDetector(DetectionThresholds) : null;
+            _blackout = wantBlackout
+                ? new BlackoutDetector(Detection.ResolveBlackout(AnomalyKind.Blackout))
+                : null;
+
+            bool watching = _detector != null || _blackout != null;
+            if (_blackout != null)
+            {
+                BlackoutThresholds bt = Detection.ResolveBlackout(AnomalyKind.Blackout);
+                // In milliseconds, not frames. The rate is not measured yet at this point in
+                // the start-up, so a frame count printed here would read 1 and be a lie about
+                // what the detector will do - which is how the missing RateKnown guard was found.
+                MilErrorLog.Note($"{Name}: blackout watch on - dark at or below "
+                               + $"{bt.EnterLuma:0.#} luma and flat within {bt.MaxSpread:0.#}, "
+                               + $"back at {bt.ExitLuma:0.#}, "
+                               + $"dwell {bt.EnterMs:0} ms in / {bt.RecoverMs:0} ms out "
+                               + "(resolved to frames once the rate is measured)");
+            }
             if (!watching)
                 MilErrorLog.Note($"{Name}: detection off - "
                                + (DetectionEnabled
@@ -1514,10 +1643,26 @@ namespace MatroxFrameGrabber.Mil
                   + $"{_detector.CoherenceSaves} turned away by coherence alone; "
                   + $"{_detector.Observed} frames judged");
 
+            if (DetectionEnabled && _blackout != null)
+            {
+                MilErrorLog.Note($"{Name}: {_blackout.Propose()}");
+                MilErrorLog.Note($"{Name}: blackout floor - last frame {_blackout.LastLuma:F1} luma, "
+                               + $"spread {_blackout.LastSpread:F1}; "
+                               + $"{(_blackout.InBlackout ? "STILL BLACK" : "picture present")} at stop; "
+                               + $"{_blackout.Judged} frames judged, "
+                               + $"{_blackout.FramesSkippedForGaps} dwell restarts on gaps");
+            }
+
             // A fault still running when the grab ends would otherwise never be reported at all.
             AnomalyEvent? tail = _detector?.Flush();
             if (tail.HasValue)
                 RecordAnomaly(tail.Value);
+
+            // Same for a blackout the dwell had not yet confirmed: a panel that died four frames
+            // before the run ended would be lost entirely.
+            AnomalyEvent? stillGone = _blackout?.Flush();
+            if (stillGone.HasValue)
+                RecordAnomaly(stillGone.Value);
 
             if (_stills != null && _stills.IsAllocated)
             {
@@ -1536,6 +1681,7 @@ namespace MatroxFrameGrabber.Mil
                 _lastProposal = _detector.Propose(
                     DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
             _detector = null;
+            _blackout = null;
             RaisePropertyChanged(nameof(CalibrationText));
             RaiseCommandStates();
 
@@ -1806,7 +1952,8 @@ namespace MatroxFrameGrabber.Mil
                 return;
 
             AnomalyDetector detector = _detector;
-            if (detector == null)
+            BlackoutDetector blackout = _blackout;
+            if (detector == null && blackout == null)
                 return;
 
             // A failed reduction leaves the grid empty, and an empty grid is not a dark one -
@@ -1818,14 +1965,30 @@ namespace MatroxFrameGrabber.Mil
             _grid.FrameNumber = frameNumber;
             _history.Add(_grid, timeStampSec);
 
-            AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
-            if (closed.HasValue)
-                RecordAnomaly(closed.Value);
+            // Both judges read the same reduction. The reduction is the expensive half
+            // (200 us of an 8333 us period, measured); the second judge adds one pass over 64
+            // tile means to find their range.
+            if (detector != null)
+            {
+                AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
+                if (closed.HasValue)
+                    RecordAnomaly(closed.Value);
 
-            // Taken here rather than on the tick: the detector is only ever touched from this
-            // thread, so draining it needs no lock, and the queue below is what crosses over.
-            while (detector.TryTakeRejected(out AnomalyEvent turned))
-                _rejections.Enqueue(turned);
+                // Taken here rather than on the tick: the detector is only ever touched from this
+                // thread, so draining it needs no lock, and the queue below is what crosses over.
+                while (detector.TryTakeRejected(out AnomalyEvent turned))
+                    _rejections.Enqueue(turned);
+            }
+
+            // Emits on confirm rather than on close, and only once for a fault that lasts hours.
+            // That is also while the evidence ring still holds the transition, which is the
+            // diagnostic moment - the picture going, not the black afterwards.
+            if (blackout != null)
+            {
+                AnomalyEvent? gone = blackout.Observe(_grid, timeStampSec);
+                if (gone.HasValue)
+                    RecordAnomaly(gone.Value);
+            }
 
             // ---- Lossless stills: the detector says which frame each slot wants ----
             //
@@ -1835,13 +1998,30 @@ namespace MatroxFrameGrabber.Mil
             StillRing stills = _stills;
             if (stills != null)
             {
-                double dev = detector.LastDepth;
-                if (detector.EnteredThisFrame)
-                    stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec, dev);
-                if (detector.DeepenedThisFrame)
-                    stills.Keep(StillRing.Slot.Extreme, grabbedBuffer, frameNumber, timeStampSec, dev);
-                if (detector.RecoveredThisFrame)
-                    stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec, dev);
+                double dev = detector?.LastDepth ?? 0.0;
+                if (detector != null)
+                {
+                    if (detector.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec, dev);
+                    if (detector.DeepenedThisFrame)
+                        stills.Keep(StillRing.Slot.Extreme, grabbedBuffer, frameNumber, timeStampSec, dev);
+                    if (detector.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec, dev);
+                }
+
+                // After the event detector on purpose. A blackout onset is usually also a fall, so
+                // both can want the same slot on the same frame, and the more specific finding is
+                // the one worth keeping the picture for. There is no Extreme here - a blackout has
+                // no depth to deepen into, it is either gone or it is not.
+                if (blackout != null)
+                {
+                    if (blackout.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    blackout.LastLuma);
+                    if (blackout.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    blackout.LastLuma);
+                }
 
                 // A healthy frame from up to 258 ms back, so the pair shows what changed.
                 //
@@ -1849,7 +2029,8 @@ namespace MatroxFrameGrabber.Mil
                 // event is open: measured, an event over frames 8140-8142 was still unexported when
                 // frame 8192 came round and refreshed the reference, so the "frame from before the
                 // fall" was one from 52 frames after it. The tick can be up to 500 ms behind.
-                if (!detector.InEvent
+                if (!(detector?.InEvent ?? false)
+                    && !(blackout?.InBlackout ?? false)
                     && !stills.Has(StillRing.Slot.Onset)
                     && frameNumber % StillRing.ReferenceEveryFrames == 0)
                     stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);

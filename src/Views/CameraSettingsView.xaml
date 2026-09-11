@@ -98,6 +98,8 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- Detection region: which pixels the anomaly metrics are computed over. Software
@@ -171,11 +173,47 @@
                         ToolTip="Saved to settings; takes effect on the next Start" />
             </StackPanel>
 
+            <!-- Blackout's three, and they are luma rather than a fraction. Its own row because
+                 it is its own detector: Dropout measures a fall against a running baseline and
+                 confirms on one frame, this measures an absolute level with hysteresis and must
+                 not. Sharing the row would suggest sharing the units, and 0.05 luma means "never
+                 fire". -->
+            <Label Grid.Row="3" Grid.Column="0" Content="Blackout" />
+            <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="dark≤" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="blackout" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding BlackoutEnterInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="화면이 사라진 것으로 볼 luma (0~255, 비율이 아님)&#x0a;실측: 작동 중인 패널은 121.6 / 90.4 / 36.9 luma로 바닥을 칩니다" />
+                <TextBlock Text="back≥" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="blackout" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding BlackoutExitInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="화면이 돌아온 것으로 볼 luma. dark보다 높아야 합니다 — 그 간격이 히스테리시스이고, 없으면 경계에 앉은 패널이 몇 프레임마다 사건을 냅니다" />
+                <TextBlock Text="flat≤" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="blackout" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding BlackoutSpreadInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="타일 평균의 범위. 이것이 꺼진 패널과 어두운 화면을 가릅니다&#x0a;어두운 화면도 화면이라 타일이 서로 다르고, 꺼진 패널은 센서 잡음뿐이라 타일이 일치합니다&#x0a;절대 레벨 캘리브레이션 없이도 동작하는 절반입니다" />
+                <Button Content="Apply" Margin="6,0,0,0" Click="ApplyBlackout_Click"
+                        ToolTip="Saved to settings; takes effect on the next Start" />
+            </StackPanel>
+
+            <!-- The live reading beside the levels, because "6 luma" says nothing until you can
+                 see that this panel sits at 37 and keeps 40 of structure. -->
+            <Label Grid.Row="4" Grid.Column="0" Content="" />
+            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding BlackoutHint}" Margin="0,0,0,5"
+                       VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                       TextTrimming="CharacterEllipsis" ToolTip="{Binding BlackoutHint}" />
+
             <!-- The budget and the share, because the split is invisible otherwise: five
                  detectors each allowed one false positive an hour is five an hour, and the total
                  is the number anybody was told to expect. -->
-            <Label Grid.Row="3" Grid.Column="0" Content="Budget" />
-            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding BudgetText}" Margin="0,0,0,3"
+            <Label Grid.Row="5" Grid.Column="0" Content="Budget" />
+            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding BudgetText}" Margin="0,0,0,3"
                        VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
                        TextTrimming="CharacterEllipsis" ToolTip="{Binding BudgetText}" />
 
@@ -184,8 +222,8 @@
                  because it costs nothing, but only a person can say the run was on a healthy
                  panel. TextTrimming rather than a fixed width, so a window shows all of it and a
                  pane shows as much as it has room for. -->
-            <Label Grid.Row="4" Grid.Column="0" Content="Calib" />
-            <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal">
+            <Label Grid.Row="6" Grid.Column="0" Content="Calib" />
+            <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal">
                 <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
                            Foreground="#9A9A9A" FontSize="10"
                            TextTrimming="CharacterEllipsis"

@@ -84,7 +84,28 @@ namespace MatroxFrameGrabber.Infrastructure
         /// trust: a rate-based depth threshold, a coherence gate, an onset-spread gate, an event
         /// cap and a histogram that excludes the frames around an event.
         /// </summary>
-        public static bool Implemented(AnomalyKind kind) => kind == AnomalyKind.Dropout;
+        /// <summary>
+        /// Whether anything in this build judges this kind.
+        ///
+        /// Two now. They do not share a state machine and could not: Dropout measures a fall
+        /// relative to a running baseline and confirms on one frame; Blackout measures an
+        /// absolute level with hysteresis and must not. `CONTEXT.md` makes that the dividing line
+        /// between an event kind and a sustained one.
+        ///
+        /// When a learned inspector arrives this stops being a yes-or-no question - a kind will
+        /// be implemented by the tiles, by the inspector, or by nothing yet. `docs/adr/0002`
+        /// carries that shape; until then two kinds are true.
+        /// </summary>
+        public static bool Implemented(AnomalyKind kind) =>
+            kind == AnomalyKind.Dropout || kind == AnomalyKind.Blackout;
+
+        /// <summary>
+        /// Whether the kind is judged by the sustained detector rather than the event one.
+        ///
+        /// The caller needs this because the two take different settings and emit on different
+        /// occasions - one on close, one on confirm.
+        /// </summary>
+        public static bool IsSustained(AnomalyKind kind) => kind == AnomalyKind.Blackout;
 
         /// <summary>Which way this kind moves brightness.</summary>
         public static AnomalyDirection DirectionOf(AnomalyKind kind)

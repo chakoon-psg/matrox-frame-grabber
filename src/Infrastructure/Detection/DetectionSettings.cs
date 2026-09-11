@@ -65,6 +65,48 @@ namespace MatroxFrameGrabber.Infrastructure
         /// </summary>
         public double MaxEventMs { get; set; } = 2010.0;
 
+        // ----- Blackout only -----
+        //
+        // A kind reads the knobs its detector has, and ignores the rest. Dropout never looks at
+        // these three, and Blackout never looks at Deviation, Coherence, MaxEventMs,
+        // MaxOnsetSpreadMs or MinOnsetTiles - it holds no baseline to deviate from, measures no
+        // delta to be coherent about, and has no cap because nothing it does can erase itself.
+        //
+        // The alternative was a second settings type per kind. Not worth it for three doubles,
+        // but the moment a fourth kind wants its own it is.
+
+        /// <summary>
+        /// Luma at or below which the picture counts as gone. **Absolute, 0-255, not a fraction**
+        /// - see <see cref="BlackoutThresholds.EnterLuma"/> for why a sustained kind cannot use a
+        /// running baseline.
+        /// </summary>
+        public double BlackoutEnterLuma { get; set; } = 6.0;
+
+        /// <summary>Luma the picture has to reach to be back. Above the entry: that is the hysteresis.</summary>
+        public double BlackoutExitLuma { get; set; } = 12.0;
+
+        /// <summary>
+        /// How far apart the tile means may be and still count as flat. **This is what separates
+        /// a dead panel from a dark picture**, and the half of the test that works before the
+        /// absolute level has been calibrated.
+        /// </summary>
+        public double BlackoutMaxSpread { get; set; } = 4.0;
+
+        /// <summary>
+        /// How long dark-and-flat has to hold before it is a fault, in ms.
+        ///
+        /// Its own field rather than DebounceMs, which is what it was at first. The reasoning
+        /// then was that debounce already means "how long before this is confirmed" - true, but
+        /// **sharing a field means sharing its default**, and that default is 161 ms because
+        /// Dropout's debounce was calibrated to 161 ms. The hardware log read "dwell 161 ms in"
+        /// and that is not what a sustained kind should wait: a blackout is defined by staying
+        /// gone, so half a second is the floor, not a sixth.
+        /// </summary>
+        public double BlackoutEnterMs { get; set; } = 500.0;
+
+        /// <summary>How long the picture has to be back before the fault is over, in ms.</summary>
+        public double BlackoutRecoverMs { get; set; } = 500.0;
+
         /// <summary>
         /// How much of a head start the first falling tile may have over the last. A surface that
         /// dims at once is near zero; the periodic horizontal wipe on these panels took 193 ms and
@@ -103,6 +145,15 @@ namespace MatroxFrameGrabber.Infrastructure
             MinOnsetTiles = MinOnsetTiles < 1 ? 1
                           : (MinOnsetTiles > TileGrid.TileCount ? TileGrid.TileCount : MinOnsetTiles);
             CalibratedAt = CalibratedAt ?? string.Empty;
+
+            // Luma, so 0-255, and the pair has to stay a hysteresis. A hand-edited file that put
+            // the exit at or below the entry would otherwise chatter rather than be refused.
+            BlackoutEnterLuma = C(BlackoutEnterLuma, 0.0, 254.0);
+            BlackoutExitLuma = C(BlackoutExitLuma, 0.0, 255.0);
+            if (BlackoutExitLuma <= BlackoutEnterLuma) BlackoutExitLuma = BlackoutEnterLuma + 1.0;
+            BlackoutMaxSpread = C(BlackoutMaxSpread, 0.0, 255.0);
+            BlackoutEnterMs = C(BlackoutEnterMs, 1.0, 600000.0);
+            BlackoutRecoverMs = C(BlackoutRecoverMs, 1.0, 600000.0);
         }
 
         private static double C(double v, double lo, double hi) =>
@@ -118,6 +169,15 @@ namespace MatroxFrameGrabber.Infrastructure
             MaxEventMs = other.MaxEventMs;
             MaxOnsetSpreadMs = other.MaxOnsetSpreadMs;
             MinOnsetTiles = other.MinOnsetTiles;
+            // Blackout's five. Missing from here at first, and the symptom was the classic one:
+            // the value was in settings.json, the log reported the default, and nothing failed.
+            // A field added above has to be added here or it is read from the file and dropped on
+            // the way to the channel.
+            BlackoutEnterLuma = other.BlackoutEnterLuma;
+            BlackoutExitLuma = other.BlackoutExitLuma;
+            BlackoutMaxSpread = other.BlackoutMaxSpread;
+            BlackoutEnterMs = other.BlackoutEnterMs;
+            BlackoutRecoverMs = other.BlackoutRecoverMs;
             // StoredEnabled is deliberately NOT copied. It is the old file's key, read once by
             // the migration; carrying it onto the live instance would put "Enabled" back into
             // every save, and the file would again hold four answers beside the one.
@@ -193,6 +253,28 @@ namespace MatroxFrameGrabber.Infrastructure
         ///
         /// A longer array is truncated, which loses nothing this build can name.
         /// </summary>
+        /// <summary>
+        /// Thresholds for the sustained-kind detector. Only Blackout has one.
+        ///
+        /// Every value its own. Reusing `DebounceMs` for the entry dwell looked economical and
+        /// was wrong: the field carries Dropout's calibrated 161 ms, which is a third of what a
+        /// sustained kind should wait for.
+        /// </summary>
+        public BlackoutThresholds ResolveBlackout(AnomalyKind kind)
+        {
+            KindSettings k = For(kind);
+            var t = new BlackoutThresholds();
+            t.CopyFrom(new BlackoutThresholds
+            {
+                EnterLuma = k.BlackoutEnterLuma,
+                ExitLuma = k.BlackoutExitLuma,
+                MaxSpread = k.BlackoutMaxSpread,
+                EnterMs = k.BlackoutEnterMs,
+                RecoverMs = k.BlackoutRecoverMs,
+            });
+            return t;
+        }
+
         private void Normalize()
         {
             if (PerKind != null && PerKind.Length == AnomalyCatalog.Count)

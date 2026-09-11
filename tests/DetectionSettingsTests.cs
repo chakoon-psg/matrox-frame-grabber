@@ -279,13 +279,53 @@ namespace MatroxFrameGrabber.Tests
     /// <summary>What is known about each kind without asking a detector.</summary>
     public class AnomalyCatalogTests
     {
+        /// <summary>
+        /// Two kinds have a detector, and they are different kinds of detector. Dropout measures
+        /// a fall relative to a running baseline and confirms on one frame; Blackout measures an
+        /// absolute level with hysteresis and must not. The rest have none yet, and the settings
+        /// window says so rather than hiding them.
+        /// </summary>
         [Fact]
-        public void Only_dropout_has_a_detector()
+        public void Two_kinds_have_a_detector_and_the_rest_say_so()
         {
             Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Dropout));
+            Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Blackout));
+
             foreach (AnomalyKind k in AnomalyCatalog.All)
-                if (k != AnomalyKind.Dropout)
+                if (k != AnomalyKind.Dropout && k != AnomalyKind.Blackout)
                     Assert.False(AnomalyCatalog.Implemented(k), $"{k} has no detector yet");
+        }
+
+        /// <summary>
+        /// Which of the two judges it. The caller needs this because they take different settings
+        /// and emit on different occasions - one on close, one on confirm.
+        /// </summary>
+        [Fact]
+        public void Only_blackout_is_judged_by_the_sustained_detector()
+        {
+            Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Blackout));
+            Assert.False(AnomalyCatalog.IsSustained(AnomalyKind.Dropout));
+        }
+
+        /// <summary>
+        /// Blackout's knobs are luma, and Dropout's are a fraction. Reading one as the other is a
+        /// 0.05-against-255 mistake that would silence or saturate the detector, so the defaults
+        /// are checked to be in the right units.
+        /// </summary>
+        [Fact]
+        public void Blackout_resolves_absolute_levels_and_a_hysteresis()
+        {
+            var s = new DetectionSettings();
+
+            BlackoutThresholds t = s.ResolveBlackout(AnomalyKind.Blackout);
+
+            Assert.InRange(t.EnterLuma, 1.0, 254.0);      // luma, not a fraction
+            Assert.True(t.ExitLuma > t.EnterLuma, "the pair has to be a hysteresis");
+            Assert.True(t.MaxSpread > 0.0);
+            // Its own field, not DebounceMs. Sharing that one meant sharing its default, which
+            // is Dropout's calibrated 161 ms - a third of what a sustained kind should wait.
+            Assert.Equal(s.For(AnomalyKind.Blackout).BlackoutEnterMs, t.EnterMs, 3);
+            Assert.True(t.EnterMs >= 500.0, "a sustained kind waits half a second, not 161 ms");
         }
 
         [Fact]
