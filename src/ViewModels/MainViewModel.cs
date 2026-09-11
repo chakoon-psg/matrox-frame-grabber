@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Windows.Threading;
 using MatroxFrameGrabber.Infrastructure;
 using MatroxFrameGrabber.Mil;
+using MatroxFrameGrabber.Mil.Video;
 
 namespace MatroxFrameGrabber.ViewModels
 {
@@ -34,18 +35,11 @@ namespace MatroxFrameGrabber.ViewModels
             StartAllCommand = new RelayCommand(StartAll);
             StopAllCommand = new RelayCommand(StopAll);
 
-            // The brightness strip is always on screen, so measurement is enabled for the whole
-            // session — set once here rather than pushed every tick, since nothing turns it off.
-            // A channel that is not grabbing still costs nothing: CameraChannel.RefreshStats
-            // only samples while it has a live display buffer.
-            foreach (var channel in _manager.Channels)
-                channel.BrightnessEnabled = true;
-
-            // Detection likewise for the whole session, unless the command line switched it off.
-            // The switch exists for one measurement: frames missed with the tile reduction on the
-            // acquisition path against the same run without it.
-            foreach (var channel in _manager.Channels)
-                channel.DetectionEnabled = !App.DetectionOff;
+            // Brightness and detection are NOT switched on here any more. They are set when the
+            // manager builds each channel, which is before anything can grab: pushing them from
+            // this constructor left both false until it ran, and a channel that judges no frames
+            // reports the same empty lane as a healthy one - so the failure would have been
+            // silent. See MilApplicationManager.DetectionEnabled.
 
             // Run the stats timer for the whole session so per-pane Start also updates fps/status.
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -134,8 +128,6 @@ namespace MatroxFrameGrabber.ViewModels
         /// <summary>App-wide output folder + resolution settings.</summary>
         public OutputSettings Output => _manager.Output;
 
-        /// <summary>Resolution presets shown in the toolbar combo.</summary>
-        public Array ResolutionOptions => Enum.GetValues(typeof(OutputResolution));
 
         /// <summary>Board / system summary shown in the header.</summary>
         public string SystemStatus =>
@@ -180,7 +172,72 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>True if at least one camera supports recording (i.e. ffmpeg was found — recording never uses a MIL compression licence; see docs/adr/).</summary>
+        /// <summary>
+        /// Which backend is in force, as two radio buttons rather than three.
+        ///
+        /// Auto stays the stored default and is not offered: a third radio labelled "Auto" would
+        /// leave the operator unable to tell what is actually recording. Instead the pair shows the
+        /// effective choice, so on a fresh install it reads FFMPEG because that is what runs, and
+        /// picking one stores it explicitly - which also turns off the fallback, so a MIL sink
+        /// under test cannot quietly hand over to ffmpeg.
+        /// </summary>
+        public bool SinkIsFfmpeg
+        {
+            get => EffectiveSink() == SinkChoice.Ffmpeg;
+            set { if (value) SetSink(VideoSinkPreference.Ffmpeg); }
+        }
+
+        public bool SinkIsMil
+        {
+            get => EffectiveSink() == SinkChoice.Mil;
+            set { if (value) SetSink(VideoSinkPreference.Mil); }
+        }
+
+        /// <summary>Whether the MIL radio can be picked at all - see VideoSinkPolicy.MilSelectable.</summary>
+        public bool MilSinkSelectable => VideoSinkFactory.MilSelectable(out _);
+
+        /// <summary>
+        /// What to say about the MIL option, selectable or not. A radio that cannot be picked has
+        /// to explain itself, and the explanation is MIL's own words when it has any.
+        /// </summary>
+        public string MilSinkReason
+        {
+            get
+            {
+                VideoSinkFactory.MilSelectable(out string reason);
+                return reason;
+            }
+        }
+
+        /// <summary>The backend actually chosen, and why. Shown under the radios.</summary>
+        public string SinkReasonText
+        {
+            get
+            {
+                VideoSinkPolicy.Choose(Output.VideoSink, VideoSinkFactory.Readiness(out _),
+                                       !string.IsNullOrEmpty(FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath)),
+                                       out string reason);
+                return reason;
+            }
+        }
+
+        private SinkChoice EffectiveSink() =>
+            VideoSinkPolicy.Choose(Output.VideoSink, VideoSinkFactory.Readiness(out _),
+                                   !string.IsNullOrEmpty(FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath)),
+                                   out _);
+
+        private void SetSink(VideoSinkPreference preference)
+        {
+            if (Output.VideoSink == preference) return;
+            Output.VideoSink = preference;   // persists
+            RaiseChanged(nameof(SinkIsFfmpeg));
+            RaiseChanged(nameof(SinkIsMil));
+            RaiseChanged(nameof(SinkReasonText));
+            MilErrorLog.Note($"settings: recording backend set to {preference}"
+                           + " (takes effect on the next start - the sink is chosen when a camera is allocated)");
+        }
+
+        /// <summary>True if at least one camera supports recording (i.e. something can encode; see docs/adr/).</summary>
         public bool AnyCanRecord
         {
             get
@@ -193,20 +250,145 @@ namespace MatroxFrameGrabber.ViewModels
         }
 
         /// <summary>
-        /// The ffmpeg.exe actually resolved for this run, for the recording settings popup.
-        /// Bound once at load: the configured path has no editor, so this cannot change while
-        /// the window is open.
+        /// What the recording follows from, rather than what it can be set to.
+        ///
+        /// Both used to be settings and neither was a choice: the fastest a recording can go is the
+        /// rate the camera delivers, and the frame size is the size it delivers. Saying so once is
+        /// more use than two boxes whose only honest values are these.
         /// </summary>
-        public string FfmpegPathText
+        public string RecordingSourceText
         {
             get
             {
-                string path = FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath);
-                return string.IsNullOrEmpty(path)
-                    ? "not found — recording disabled"
-                    : path;
+                return TryAcquisition(out int w, out int h, out _, out double fps)
+                    ? $"{w}x{h} at {fps:F3} fps, every frame"
+                    : AnyCameraPresent ? "every frame, at the acquisition size" : "no camera";
             }
         }
+
+        /// <summary>
+        /// The first present camera's frame shape and rate, which is what the whole-app recording
+        /// settings are described against. Channels can differ in principle; the settings window
+        /// speaks about the recording in general, so it takes the first one that exists.
+        /// </summary>
+        private bool TryAcquisition(out int width, out int height, out int bands, out double fps)
+        {
+            width = height = 0; bands = 3; fps = 0.0;
+            foreach (CameraChannel c in _manager.Channels)
+            {
+                if (!c.CameraPresent) continue;
+                fps = c.DetectionFps;
+                return c.TryGetFrameShape(out width, out height, out bands) && fps > 1.0;
+            }
+            return false;
+        }
+
+        private bool AnyCameraPresent
+        {
+            get
+            {
+                foreach (CameraChannel c in _manager.Channels)
+                    if (c.CameraPresent) return true;
+                return false;
+            }
+        }
+
+        // ----- Detection: which faults the rig watches for -----
+
+        /// <summary>
+        /// Every anomaly kind, with its checkbox. App-wide, which is where the switch belongs: the
+        /// thresholds under each camera had to be measured per optical path, but what the rig is
+        /// looking for is one policy.
+        ///
+        /// Built once and held, so the checkboxes keep their bindings.
+        /// </summary>
+        public IReadOnlyList<AnomalyKindToggle> DetectionKinds =>
+            _detectionKinds ??= AnomalyKindToggle.BuildFor(Output);
+
+        private IReadOnlyList<AnomalyKindToggle> _detectionKinds;
+
+        // ----- Encoding: what a session recording does to the pixels -----
+
+        public bool EncodingIsH264
+        {
+            get => Output.RecordingEncoding == VideoEncoding.H264;
+            set { if (value) SetEncoding(VideoEncoding.H264); }
+        }
+
+        public bool EncodingIsLossless
+        {
+            get => Output.RecordingEncoding == VideoEncoding.Lossless;
+            set { if (value) SetEncoding(VideoEncoding.Lossless); }
+        }
+
+        public bool EncodingIsUncompressed
+        {
+            get => Output.RecordingEncoding == VideoEncoding.Uncompressed;
+            set { if (value) SetEncoding(VideoEncoding.Uncompressed); }
+        }
+
+        /// <summary>
+        /// What the chosen encoding writes, per minute, at the geometry actually being acquired.
+        ///
+        /// Shown because the three options are three orders of magnitude apart and nothing else on
+        /// screen would say so: the H.264 clips from the 2026-09-10 run were 188-261 kb/s, while
+        /// uncompressed at the same geometry is 295 MB/s. An operator picking the third radio
+        /// deserves to see 18 GB/min before the disk fills, not after.
+        /// </summary>
+        public string RecordingCostText
+        {
+            get
+            {
+                VideoEncoding e = Output.RecordingEncoding;
+                if (!TryAcquisition(out int w, out int h, out int bands, out double fps))
+                    return VideoCodecs.IsLossless(e)
+                        ? "bit-exact, and large - the size depends on the acquisition"
+                        : "compressed, and small";
+
+                string size = VideoCodecs.SizePerMinute(e, w, h, bands, fps);
+                switch (e)
+                {
+                    case VideoEncoding.Lossless:
+                        return $"{VideoCodecs.Name(e, bands)}, bit-exact - {size}, "
+                             + "and real frames measured 4.2x smaller than that";
+                    case VideoEncoding.Uncompressed:
+                        return $"rawvideo, bit-exact - {size}, whatever the picture is";
+                    default:
+                        return "libx264 CRF 23, lossy - small, and the deviation cannot be "
+                             + "measured again from it";
+                }
+            }
+        }
+
+        private void SetEncoding(VideoEncoding encoding)
+        {
+            if (Output.RecordingEncoding == encoding) return;
+            Output.RecordingEncoding = encoding;   // persists
+            RaiseChanged(nameof(EncodingIsH264));
+            RaiseChanged(nameof(EncodingIsLossless));
+            RaiseChanged(nameof(EncodingIsUncompressed));
+            RaiseChanged(nameof(RecordingCostText));
+            MilErrorLog.Note($"settings: recording encoding set to {encoding}"
+                           + $" ({VideoCodecs.Name(encoding, 3)}, .{VideoCodecs.Extension(encoding)})"
+                           + " - takes effect on the next Rec");
+        }
+
+        /// <summary>
+        /// Whether to show the backend row at all.
+        ///
+        /// Hidden while the MIL sink does not exist, because then the row is a radio group with one
+        /// option: it says "ffmpeg" and offers nothing. It comes back by itself the moment the
+        /// supplier's code makes Readiness anything other than NotImplemented, which is exactly
+        /// when there is a second answer to give - and the preference stays in settings.json
+        /// meanwhile, so nothing is lost by not showing it.
+        ///
+        /// Except when nothing can record at all. Then the row carries the only explanation of why
+        /// the Rec buttons are dead, and hiding it would leave an encoding choice on screen for a
+        /// recording that cannot start.
+        /// </summary>
+        public bool SinkRowVisible =>
+            VideoSinkFactory.Readiness(out _) != MilReadiness.NotImplemented ||
+            EffectiveSink() == SinkChoice.None;
 
         /// <summary>Raised on the UI thread after every stats tick, so the view can redraw.</summary>
         public event Action StatsRefreshed;

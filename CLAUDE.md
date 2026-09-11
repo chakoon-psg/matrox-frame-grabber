@@ -55,21 +55,30 @@ src/
   App.xaml(.cs)                MatroxFrameGrabber
   Views/                       MatroxFrameGrabber.Views
                                  MainWindow, CameraPaneView, Styles.xaml (다크 테마)
-  ViewModels/                  MatroxFrameGrabber.ViewModels (MainViewModel)
+  ViewModels/                  MatroxFrameGrabber.ViewModels
+                                 MainViewModel, AnomalyKindToggle
   Mil/                         MatroxFrameGrabber.Mil
                                  MilApplicationManager, CameraChannel,
                                  GenICamFeatures, TileReducer, BrightnessMeter, StillRing
     Video/                     MatroxFrameGrabber.Mil.Video
-                                 IVideoSink, VideoStreamSpec, VideoSinkStats,
-                                 VideoSinkFactory, FfmpegVideoSink, MilSeqVideoSink
+                                 IVideoSink, IHostFrameSink, VideoStreamSpec,
+                                 VideoSinkStats, VideoSinkFactory, FrameExtractor,
+                                 FfmpegVideoSink, MilSeqVideoSink
+  Mil/Stills/                    StillRing (무손실 PNG. MbufExport는 압축 라이선스가 필요 없다)
   Infrastructure/              MatroxFrameGrabber.Infrastructure  ← MIL-free. 테스트되는 유일한 계층
                                  OutputSettings, RelayCommand, NativeMethods,
                                  BrightnessHistory, ChannelRoi, RoiGesture,
                                  DisplayMapping, BrightnessSamplePlan, PwmSweep,
                                  TileGrid, TileBounds, TileHistory, FrameMetrics,
                                  AnomalyDetector, BrightnessLog, MilErrorLog
-    Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy
-tests/                         MatroxFrameGrabber.Tests (263개). csproj가 `Infrastructure/**`를
+    Detection/                   AnomalyKind(+Catalog), AnomalyKindSet,
+                                 DetectionSettings(+KindSettings),
+                                 AnomalyClipPolicy(+ClipScheduler)
+    Timeline/                    TimelineLayout, AnomalyTimeline, ChannelHealth
+    Video/                       FfmpegRecorder, FfmpegArgs, VideoRatePolicy,
+                                 VideoEncoding(+VideoCodecs), VideoSinkPolicy,
+                                 SharedFramePool, SegmentRing, ClipExtractor
+tests/                         MatroxFrameGrabber.Tests (406개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -95,6 +104,19 @@ research.md                    src/ 심층 분석
 버퍼(3밴드 컬러)를 메모리를 거쳐 ffmpeg **stdin 파이프**로 보내고, 픽셀 포맷은 플래나
 `gbrp`(또는 1밴드일 때 `gray`)다. 부하가 걸리면 **프레임을 버린다** — 라이브 뷰가 우선이다.
 
+**레이트도 해상도도 설정이 아니다.** 둘 다 취득에서 나온다 — 상한이 카메라가 주는 레이트이고,
+크기가 카메라가 주는 크기다. 설정으로 있었을 때 30을 입력하면 파일은 31.079을 선언했고, 해상도
+프리셋은 1024×772 앞에서 1080p가 아무 일도 하지 않고 720p가 0.932배였다. `IVideoSink` 계약에는
+배율과 everyNth가 남아 있지만 **앱은 언제나 1.0과 매 프레임을 넘긴다**.
+
+**인코딩은 설정이다** — 세션 파일에 한해서. `VideoEncoding` 셋(`H264` / `Lossless` /
+`Uncompressed`)이 코덱·컨테이너·크롭 여부를 정하고, 확장자가 컨테이너를 고른다(`.mp4` /
+`.mkv` / `.mov`). 세 가지를 두는 이유는 "압축이냐"가 축이 아니기 때문이다 — **무손실 압축은
+픽셀이 무압축과 같으면서 더 작고 느리지 않다**(실측 1024×772 3밴드: utvideo 1089 fps·3.2~4.2배
+작음, rawvideo 1416 fps). 실제 축은 *이 파일로 다시 측정할 수 있어야 하는가*이고, 무압축은
+코덱이 없는 도구를 위한 선택지다. 컨테이너 함정은 `VideoEncoding.cs`에 실측과 함께 적어 두었다
+(특히 **큰 raw AVI는 기본 probe가 120 fps로 읽어 3.4%를 잃는다** — 그래서 `.mov`다).
+
 `Feed`가 `byte[]`가 아니라 **`MIL_ID`** 를 받는 것이 이 계약의 핵심이다. ffmpeg 경로는 프레임을
 호스트로 읽어내야 하지만(실측 462 µs) `MseqFeed`는 버퍼를 그대로 받는다 — 바이트로 받는 계약은
 두 번째 백엔드에 첫 번째의 비용을 강요한다. **명령줄과 레이트 산술은 `Infrastructure/Video/`에
@@ -103,11 +125,107 @@ research.md                    src/ 심층 분석
 `MilSeqVideoSink`는 **이 장비에서 한 번도 실행된 적 없는 골격**이다. `tools/MilVideoSink/`가
 그것을 개발·계측할 독립 하네스이며 납품사에 넘기는 슬라이스다.
 
+## 사건 증거 (±5초 클립 + 무손실 정지화면)
+
+grab이 도는 동안 **사건 tier**가 2초 세그먼트를 링으로 쓴다(`SegmentRing`, 로컬 폴더).
+상태이상이 확정되면 `ClipScheduler`가 창(전후 N초)과 due 시각을 잡고, due가 지나면
+`FfmpegClipExtractor`가 `-c copy`로 잘라낸다. **Rec이 아니라 grab과 함께 도는 이유**는 녹화를
+누르지 않은 동안 난 사건은 잘라낼 파일이 없기 때문이고, 세션 파일과 수명이 달라 프로세스 하나에
+출력 둘로는 안 된다 — 싱크 둘이 각자 MIL 버퍼에서 추출한다(각 약 400 µs).
+
+`StillRing`은 검출기의 프레임별 판정(`EnteredThisFrame` / `DeepenedThisFrame` /
+`RecoveredThisFrame`)에 따라 네 프레임을 MIL 버퍼에 보관하고, 틱에서 PNG로 쓴다. **클립은 x264
+CRF 23이라 그 파일로 편차를 재현할 수 없고 무손실 정지화면은 된다** — 그게 둘 다 있는 이유다.
+
+**사건 클립은 세션 녹화의 인코딩 설정을 따르지 않고 항상 H.264다.** 링에서 `-c copy`로 잘라내기
+때문에 링이 곧 클립의 인코딩이고, 링은 그랩이 도는 동안 계속 쓰인다 — 무손실 링은 채널당
+295 MB/s(3채널 884 MB/s = **하루 76 TB**, 1 TB TLC SSD 총 수명이 약 750 TB)다. 그래서 **클립은
+문맥, 정지화면은 측정**으로 역할을 갈랐고, 설정 창도 그렇게 두 섹션으로 말한다. 무압축 사건
+증거가 필요하면 그것은 링이 아니라 **RAM 링(짧은 창)** 이어야 한다 — 아직 없다.
+
+실측 한계 둘: 인코더가 3채널 **124.3·132.6 fps에서는 유실 0, 247 fps에서는 세그먼트 목록이 15초
+뒤처졌다.** 그리고 클립이 뒤쪽에서 약 2% 짧게 나온 사례가 있고 원인은 규명되지 않았다.
+
+**프레임은 한 번만 꺼낸다 — 두 번 꺼내면 유실이 생겼다(2026-09-10 실측·해결).**
+3채널 · 1024×772 · 124.3 fps로 5분씩 재고, 고친 뒤 다시 5분을 쟀다.
+
+| | 유실/채널 | 실효 fps | 추출 평균 | 추출 최대 |
+|---|---|---|---|---|
+| 싱크마다 각자 꺼냄 | **60~67** (0.16%) | 119~122 | 세션 1440~1827 + tier 1416~1668 µs | **11549 µs** |
+| 사건 tier만 (녹화 끔) | 0 | 124.3 | 354~469 µs | 3279 µs |
+| **한 번 꺼내 공유** | **0** | **124.3** | **470~898 µs** | 7859~9946 µs |
+
+추출 최대가 프레임 주기(8043 µs)를 넘으면 보드가 프레임을 버린다. 두 번째 싱크를 붙였을 때 각
+추출이 2배가 아니라 **4배** 느려졌다는 것이 핵심이었다 — 단순 중복이 아니라 메모리 경합이다
+(프레임당 호스트 읽기 2 × 2.26 MiB × 124.3 × 3채널 = 1.68 GB/s, 취득 DMA가 같은 경로에
+0.85 GB/s). 한 번으로 줄이자 **남은 한 번도 2~3배 빨라졌다.**
+
+`FrameExtractor`가 그 한 번을 하고, `SharedFramePool`이 누가 아직 들고 있는지 센다. 규약은
+`Take`가 호출자에게 hold 1을 주고, 프레임을 받는 싱크가 **큐에 넣기 전에** hold를 더하고, 모두가
+정확히 한 번 `Release`하는 것이다 — 순서가 반대면 writer 하나가 먼저 끝났을 때 다른 싱크가 읽는
+중에 버퍼가 재사용된다. 그 계수는 `Infrastructure`에 있고 테스트가 지킨다.
+
+호스트 바이트를 받는 것은 `IVideoSink`가 아니라 **`IHostFrameSink`** 다. `IVideoSink`가 `MIL_ID`를
+받는 이유는 MIL 백엔드가 호스트 읽기 비용을 내지 않게 하는 것이고, 그 계약은 납품사에 넘기는
+슬라이스다 — 쓰지도 않을 메서드를 그쪽 계약에 넣지 않는다.
+
+검증: 파일 3개를 전부 디코딩해 경고 0에 프레임 수가 먹인 수와 정확히 일치(37303/37310/37314),
+`pool dry 0회`, `still out 0`. 그리고 **무손실 20초 녹화의 2487프레임이 모두 서로 다른 해시**였다 —
+센서 잡음 때문에 실제 프레임 둘이 같을 수 없으므로, 중복이 없다는 것은 버퍼가 두 번 나가지
+않았다는 뜻이다.
+
+**그리고 이 방의 이상 대부분은 패널이 아니라 사람이다(같은 실측).** 5분 동안 세 채널이 *같은
+프레임 번호*에서 depth 0.39~0.69의 사건을 봤다 — 무손실 정지화면에 팔이 들어오고 다음 장에는
+시야가 막혀 있다. onset-spread 게이트가 채널당 6~9건 중 4~7건을 걸러냈고(그 게이트를 만든 이유가
+정확히 이것이다), 통과한 2건은 모두 `truncated`였다 — 2010 ms 캡에 걸려 닫혔다는 뜻이고, **지속형
+가림은 지금 잘린 Dropout의 연속으로 보고된다**(Blackout 검출기가 필요한 구체적 근거다).
+그래서 **광학 경로를 가리거나 사람이 없을 때 재지 않으면 오검출 예산은 측정할 수 없다.**
+조용했던 5분의 실제 잡음 바닥은 coherent depth **0.0091 / 0.0172 / 0.0129**(제안 0.011 / 0.019 /
+0.014, 현재 임계값 0.05 / 0.15 / 0.05 대비 3.9~8.7배 여유)였다. 다만 그 바닥은 **정지된 어두운
+화면**에서 나온 값이라(ROI luma 17.2 / 13.6 / 7.8, 예전 캘리브레이션 지점은 53~66) 그대로 채택하면
+안 된다. 5분은 예산을 11.8/시간까지만 분해한다 — 1/시간을 보이려면 한 시간을 돌려야 한다.
+
 무손실 RAW-Bayer 녹화(`◆ RAW`)가 있었고 제거했다. `M_BAYER_CONVERSION`을 끄는 유일한
 코드였는데, **그 설정은 보드에 남으므로 복원 규율은 그대로 필요하다** — 아래 함정 참고.
 
+## 설정이 어디에 있는가
+
+두 창이다. **앱 전체 설정**(툴바 `Settings`)과 **카메라별 설정**(pane의 pop-out). 경계는 취향이
+아니라 다음 규칙이다 — **정책은 전체, 실측은 카메라별.**
+
+- 전체: 어떤 이상을 감시할지(`EnabledKinds`), 세션 녹화 인코딩, 폴더, 사건 창(±N초),
+  정지화면 여부, 프리뷰 레이트.
+- 카메라별: 노출·취득 레이트·decimation, 분석 ROI, **임계값과 캘리브레이션**.
+
+임계값이 카메라별인 이유는 실측이다 — 같은 조명에서 세 채널 중 가장 어두운 쪽이 얕은 오검출
+9건을 내고 나머지 둘은 0건이었다. 반대로 **감시 종류가 카메라별이면 리포트를 읽을 수 없다**
+(카메라 1은 Blackout을 보고 2는 안 보는 리그). 그래서 종류 체크박스는 전체 설정에 있고,
+카메라 창에는 `Watching Dropout · 6 off` 한 줄만 남는다.
+
+파일에는 **한 곳에만** 저장된다(`EnabledKinds`, 이름 배열). 채널의 `KindSettings.Enabled`는
+그 정책의 사본이고 `[JsonIgnore]`다 — 네 개의 답이 하나와 어긋날 수 있는 상태를 만들지 않는다.
+**키가 없는 것과 빈 배열은 다르다**: 없으면 기본값(Dropout), 있고 비어 있으면 정말 아무것도
+감시하지 않는다. 후자를 기본값으로 접었더니 체크를 모두 풀면 다음 시작에서 되살아났다.
+
+**종류를 모두 끄면 검출기를 아예 만들지 않는다**(타일 축약까지 건너뛴다 — 실측 reduce 0 µs,
+0/0 grids). `--no-detect`도 같은 게이트를 지난다. 그리고 그 채널의 상태는 `Healthy`가 아니라
+**`DetectionOff`**다: 아무것도 보지 않는 채널의 조용한 레인이 정상 레인과 같아 보이면 안 된다.
+
+`CameraChannel.DetectionEnabled` / `BrightnessEnabled`는 **기본값이 true이고 채널을 만들 때
+정해진다**(`MilApplicationManager`). 예전에는 false로 시작해 `MainViewModel` 생성자가 켜 줬는데,
+그 사이에 그랩에 도달하는 경로가 생기면 **아무것도 판정하지 않으면서 조용했다** — 판정하지 않는
+채널의 빈 레인은 정상 채널의 빈 레인과 같다. 켜는 코드가 돌아야 안전해지는 기본값을 두지 말 것.
+
 ## 함정 (겪고 나서 알게 된 것들)
 
+- **설정 파일이 안 읽히고 있는데 아무도 몰랐다.** `Dto`의 `string FfmpegPath`에 붙어 있던
+  `[JsonStringEnumConverter]` 하나 때문에 System.Text.Json이 **Dto 계약 전체를 거부**했고,
+  `Load()`의 `catch`가 그것을 삼켜 앱이 **모든 값을 기본값으로** 돌았다. `Save()`도 같은 이유로
+  전부 실패했다. 증상은 "설정 창에서 바꿔도 안 먹는다"가 아니라 **decimation 2를 저장해 뒀는데
+  2064×1544로 돌면서 프레임을 509개 놓치는 것**이었다 — 원인이 설정 로드라고 생각할 이유가
+  전혀 없는 증상이다. 고친 뒤 같은 조건이 1024×772 · 124.3 fps · 유실 0이 됐다.
+  **`Load()`/`Save()`의 실패는 이제 로그에 남는다.** 설정을 삼키는 `catch`를 새로 쓰지 말 것 —
+  "파일이 없는 첫 실행"과 구별할 수 없게 된다.
 - 보드는 **연결된 카메라가 더 적어도 디지타이저 4개를 보고한다.** 비어 있는 포트에
   `MdigAlloc`을 하면 `M_THROW_EXCEPTION` 아래에서도 모달 MIL 오류 대화상자가 뜬다. 그래서 탐지
   구간을 `MappControl(M_ERROR, M_PRINT_DISABLE/ENABLE)`로 감쌌다 — 이걸 유지하고, 반드시

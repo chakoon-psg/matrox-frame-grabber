@@ -162,6 +162,111 @@ namespace MatroxFrameGrabber.Tests
                 FfmpegArgs.Build(W, H, 3, SourceFps, new FfmpegOutput[0]));
         }
 
+        // ----- encoding -----
+
+        /// <summary>
+        /// The lossless line, end to end. Verified by round trip 2026-09-10: the frame hashes out
+        /// of this file matched the gbrp fed in.
+        /// </summary>
+        [Fact]
+        public void The_lossless_output_is_utvideo_uncropped_and_unindexed()
+        {
+            string args = FfmpegArgs.Build(W, H, 3, SourceFps,
+                new[] { new FfmpegOutput("Camera_0.mkv", SourceFps,
+                                         encoding: VideoEncoding.Lossless) });
+
+            Assert.Contains("-c:v utvideo -pix_fmt gbrp", args);
+            Assert.DoesNotContain("libx264", args);
+            // No crop: the file exists so the deviation can be measured again, and dropping a row
+            // to please an encoder is the sort of quiet difference it is there to rule out.
+            Assert.DoesNotContain("crop=", args);
+            // faststart is an MP4 idea.
+            Assert.DoesNotContain("+faststart", args);
+            Assert.Contains("-r 124.316", args);
+        }
+
+        [Fact]
+        public void The_uncompressed_output_is_packed_bgr24_even_though_the_pipe_is_planar()
+        {
+            string args = FfmpegArgs.Build(W, H, 3, SourceFps,
+                new[] { new FfmpegOutput("Camera_0.mov", SourceFps,
+                                         encoding: VideoEncoding.Uncompressed) });
+
+            // The input side stays planar - that is how the bytes are written - and only the
+            // output packs. gbrp rawvideo in AVI is written and then read back permuted.
+            Assert.Contains("-pixel_format gbrp", args);
+            Assert.Contains("-c:v rawvideo -pix_fmt bgr24", args);
+        }
+
+        /// <summary>
+        /// ffmpeg picks the muxer from the extension, so a mismatch does not write the file that
+        /// was asked for - utvideo into .mp4 is refused outright. Caught here rather than as a
+        /// failed launch with the recording button already lit.
+        /// </summary>
+        [Fact]
+        public void An_output_whose_extension_does_not_match_its_encoding_is_refused()
+        {
+            Assert.Throws<ArgumentException>(() =>
+                FfmpegArgs.Build(W, H, 3, SourceFps,
+                    new[] { new FfmpegOutput("out.mp4", SourceFps, encoding: VideoEncoding.Lossless) }));
+            Assert.Throws<ArgumentException>(() =>
+                FfmpegArgs.Build(W, H, 3, SourceFps,
+                    new[] { new FfmpegOutput("out.mkv", SourceFps, encoding: VideoEncoding.Uncompressed) }));
+            Assert.Throws<ArgumentException>(() =>
+                FfmpegArgs.Build(W, H, 3, SourceFps,
+                    new[] { new FfmpegOutput("out.mov", SourceFps) }));
+        }
+
+        /// <summary>
+        /// A keyframe interval is an inter-frame idea. Both lossless encoders here are intra-only,
+        /// so every frame is already a keyframe and -g would be ignored or refused.
+        /// </summary>
+        [Fact]
+        public void A_keyframe_interval_is_not_asked_of_an_intra_only_encoder()
+        {
+            string args = FfmpegArgs.Build(W, H, 3, SourceFps,
+                new[] { new FfmpegOutput("seg_%05d.mkv", SourceFps, keyframeInterval: 62,
+                                         segmentSeconds: 2.0, encoding: VideoEncoding.Lossless) });
+
+            Assert.DoesNotContain(" -g ", args);
+            Assert.Contains("-segment_format matroska", args);
+        }
+
+        /// <summary>
+        /// Mono lossless is FFV1, because Ut Video has no gray and gray through its yuv444p is not
+        /// bit-exact - measured, the hashes differ.
+        /// </summary>
+        [Fact]
+        public void A_mono_lossless_output_is_ffv1_and_stays_gray()
+        {
+            string args = FfmpegArgs.Build(W, H, 1, SourceFps,
+                new[] { new FfmpegOutput("m.mkv", SourceFps, encoding: VideoEncoding.Lossless) });
+
+            Assert.Contains("-pixel_format gray", args);
+            Assert.Contains("-c:v ffv1", args);
+            Assert.Contains("-pix_fmt gray", args);
+        }
+
+        /// <summary>
+        /// The two tiers in one process, each with its own encoding: this is the shape the design
+        /// rests on - a lossless session file beside an H.264 ring, because the ring is written
+        /// continuously and lossless would be 884 MB/s across three channels.
+        /// </summary>
+        [Fact]
+        public void Two_outputs_can_be_encoded_differently_in_one_process()
+        {
+            string args = FfmpegArgs.Build(W, H, 3, SourceFps, new[]
+            {
+                new FfmpegOutput("seg_%05d.mp4", SourceFps, keyframeInterval: 62,
+                                 segmentSeconds: 2.0, segmentListPath: "seg.csv"),
+                new FfmpegOutput("session.mkv", SourceFps, encoding: VideoEncoding.Lossless),
+            });
+
+            Assert.Contains("libx264", args);
+            Assert.Contains("utvideo", args);
+            Assert.Equal(2, CountOf(args, "-map 0:v"));
+        }
+
         // ----- the line that is already in service -----
 
         /// <summary>

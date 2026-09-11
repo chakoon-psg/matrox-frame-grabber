@@ -183,10 +183,29 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public readonly struct AnomalyEvent
     {
+        /// <summary>
+        /// Which kind of fault this is. Carried on the event because a report that does not say
+        /// which of the five fired cannot answer the question the panel is being watched for, and
+        /// because the lane strip colours its marks by it.
+        /// </summary>
+        public AnomalyKind Kind { get; }
+
+        /// <summary>Which way this kind moves brightness, from <see cref="AnomalyCatalog"/>.</summary>
+        public AnomalyDirection Direction => AnomalyCatalog.DirectionOf(Kind);
+
         public long StartFrame { get; }
         public long EndFrame { get; }
         public int FrameCount { get; }
-        public double MaxDepth { get; }
+
+        /// <summary>
+        /// The largest move away from the baseline, as a positive fraction of it.
+        ///
+        /// Named for the deviation rather than the depth because a rising kind has no depth: the
+        /// same 0.12 is a fall on a Dropout and a rise on a Washout, and printing "depth" for the
+        /// second would be a lie about what was measured. <see cref="ToString"/> picks the word.
+        /// </summary>
+        public double MaxDeviation { get; }
+
         public double MaxCoherence { get; }
         public double StartTimeSec { get; }
         public double DurationMs { get; }
@@ -209,15 +228,17 @@ namespace MatroxFrameGrabber.Infrastructure
         public int OnsetTiles { get; }
 
         public AnomalyEvent(long startFrame, long endFrame, int frameCount,
-                            double maxDepth, double maxCoherence,
+                            double maxDeviation, double maxCoherence,
                             double startTimeSec, double durationMs,
                             bool truncated = false,
-                            int onsetSpreadFrames = 0, int onsetTiles = 0)
+                            int onsetSpreadFrames = 0, int onsetTiles = 0,
+                            AnomalyKind kind = AnomalyKind.Dropout)
         {
+            Kind = kind;
             StartFrame = startFrame;
             EndFrame = endFrame;
             FrameCount = frameCount;
-            MaxDepth = maxDepth;
+            MaxDeviation = maxDeviation;
             MaxCoherence = maxCoherence;
             StartTimeSec = startTimeSec;
             DurationMs = durationMs;
@@ -227,8 +248,8 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         public override string ToString() =>
-            $"frame {StartFrame}-{EndFrame} ({FrameCount}), {DurationMs:F1} ms, " +
-            $"depth {MaxDepth:F2}, coh {MaxCoherence:F2}, " +
+            $"{Kind} frame {StartFrame}-{EndFrame} ({FrameCount}), {DurationMs:F1} ms, " +
+            $"{AnomalyCatalog.DeviationWord(Kind)} {MaxDeviation:F2}, coh {MaxCoherence:F2}, " +
             $"onset {OnsetSpreadFrames}f over {OnsetTiles} tiles" +
             (Truncated ? " (still running - duration is a floor)" : string.Empty);
     }
@@ -464,6 +485,21 @@ namespace MatroxFrameGrabber.Infrastructure
         public AnomalyEvent? LastRejectedEvent { get; private set; }
 
         /// <summary>
+        /// True on the frame an anomalous run began - the frame the fall crossed the threshold.
+        ///
+        /// These three exist so the caller can keep the right frames losslessly. Which frame
+        /// matters is the detector's knowledge and nobody else's: by the time an event is reported
+        /// the picture has recovered, and a snapshot taken then shows a healthy screen.
+        /// </summary>
+        public bool EnteredThisFrame { get; private set; }
+
+        /// <summary>True on a frame that set a new maximum deviation within the run.</summary>
+        public bool DeepenedThisFrame { get; private set; }
+
+        /// <summary>True on the first normal frame after a run.</summary>
+        public bool RecoveredThisFrame { get; private set; }
+
+        /// <summary>
         /// Takes one frame. Returns an event when one has just closed, otherwise null.
         ///
         /// An event is emitted after the debounce passes without recurrence, so it arrives a few
@@ -499,6 +535,13 @@ namespace MatroxFrameGrabber.Infrastructure
             LastDepth = depth;
             LastCoherence = coherence;
 
+            // Cleared here so they describe this frame only. A caller that reads them after
+            // Observe gets the answer for the frame it just handed over.
+            bool wasInEvent = _inEvent;
+            EnteredThisFrame = false;
+            DeepenedThisFrame = false;
+            RecoveredThisFrame = false;
+
             AnomalyEvent? emitted = null;
 
             if (_observed < _t.BaselineWarmupFrames)
@@ -511,6 +554,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 if (!_inEvent)
                 {
                     _inEvent = true;
+                    EnteredThisFrame = true;
                     _startFrame = frame;
                     _startTime = timeStampSec;
                     _darkFrames = 0;
@@ -547,7 +591,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 _darkFrames++;
                 _lastDarkFrame = frame;
                 _lastDarkTime = timeStampSec;
-                if (depth > _maxDepth) _maxDepth = depth;
+                if (depth > _maxDepth) { _maxDepth = depth; DeepenedThisFrame = true; }
                 if (coherence > _maxCoherence) _maxCoherence = coherence;
 
                 // Deliberately not remembered: a fault must not become the new normal. If dark
@@ -566,6 +610,10 @@ namespace MatroxFrameGrabber.Infrastructure
             }
             else
             {
+                // The first frame back. Kept because a still of the recovered picture is what says
+                // the fault ended rather than the camera stopping.
+                if (wasInEvent) RecoveredThisFrame = true;
+
                 Remember(median);
 
                 // The floor this threshold has to clear. Only frames outside an event count: while
@@ -705,11 +753,40 @@ namespace MatroxFrameGrabber.Infrastructure
 
             EventsRejectedForSpread++;
             LastRejectedEvent = candidate;
+
+            // Queued as well as kept, because the caller draws every one of them. Bounded: a
+            // reader that stops draining must not be able to grow this without limit, and the
+            // count above is the record that survives either way.
+            if (_rejectedQueue.Count >= MaxQueuedRejections) _rejectedQueue.Dequeue();
+            _rejectedQueue.Enqueue(candidate);
             return null;
+        }
+
+        /// <summary>
+        /// Rejections held for a reader. Small on purpose - the strip drains this twice a second,
+        /// and the worst burst measured was five in six seconds.
+        /// </summary>
+        private const int MaxQueuedRejections = 64;
+
+        private readonly System.Collections.Generic.Queue<AnomalyEvent> _rejectedQueue =
+            new System.Collections.Generic.Queue<AnomalyEvent>();
+
+        /// <summary>
+        /// Takes the oldest rejection not yet read. Call until it returns false.
+        ///
+        /// Every one, not the last one: <see cref="LastRejectedEvent"/> holds a single slot and a
+        /// tick that turned away several would leave the rest invisible.
+        /// </summary>
+        public bool TryTakeRejected(out AnomalyEvent rejected)
+        {
+            if (_rejectedQueue.Count == 0) { rejected = default; return false; }
+            rejected = _rejectedQueue.Dequeue();
+            return true;
         }
 
         public void Reset()
         {
+            _rejectedQueue.Clear();
             Array.Clear(_window, 0, _window.Length);
             _windowCount = 0;
             _windowNext = 0;

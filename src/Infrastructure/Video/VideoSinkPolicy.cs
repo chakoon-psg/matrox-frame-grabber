@@ -81,13 +81,13 @@ namespace MatroxFrameGrabber.Infrastructure
                     return SinkChoice.None;
 
                 case VideoSinkPreference.Ffmpeg:
-                    if (ffmpegFound) { reason = "ffmpeg/libx264"; return SinkChoice.Ffmpeg; }
+                    if (ffmpegFound) { reason = "ffmpeg"; return SinkChoice.Ffmpeg; }
                     reason = FfmpegMissing;
                     return SinkChoice.None;
 
                 default:
                     if (mil == MilReadiness.Ready) { reason = "MIL/Mseq"; return SinkChoice.Mil; }
-                    if (ffmpegFound) { reason = "ffmpeg/libx264"; return SinkChoice.Ffmpeg; }
+                    if (ffmpegFound) { reason = "ffmpeg"; return SinkChoice.Ffmpeg; }
                     reason = mil == MilReadiness.Untested
                         ? FfmpegMissing + " The MIL sink is implemented but untested here; select it explicitly to try."
                         : FfmpegMissing;
@@ -95,7 +95,10 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
+        // Not "set the path in settings" any more: that row was removed with the rate and the
+        // resolution, and pointing at a control that is not there is worse than pointing nowhere.
+        // The search order is the configured path, the app folder, PATH, WinGet, C:fmpegin.
         private const string FfmpegMissing =
-            "ffmpeg was not found. Install it or set the ffmpeg path in settings.";
+            "ffmpeg was not found. Put ffmpeg.exe on PATH or in the app folder.";
     }
 }

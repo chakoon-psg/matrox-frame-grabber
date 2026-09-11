@@ -22,14 +22,24 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>CSV of filename,start,end written as each segment closes. Null for none.</summary>
         public readonly string SegmentListPath;
 
+        /// <summary>
+        /// What this file does to the pixels. Per output rather than per process because the two
+        /// tiers want different answers: the session file is whatever the operator chose, while the
+        /// segment ring is H.264 whatever that is - it is context, it is written continuously, and
+        /// a lossless ring would be 100 to 500 times the bytes for the life of the drive.
+        /// </summary>
+        public readonly VideoEncoding Encoding;
+
         public FfmpegOutput(string pathOrPattern, double fps, int keyframeInterval = 0,
-                            double segmentSeconds = 0.0, string segmentListPath = null)
+                            double segmentSeconds = 0.0, string segmentListPath = null,
+                            VideoEncoding encoding = VideoEncoding.H264)
         {
             PathOrPattern = pathOrPattern;
             Fps = fps;
             KeyframeInterval = keyframeInterval;
             SegmentSeconds = segmentSeconds;
             SegmentListPath = segmentListPath;
+            Encoding = encoding;
         }
 
         public bool IsSegmented => SegmentSeconds > 0.0;
@@ -84,27 +94,45 @@ namespace MatroxFrameGrabber.Infrastructure
                 if (o.IsSegmented && !o.PathOrPattern.Contains("%"))
                     throw new ArgumentException("a segmented output needs a printf pattern", nameof(outputs));
 
-                if (map) sb.Append(" -map 0:v");
-                sb.Append(" -vf \"").Append(EvenCrop).Append('"');
-                sb.Append(" -r ").Append(VideoRatePolicy.Format(o.Fps));
-                sb.Append(" -c:v libx264 -preset veryfast -pix_fmt yuv420p");
+                // ffmpeg picks the muxer from the extension, so a mismatch here does not produce
+                // the file that was asked for: utvideo into .mp4 is refused outright, and rawvideo
+                // into .mkv too. Caught as an argument error rather than as a failed launch.
+                string wanted = "." + VideoCodecs.Extension(o.Encoding);
+                if (!o.PathOrPattern.EndsWith(wanted, StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException(
+                        $"{o.Encoding} writes {wanted}, not {o.PathOrPattern}", nameof(outputs));
 
-                if (o.KeyframeInterval > 0)
+                if (map) sb.Append(" -map 0:v");
+
+                // Only H.264 needs even dimensions. A lossless output is not cropped at all: it
+                // exists so the numbers can be measured again, and dropping a row to please an
+                // encoder is the kind of quiet difference it is there to rule out.
+                if (VideoCodecs.NeedsEvenDimensions(o.Encoding))
+                    sb.Append(" -vf \"").Append(EvenCrop).Append('"');
+
+                sb.Append(" -r ").Append(VideoRatePolicy.Format(o.Fps));
+                sb.Append(' ').Append(VideoCodecs.CodecArgs(o.Encoding, bands));
+
+                // Keyframes are an inter-frame idea. The lossless encoders here are intra-only, so
+                // every frame is already a keyframe and -g would be refused or ignored.
+                if (o.KeyframeInterval > 0 && o.Encoding == VideoEncoding.H264)
                     sb.Append(" -g ").Append(o.KeyframeInterval);
 
                 if (o.IsSegmented)
                 {
                     sb.Append(" -f segment -segment_time ")
                       .Append(VideoRatePolicy.Format(o.SegmentSeconds))
-                      .Append(" -segment_format mp4 -reset_timestamps 1");
+                      .Append(" -segment_format ").Append(VideoCodecs.SegmentFormat(o.Encoding))
+                      .Append(" -reset_timestamps 1");
                     if (!string.IsNullOrWhiteSpace(o.SegmentListPath))
                         sb.Append(" -segment_list \"").Append(o.SegmentListPath)
                           .Append("\" -segment_list_type csv");
                 }
-                else
+                else if (VideoCodecs.WantsFastStart(o.Encoding))
                 {
                     // faststart rewrites the index to the front once the file is closed, which a
-                    // segmented output cannot use - each segment is closed by the muxer itself.
+                    // segmented output cannot use - each segment is closed by the muxer itself -
+                    // and which only MP4 has.
                     sb.Append(" -movflags +faststart");
                 }
 

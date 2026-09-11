@@ -107,6 +107,21 @@ namespace MatroxFrameGrabber.Mil
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
         private readonly ConcurrentQueue<AnomalyEvent> _anomalies = new ConcurrentQueue<AnomalyEvent>();
+
+        /// <summary>
+        /// Rejections, drained from the detector in the hook and read on the stats tick.
+        ///
+        /// A queue rather than the detector's single LastRejectedEvent slot, because the strip
+        /// draws every one of them: on the measured 30-minute run five fell inside six seconds
+        /// against a 500 ms tick, so the slot was already close to losing them.
+        /// </summary>
+        private readonly ConcurrentQueue<AnomalyEvent> _rejections = new ConcurrentQueue<AnomalyEvent>();
+
+        /// <summary>
+        /// Recent anomalies of both verdicts, in one order, for the strip to draw. Filled from the
+        /// stats tick as the queues above are drained, and read from the same tick.
+        /// </summary>
+        public AnomalyTimeline RecentAnomalies { get; } = new AnomalyTimeline();
         private long _anomalyCount;
         private AnomalyEvent _lastAnomaly;
         private bool _hasLastAnomaly;
@@ -148,9 +163,27 @@ namespace MatroxFrameGrabber.Mil
         private string _outputName;
         private IVideoSink _recording;
         private FfmpegVideoSink _ffmpegSink;   // the same object when ffmpeg is the backend, for its status line
+
+        // The event tier: rolling segments while the grab runs, so a clip can be cut for something
+        // that happened before anybody pressed Rec.
+        private IVideoSink _eventSink;
+
+        /// <summary>
+        /// The one host read per frame that every ffmpeg sink on this channel shares.
+        ///
+        /// Made on demand and freed with the buffers it reads from. Two sinks each reading for
+        /// themselves cost 60-67 frames of 37,300 per channel over five minutes, measured
+        /// 2026-09-10; with one of them off, nothing was lost. See FrameExtractor.
+        /// </summary>
+        private FrameExtractor _frames;
+        private SegmentRing _segments;
+        private ClipScheduler _clips;
+        private IClipExtractor _clipper;
+        private int _clipBusy;                 // Interlocked: one cut at a time per channel
+        private double _extractingFromSec = double.MaxValue;
+        private string _segmentPattern;        // ..._seg_%05d.mp4, for the sweep at stop
+        private string _segmentList;
         private StillRing _stills;
-        private long _stillProbeKept;
-        private bool _stillsExported;
 
         private long _framesMissed;
         private long _missedAtGrabStart;   // cumulative counter when this grab started
@@ -230,7 +263,11 @@ namespace MatroxFrameGrabber.Mil
             get
             {
                 if (IsRecording)
-                    return $"● 라이브 녹화 중 (H.264, 고fps 시 프레임 드랍){_ffmpegSink?.StatusSuffix()}";
+                    // The codec from the sink, not the word H.264: the encoding is the operator's
+                    // choice now, and a banner that always said H.264 would be wrong on two of the
+                    // three options.
+                    return $"● 라이브 녹화 중 ({_recording?.Name ?? "recording"}, 고fps 시 프레임 드랍)"
+                         + _ffmpegSink?.StatusSuffix();
                 return "";
             }
         }
@@ -321,6 +358,11 @@ namespace MatroxFrameGrabber.Mil
             MilErrorLog.Note(
                 $"{Name}: exposure asked {us:0.##} us, camera reports {_exposureUs:0.##} us" +
                 (_exposureUs > 0 ? $" (=> {1e6 / (_exposureUs + InterFrameOverheadUs):0.#} fps max)" : string.Empty));
+
+            // The exposure is what bounds the frame rate, so it is also what every millisecond
+            // threshold resolves against. A 4000 us exposure doubles the rate and would otherwise
+            // leave a debounce meaning half as long as it says.
+            RefreshDetectionFps();
             return ok;
         }
 
@@ -343,15 +385,24 @@ namespace MatroxFrameGrabber.Mil
         /// explicit switch rather than folded away: the acceptance test for this feature is a
         /// comparison of frames missed with measurement on and off.
         /// </summary>
-        public bool BrightnessEnabled { get; set; }
+        public bool BrightnessEnabled { get; set; } = true;
 
         /// <summary>
-        /// Whether this channel reduces frames and judges them. Off by default and switched on for
-        /// the session by MainViewModel, kept as an explicit flag for the same reason
+        /// Whether this channel reduces frames and judges them.
+        ///
+        /// **On by default**, and that is the fix for an initialization order that had teeth: the
+        /// flag used to start false and be switched on by MainViewModel's constructor, so anything
+        /// that reached a grab before that ran would have detected nothing - silently, since a
+        /// channel judging no frames reports the same empty lane as a healthy one. It is set at
+        /// creation now (MilApplicationManager), which is before a channel can grab, and the
+        /// default is the safe value rather than the one that needs rescuing.
+        ///
+        /// Still an explicit flag rather than a read of the command line, for the same reason
         /// <see cref="BrightnessEnabled"/> is: the acceptance test for putting the reduction on the
-        /// acquisition path is a comparison of frames missed with it on and off.
+        /// acquisition path is a comparison of frames missed with it on and off, and that wants a
+        /// switch. <c>--no-detect</c> is what turns it off in practice.
         /// </summary>
-        public bool DetectionEnabled { get; set; }
+        public bool DetectionEnabled { get; set; } = true;
 
         /// <summary>
         /// The numbers this channel judges by, held in the settings file so they survive a restart
@@ -362,10 +413,102 @@ namespace MatroxFrameGrabber.Mil
         /// Falls back to a private instance only when there are no settings yet, which happens
         /// during construction before <see cref="Output"/> is attached.
         /// </summary>
-        public AnomalyThresholds DetectionThresholds =>
-            Output?.GetThresholds(_index) ?? _fallbackThresholds;
+        public DetectionSettings Detection =>
+            Output?.GetDetection(_index) ?? _fallbackDetection;
 
-        private readonly AnomalyThresholds _fallbackThresholds = new AnomalyThresholds();
+        private readonly DetectionSettings _fallbackDetection = new DetectionSettings();
+
+        /// <summary>
+        /// The settings resolved into the frame counts the detector counts in, at the rate this
+        /// camera is actually running.
+        ///
+        /// Stored as milliseconds and resolved here because a frame count means something else at
+        /// every other rate: a debounce of 20 frames is 161 ms at 124.316 fps and 667 ms at 30.
+        /// </summary>
+        public AnomalyThresholds DetectionThresholds =>
+            Detection.Resolve(AnomalyKind.Dropout, _detectionFps);
+
+        /// <summary>The rate the thresholds above were resolved against.</summary>
+        public double DetectionFps => _detectionFps;
+
+        /// <summary>
+        /// What this camera is watching for, and how many kinds it is not.
+        ///
+        /// A line rather than a list of checkboxes, because the switches moved to the app settings
+        /// where they belong - which faults we look for is one policy for the rig, not four. What
+        /// stays here is the part that is this camera's: its thresholds, below, and the fact that
+        /// they only matter for the kinds named here.
+        ///
+        /// The count of what is off is on purpose. Naming only what is on would let a pane with
+        /// nothing to report read as "nothing wrong" while six of seven kinds go unexamined.
+        /// </summary>
+        public string DetectionKindsText =>
+            Output == null ? string.Empty : Output.EnabledKindsText;
+
+        /// <summary>
+        /// The false-positive budget and the share each running detector gets.
+        ///
+        /// Both, because the split is invisible otherwise: seven detectors each allowed one an
+        /// hour is seven an hour, and the number an operator was told to expect is the total.
+        /// </summary>
+        public string BudgetText
+        {
+            get
+            {
+                DetectionSettings d = Detection;
+                int n = d.EnabledCount;
+                // Phrased without a plural: "1 false positives/hour" is what the obvious wording
+                // produces, and the number is often exactly one.
+                return n <= 1
+                    ? $"{d.FalsePositiveBudgetPerHour:0.00} per hour"
+                    : $"{d.FalsePositiveBudgetPerHour:0.00} per hour over {n} kinds "
+                    + $"= {d.BudgetPerEnabledKind:0.000} each";
+            }
+        }
+
+        /// <summary>Persists a threshold edited in place, and refreshes what shows it.</summary>
+        internal void SaveDetection()
+        {
+            Output?.SaveThresholds();
+            RaisePropertyChanged(nameof(BudgetText));
+            RaisePropertyChanged(nameof(DetectionHint));
+        }
+
+        private double _detectionFps = DetectionSettings.LegacyFrameRate;
+
+        /// <summary>
+        /// Re-reads the rate the millisecond thresholds resolve against.
+        ///
+        /// The camera's own ResultingFrameRate first, for the same reason recording prefers it: the
+        /// measured rate does not exist until the stats tick, and the configured
+        /// AcquisitionFrameRate answers 184 where the exposure allows 124.316. Falling back to the
+        /// rate the values were authored at reproduces the old frame-based behaviour exactly, which
+        /// is the right thing when the rate cannot be established at all.
+        /// </summary>
+        private void RefreshDetectionFps()
+        {
+            double resolved =
+                TryGetResultingFps(out double r) && r > 1.0 ? r
+                : (_frameRate > 1.0 ? _frameRate : DetectionSettings.LegacyFrameRate);
+
+            if (Math.Abs(resolved - _detectionFps) < 0.001) return;
+            _detectionFps = resolved;
+            MilErrorLog.Note($"{Name}: detection thresholds resolve at {_detectionFps:F3} fps");
+            RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(CalibrationText));
+
+            // The event tier declared the old rate, so every segment it writes from here would be
+            // mis-timed: measured, 8000 to 4000 us doubles the rate and the segment list fell 15 s
+            // behind real time. Restarting discards the ring, which is right twice over - the
+            // timeline is correct again, and a fall measured across an exposure change is an
+            // artefact rather than a fault, so its window was never evidence.
+            if (_eventSink != null && _isGrabbing)
+            {
+                MilErrorLog.Note($"{Name}: exposure changed - restarting the event tier, "
+                               + "the window before the change is discarded");
+                StartEventTier();
+            }
+        }
 
         /// <summary>Editable copies of the two thresholds an operator tunes, as typed.</summary>
         public string DepthInput
@@ -415,27 +558,28 @@ namespace MatroxFrameGrabber.Mil
                 !double.TryParse(_coherenceInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double coherence))
                 return false;
 
-            AnomalyThresholds t = DetectionThresholds;
-            var edited = new AnomalyThresholds
-            {
-                Depth = depth,
-                Coherence = coherence,
-                DebounceFrames = t.DebounceFrames,
-                MaxEventFrames = t.MaxEventFrames,
-                BaselineWindow = t.BaselineWindow,
-                BaselineWarmupFrames = t.BaselineWarmupFrames,
-            };
-            t.CopyFrom(edited);            // clamps, so a typo cannot silence the detector
+            KindSettings k = Detection.For(AnomalyKind.Dropout);
+            k.Deviation = depth;
+            k.Coherence = coherence;
+            k.Clamp();                     // so a typo cannot silence the detector
             Output?.SaveThresholds();
 
-            // Show what was actually kept, not what was typed: CopyFrom clamps.
+            // Show what was actually kept, not what was typed: Clamp may have moved it.
             _depthInput = null;
             _coherenceInput = null;
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
-            MilErrorLog.Note($"{Name}: thresholds now depth {t.Depth:0.###}, coherence {t.Coherence:0.###}, "
-                           + $"debounce {t.DebounceFrames}, max event {t.MaxEventFrames} frames");
+            RaisePropertyChanged(nameof(DetectionKindsText));
+
+            // Logged as resolved rather than as stored: milliseconds are what a person sets and
+            // frames are what the detector counts, and the run is judged in frames.
+            AnomalyThresholds resolved = DetectionThresholds;
+            MilErrorLog.Note($"{Name}: {AnomalyKind.Dropout} thresholds now deviation "
+                           + $"{k.Deviation:0.###}, coherence {k.Coherence:0.###}, "
+                           + $"debounce {k.DebounceMs:0} ms ({resolved.DebounceFrames}f), "
+                           + $"max event {k.MaxEventMs:0} ms ({resolved.MaxEventFrames}f) "
+                           + $"at {_detectionFps:F3} fps");
             return true;
         }
 
@@ -475,6 +619,41 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Reductions attempted, and those that produced a grid. A gap is a fault.</summary>
         public long Reductions => _reducer.Reductions;
         public long GridsAccepted => _reducer.Accepted;
+
+        /// <summary>
+        /// The board's stamp on the newest frame, in seconds. Zero before the first frame.
+        ///
+        /// The clock anomalies are timestamped in, and the only one every channel shares - the
+        /// cameras free-run, so a strip drawn against DateTime.Now would put the same event at
+        /// different places on different lanes.
+        /// </summary>
+        public double LastBoardTimeSec => _hookData?.LastTimeStampSec ?? 0.0;
+
+        /// <summary>
+        /// The worst thing true of this channel, for the lane's status dot.
+        ///
+        /// Needed because the lane's marks cannot show the two worst problems: a channel losing
+        /// frames and a channel whose detector never judges them both draw an empty lane, which is
+        /// also what a healthy panel draws.
+        /// </summary>
+        public ChannelHealth Health
+        {
+            get
+            {
+                BrightnessSample latest = _brightness.History.Latest;
+                // The event tier's skips, because a clip cut from segments missing frames is a
+                // file that plays and says nothing about the holes in it.
+                VideoSinkStats tier = _eventSink?.Stats ?? default;
+
+                return ChannelHealthRule.Evaluate(
+                    CameraPresent, _isGrabbing, FramesMissed,
+                    Reductions, GridsAccepted,
+                    tier.FramesSkipped + tier.FramesDropped,
+                    _detector != null,
+                    !string.IsNullOrEmpty(Detection.For(AnomalyKind.Dropout).CalibratedAt),
+                    latest.Luma, latest.ClippedPct, latest.BlackPct);
+            }
+        }
 
         /// <summary>
         /// What the detector measured on the last frame it judged. Exposed because the thresholds
@@ -540,33 +719,28 @@ namespace MatroxFrameGrabber.Mil
             if (!_lastProposal.IsUsable)
                 return false;
 
-            AnomalyThresholds t = DetectionThresholds;
-            var edited = new AnomalyThresholds
-            {
-                Depth = _lastProposal.Depth,
-                Coherence = t.Coherence,
-                DebounceFrames = t.DebounceFrames,
-                MaxEventFrames = t.MaxEventFrames,
-                MaxOnsetSpreadFrames = t.MaxOnsetSpreadFrames,
-                MinOnsetTiles = t.MinOnsetTiles,
-                BaselineWindow = t.BaselineWindow,
-                BaselineWarmupFrames = t.BaselineWarmupFrames,
-                FalsePositiveBudgetPerHour = t.FalsePositiveBudgetPerHour,
-                CalibratedAt = DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
-                CalibrationFrames = _lastProposal.FramesJudged,
-                CalibrationFloor = _floorAtStop,
-            };
-            t.CopyFrom(edited);
+            Detection.ApplyCalibration(
+                AnomalyKind.Dropout,
+                _lastProposal.Depth,
+                DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
+                _lastProposal.FramesJudged,
+                _floorAtStop);
             Output?.SaveThresholds();
 
             _depthInput = null;
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(DetectionHint));
             RaisePropertyChanged(nameof(CalibrationText));
+            RaisePropertyChanged(nameof(DetectionKindsText));
+
+            KindSettings cal = Detection.For(AnomalyKind.Dropout);
             MilErrorLog.Note(
-                $"{Name}: depth calibrated to {t.Depth:0.###} at {t.CalibratedAt} "
-              + $"from {t.CalibrationFrames} frames, floor {t.CalibrationFloor:0.####}, "
-              + $"budget {t.FalsePositiveBudgetPerHour:0.##}/hour");
+                $"{Name}: {AnomalyKind.Dropout} deviation calibrated to {cal.Deviation:0.###} "
+              + $"at {cal.CalibratedAt} from {cal.CalibrationFrames} frames, "
+              + $"floor {cal.CalibrationFloor:0.####}, "
+              + $"budget {Detection.FalsePositiveBudgetPerHour:0.##}/hour "
+              + $"over {Detection.EnabledCount} enabled kind(s) "
+              + $"= {Detection.BudgetPerEnabledKind:0.###}/hour each");
             return true;
         }
 
@@ -935,15 +1109,22 @@ namespace MatroxFrameGrabber.Mil
                 TryGetFrameSize(out int frameW, out int frameH);
                 MilErrorLog.Note($"{Name}: analysis ROI {_analysisRoi} in {frameW}x{frameH} (decim {_decimation})");
 
+                // Before the thresholds are logged: the line below reports frame counts, and
+                // they are only this camera's once the rate has been read.
+                RefreshDetectionFps();
+
                 // The thresholds as loaded, for the same reason: they now come from a file that a
                 // person edits, they differ per channel on purpose, and a value that silently fell
                 // back to its default would otherwise be invisible until a run reported nothing.
                 AnomalyThresholds t = DetectionThresholds;
-                MilErrorLog.Note($"{Name}: detection thresholds - depth {t.Depth:0.###}, "
-                               + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}, "
-                               + $"max event {t.MaxEventFrames}, baseline {t.BaselineWindow}"
-                               + $"/{t.BaselineWarmupFrames} frames, "
-                               + $"onset spread {t.MaxOnsetSpreadFrames} over {t.MinOnsetTiles}+ tiles");
+                MilErrorLog.Note($"{Name}: detection thresholds at {_detectionFps:F3} fps - "
+                               + $"deviation {t.Depth:0.###}, "
+                               + $"coherence {t.Coherence:0.###}, debounce {t.DebounceFrames}f, "
+                               + $"max event {t.MaxEventFrames}f, baseline {t.BaselineWindow}"
+                               + $"/{t.BaselineWarmupFrames}f, "
+                               + $"onset spread {t.MaxOnsetSpreadFrames}f over {t.MinOnsetTiles}+ tiles; "
+                               + $"kinds watched {Output?.EnabledKindsText ?? "?"}, "
+                               + $"budget {Detection.BudgetPerEnabledKind:0.###}/hour each");
             }
 
             RaisePropertyChanged(nameof(CameraPresent));
@@ -1047,12 +1228,42 @@ namespace MatroxFrameGrabber.Mil
             _reducer.Bind(_grabBuffers);
         }
 
+        /// <summary>
+        /// The shared frame reader, made the first time a sink needs one.
+        ///
+        /// Lazy because a channel that never records should not hold 45 MiB of paged host memory,
+        /// and tied to the display buffer's lifetime because that is what it is shaped from - a
+        /// decimation change reallocates both.
+        /// </summary>
+        private FrameExtractor EnsureFrames()
+        {
+            FrameExtractor frames = _frames;
+            if (frames != null && frames.IsReady) return frames;
+            if (_dispBufId == MIL.M_NULL) return null;
+
+            frames = new FrameExtractor(_sysId);
+            if (!frames.Prepare(_dispBufId, 1.0, out string err))
+            {
+                MilErrorLog.Note($"{Name}: frame extraction not prepared - {err}");
+                frames.Dispose();
+                return null;
+            }
+            _frames = frames;
+            return frames;
+        }
+
         /// <summary>Frees the grab ring + display buffer, keeping the digitizer and display alive.</summary>
         private void FreeBuffers()
         {
             // Before the ring, not after: a band child outliving its parent is a failure this
             // codebase already documents.
             _reducer.Unbind();
+
+            // Same discipline: the extractor holds a buffer and its band children, and it is
+            // shaped from the display buffer being freed below.
+            FrameExtractor frames = _frames;
+            _frames = null;
+            frames?.Dispose();
 
             foreach (MIL_ID buf in _grabBuffers)
             {
@@ -1168,7 +1379,7 @@ namespace MatroxFrameGrabber.Mil
             // A fresh detector per run. Carrying a baseline across a stop would judge the opening
             // frames of the new run against the light of the old one, and the exposure or the
             // region may well have changed in between -- during the exposure scan both did.
-            if (App.StillProbe && _stills == null && _dispBufId != MIL.M_NULL)
+            if ((Output?.KeepStills ?? false) && _stills == null && _dispBufId != MIL.M_NULL)
             {
                 var ring = new StillRing();
                 if (ring.Allocate(_sysId, _dispBufId, out string stillErr))
@@ -1176,10 +1387,26 @@ namespace MatroxFrameGrabber.Mil
                 else
                     MilErrorLog.Note($"{Name}: still buffers not allocated - {stillErr}");
             }
-            _stillProbeKept = 0;
-            _stillsExported = false;
+            StartEventTier();
 
-            _detector = new AnomalyDetector(DetectionThresholds);
+            // No detector at all when nothing is switched on, rather than one nobody reads: the
+            // flag used to change only the budget arithmetic, so clearing Dropout left the detector
+            // running and reporting - a checkbox that did nothing. Skipping it also skips the tile
+            // reduction, which is the expensive half (175 us of an 8043 us period, measured).
+            //
+            // EnabledCount rather than Dropout by name: it counts the kinds that are on *and*
+            // implemented, so the day Blackout gets a detector, switching on only Blackout does not
+            // leave this channel unwatched. And --no-detect goes through the same gate, so that
+            // switch reports DetectionOff as well instead of a channel that looks Healthy while
+            // judging nothing.
+            bool watching = DetectionEnabled && Detection.EnabledCount > 0;
+            _detector = watching ? new AnomalyDetector(DetectionThresholds) : null;
+            if (!watching)
+                MilErrorLog.Note($"{Name}: detection off - "
+                               + (DetectionEnabled
+                                    ? "no kind with a detector is switched on (app Settings)"
+                                    : "--no-detect")
+                               + ", so no frame is judged this run");
             _reducer.ResetCost();
             _history.Clear();
             _eventWindowsWritten = 0;
@@ -1187,6 +1414,8 @@ namespace MatroxFrameGrabber.Mil
             _rejectedSeen = 0;
             _rejectedAtStop = 0;
             while (_anomalies.TryDequeue(out _)) { }
+            while (_rejections.TryDequeue(out _)) { }
+            RecentAnomalies.Clear();
             Interlocked.Exchange(ref _anomalyCount, 0);
             _hasLastAnomaly = false;
 
@@ -1223,6 +1452,10 @@ namespace MatroxFrameGrabber.Mil
                 return;
 
             StopRecording();   // no frames will be fed once the grab stops
+
+            // Before MdigProcess stops: the tier flushes what is pending, and a clip cut here still
+            // needs the segments that are about to be swept.
+            StopEventTier();
 
             MIL.MdigProcess(_digId, _grabBuffers.ToArray(), _grabBuffers.Count,
                 MIL.M_STOP, MIL.M_DEFAULT, _hookDelegate, GCHandle.ToIntPtr(_hookHandle));
@@ -1324,15 +1557,6 @@ namespace MatroxFrameGrabber.Mil
                 // This run's losses, not the digitizer's lifetime total (see StartGrab).
                 _framesMissed = Math.Max(0, (long)missed - _missedAtGrabStart);
 
-                StillRing stills = _stills;
-                if (stills != null && !_stillsExported && _stillProbeKept >= 4 && Output != null)
-                {
-                    _stillsExported = true;
-                    int n = stills.ExportAll(Output.EnsureFolder(), SafeName(), out string sErr);
-                    MilErrorLog.Note($"{Name}: stills exported - {n} files"
-                                   + (sErr != null ? $", error: {sErr}" : string.Empty));
-                }
-
                 // Anomalies are surfaced here rather than from the hook: a handler running on the
                 // acquisition thread would put the grab behind whatever it decides to do, and the
                 // whole reason the reduction is kept small is to stay out of that budget.
@@ -1342,6 +1566,9 @@ namespace MatroxFrameGrabber.Mil
                     _lastAnomaly = found;
                     _hasLastAnomaly = true;
                     raised = true;
+                    RecentAnomalies.Add(found, rejected: false);
+                    _clips?.Offer(found);
+                    ExportStills(found);
                     MilErrorLog.Note($"{Name}: anomaly {found}");
                     WriteEventWindow(found);
                     AnomalyDetected?.Invoke(this, found);
@@ -1356,21 +1583,24 @@ namespace MatroxFrameGrabber.Mil
                 // Rejections are surfaced on the same tick. Only the last one is kept, so a tick
                 // that turned away several leaves one window and a count - which is why the count
                 // is logged rather than inferred from the files.
-                AnomalyDetector detector = _detector;
-                if (detector != null && detector.EventsRejectedForSpread > _rejectedSeen)
+                bool anyRejected = false;
+                while (_rejections.TryDequeue(out AnomalyEvent turned))
                 {
-                    long now = detector.EventsRejectedForSpread;
-                    AnomalyEvent? turned = detector.LastRejectedEvent;
-                    if (turned.HasValue)
-                    {
-                        MilErrorLog.Note(
-                            $"{Name}: swept, not dimmed - {turned.Value} "
-                          + $"(rejected {now} so far)");
-                        WriteEventWindow(turned.Value, rejected: true);
-                    }
-                    _rejectedSeen = now;
-                    RaisePropertyChanged(nameof(EventsRejectedForSpread));
+                    _rejectedSeen++;
+                    anyRejected = true;
+                    MilErrorLog.Note($"{Name}: swept, not dimmed - {turned} "
+                                   + $"(rejected {_rejectedSeen} so far)");
+                    WriteEventWindow(turned, rejected: true);
+                    RecentAnomalies.Add(turned, rejected: true);
+
+                    // A rejected run's frames are not evidence - that is what the rejection means -
+                    // and leaving its onset in place freezes the reference for the rest of the run.
+                    // Measured: kept frames fell from 400 to 133 over 70 s after one rejection.
+                    // After the detections above, so a tick carrying both still exports first.
+                    _stills?.ClearEvent();
                 }
+                if (anyRejected)
+                    RaisePropertyChanged(nameof(EventsRejectedForSpread));
 
                 // Detect a disconnected camera (2 consecutive misses to avoid transient blips).
                 bool present;
@@ -1393,6 +1623,8 @@ namespace MatroxFrameGrabber.Mil
                 }
             }
 
+            ServiceClips();
+
             // If ffmpeg died mid-recording, finalize and surface the error to the UI.
             if (_recording != null && _recording.Failed && _recording.IsActive)
             {
@@ -1404,6 +1636,10 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(FrameRate));
             RaisePropertyChanged(nameof(FrameCount));
             RaisePropertyChanged(nameof(FramesMissed));
+            // The watched kinds live in the app settings, which is a second window that can be open
+            // at the same time as this camera's. Nothing here hears that change, so it is re-read
+            // on the tick - the convention for every other live value.
+            RaisePropertyChanged(nameof(DetectionKindsText));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));
@@ -1467,17 +1703,46 @@ namespace MatroxFrameGrabber.Mil
             if (copyToDisplay)
                 MIL.MbufCopy(grabbedBuffer, displayBuffer);
 
-            // ---- Lossless stills (probe: rotate every slot rather than wait for an event) ----
-            StillRing stills = _stills;
-            if (stills != null && frameNumber % StillRing.ReferenceEveryFrames == 0)
+            // ---- Event tier: every frame, so a window can be cut out of it later ----
+            IVideoSink events = _eventSink;
+            // ---- One host read, however many sinks want it ----
+            //
+            // Both ffmpeg sinks used to read the frame out for themselves, and that cost frames:
+            // 60-67 of 37,300 per channel over five minutes, with the extract peaking at 11549 us
+            // against an 8197 us period. Measured 2026-09-10, and with the session recording off
+            // the same run lost none. A sink that wants the MIL buffer instead - the MIL backend -
+            // is still fed it below.
+            IVideoSink session = _recording;
+            var eventsHost = events as IHostFrameSink;
+            var sessionHost = session as IHostFrameSink;
+
+            if (eventsHost != null || sessionHost != null)
             {
-                stills.Keep((StillRing.Slot)(_stillProbeKept % 4), grabbedBuffer,
-                            frameNumber, timeStampSec, 0.0);
-                _stillProbeKept++;
+                FrameExtractor frames = _frames;
+                // Nothing is read out while every encoder is behind: the live view comes first,
+                // and each sink counts the frame it did not get.
+                bool room = (eventsHost?.Accepting ?? false) || (sessionHost?.Accepting ?? false);
+                byte[] frame = room && frames != null ? frames.Extract(grabbedBuffer) : null;
+
+                eventsHost?.FeedShared(frame, frameNumber);
+                sessionHost?.FeedShared(frame, frameNumber);
+
+                // The caller's own hold, last: each sink added its own before queueing, so the
+                // array cannot go back to the pool while either writer is still reading it.
+                if (frame != null) frames.Release(frame);
             }
 
-            // ---- Recording feed (the sink guards start/stop vs feed internally) ----
-            _recording?.Feed(grabbedBuffer, frameNumber);
+            if (eventsHost == null) events?.Feed(grabbedBuffer, frameNumber);
+            if (sessionHost == null) session?.Feed(grabbedBuffer, frameNumber);
+
+            if (events != null)
+            {
+                // Anchored on the first frame the encoder actually took, so board time and
+                // position in the recording line up exactly.
+                SegmentRing ring = _segments;
+                if (ring != null && !ring.Anchored && events.Stats.FramesFed >= 1)
+                    ring.Anchor(timeStampSec);
+            }
         }
 
         /// <summary>
@@ -1509,6 +1774,39 @@ namespace MatroxFrameGrabber.Mil
             AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
             if (closed.HasValue)
                 RecordAnomaly(closed.Value);
+
+            // Taken here rather than on the tick: the detector is only ever touched from this
+            // thread, so draining it needs no lock, and the queue below is what crosses over.
+            while (detector.TryTakeRejected(out AnomalyEvent turned))
+                _rejections.Enqueue(turned);
+
+            // ---- Lossless stills: the detector says which frame each slot wants ----
+            //
+            // Kept here rather than when the event is reported, because by then the picture has
+            // recovered - a snapshot taken at the report shows a healthy screen. One MIL-to-MIL
+            // copy of about 149 us, three or four times per event.
+            StillRing stills = _stills;
+            if (stills != null)
+            {
+                double dev = detector.LastDepth;
+                if (detector.EnteredThisFrame)
+                    stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec, dev);
+                if (detector.DeepenedThisFrame)
+                    stills.Keep(StillRing.Slot.Extreme, grabbedBuffer, frameNumber, timeStampSec, dev);
+                if (detector.RecoveredThisFrame)
+                    stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec, dev);
+
+                // A healthy frame from up to 258 ms back, so the pair shows what changed.
+                //
+                // Frozen from the onset until the export clears the slots, not merely while the
+                // event is open: measured, an event over frames 8140-8142 was still unexported when
+                // frame 8192 came round and refreshed the reference, so the "frame from before the
+                // fall" was one from 52 frames after it. The tick can be up to 500 ms behind.
+                if (!detector.InEvent
+                    && !stills.Has(StillRing.Slot.Onset)
+                    && frameNumber % StillRing.ReferenceEveryFrames == 0)
+                    stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);
+            }
         }
 
         /// <summary>
@@ -1703,18 +2001,11 @@ namespace MatroxFrameGrabber.Mil
                 string path = System.IO.Path.Combine(settings.EnsureFolder(), $"{SafeName()}_{Timestamp()}.png");
 
                 MIL_INT srcH = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
-                double scale = settings.ScaleFactorFor(srcH);
-                if (scale < 0.999)
-                {
-                    MIL_ID tmp = AllocScaledBuffer(_dispBufId, scale);
-                    MIL.MimResize(_dispBufId, tmp, scale, scale, MIL.M_BILINEAR);
-                    MIL.MbufExport(path, MIL.M_PNG, tmp);
-                    MIL.MbufFree(tmp);
-                }
-                else
-                {
-                    MIL.MbufExport(path, MIL.M_PNG, _dispBufId);
-                }
+                // The acquired frame, at the size it was acquired. The resolution preset that
+                // used to scale this is gone: ScaleFactorFor never upscaled, so against 1024x772
+                // the 1080p option did nothing at all and 720p was a 0.932 scale - a result being
+                // offered as a choice.
+                MIL.MbufExport(path, MIL.M_PNG, _dispBufId);
                 return path;
             }
             catch (MILException)
@@ -1728,8 +2019,11 @@ namespace MatroxFrameGrabber.Mil
         #region Recording (delegated to an IVideoSink)
 
         /// <summary>
-        /// Starts recording this camera to {OutputName}_{timestamp}.mp4 in the output folder,
-        /// at the configured resolution preset. Requires <see cref="CanRecord"/> (ffmpeg present).
+        /// Starts recording this camera to {OutputName}_{timestamp} in the output folder, at the
+        /// acquisition size and rate. Requires <see cref="CanRecord"/> (ffmpeg present).
+        ///
+        /// The extension follows the chosen encoding - .mp4, .mkv or .avi - and nothing else about
+        /// the call changes with it.
         /// </summary>
         public bool StartRecording()
         {
@@ -1744,10 +2038,17 @@ namespace MatroxFrameGrabber.Mil
             double fps = TryGetResultingFps(out double resulting) && resulting > 1.0
                        ? resulting
                        : _frameRate > 1.0 ? _frameRate : InquireNominalFps();
+            // Every frame, at the acquisition geometry. Both were settings once and neither was
+            // a choice: the maximum rate is what the camera delivers, and the frame size is what it
+            // delivers it at. The sink can still scale - the contract keeps it - this caller does not.
             var spec = new VideoStreamSpec(
-                _dispBufId, fps, Output.EnsureFolder(), SafeName(),
-                Output.ScaleFactorFor(MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL)),
-                new[] { VideoOutputSpec.SingleFile() });
+                _dispBufId, fps, Output.EnsureFolder(), SafeName(), 1.0,
+                new[] { VideoOutputSpec.SingleFile(encoding: Output.RecordingEncoding) });
+
+            // Before Start, because that is when the sink decides whether to make its own reader.
+            if (_recording is IHostFrameSink host)
+                host.SharedFrames = EnsureFrames();
+
             bool ok = _recording.Start(spec, out _);
             RaisePropertyChanged(nameof(IsRecording));
             RaisePropertyChanged(nameof(StatusText));
@@ -1756,7 +2057,7 @@ namespace MatroxFrameGrabber.Mil
             return ok;
         }
 
-        /// <summary>Stops recording and finalizes the .mp4 file (finalization runs asynchronously).</summary>
+        /// <summary>Stops recording and finalizes the file (finalization runs asynchronously).</summary>
         public void StopRecording()
         {
             if (_recording == null || !_recording.IsActive)
@@ -1777,6 +2078,302 @@ namespace MatroxFrameGrabber.Mil
                 return false;
             }
             return StartRecording();
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Writes the kept frames as PNG, if this kind is one that stills say anything about.
+        ///
+        /// On the stats tick, never in the hook: a PNG write measured 6.4 to 8.0 ms, which is a
+        /// whole frame period. Flicker asks for none - four frames out of an oscillation say
+        /// nothing the tile history does not say better, and the tile history already exists.
+        /// </summary>
+        private void ExportStills(AnomalyEvent found)
+        {
+            StillRing stills = _stills;
+            if (stills == null || !stills.IsAllocated || Output == null) return;
+            if (!AnomalyClipPolicy.For(found.Kind).Stills) { stills.ClearEvent(); return; }
+
+            string stem = $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{found.Kind}";
+            int written = stills.ExportAll(Output.EnsureFolder(), stem, out string err);
+            MilErrorLog.Note(written > 0
+                ? $"{Name}: {written} still(s) written for {found.Kind} at frame {found.StartFrame}, "
+                  + $"{stills.MaxExportMs:F1} ms worst"
+                : $"{Name}: no stills written for {found.Kind}"
+                  + (err != null ? $" - {err}" : string.Empty));
+
+            // Forgotten so the next event does not inherit this one's frames. The reference slot
+            // survives: it is refreshed while nothing is open and belongs to whatever comes next.
+            stills.ClearEvent();
+        }
+
+        #region Anomaly clips (segments while grabbing, cut when one falls due)
+
+        /// <summary>
+        /// Starts the rolling segment recording, if anomaly clips are switched on.
+        ///
+        /// With the grab rather than with Rec: a clip cannot be cut for an event that happened
+        /// while nothing was recording, which is the whole point of keeping the window. Its
+        /// lifetime therefore differs from the session file's, so this is a second sink rather than
+        /// a second output on the first - two extractions of about 400 us each out of the 8043 us
+        /// frame period, and no byte ownership to arbitrate between them.
+        /// </summary>
+        private void StartEventTier()
+        {
+            StopEventTier();
+
+            double around = Output?.AnomalyClipSeconds ?? 0.0;
+            if (around <= 0.0 || !CameraPresent || _dispBufId == MIL.M_NULL || Output == null)
+                return;
+
+            string ffmpeg = FfmpegRecorder.ResolveFfmpegPath(Output.FfmpegPath);
+            if (string.IsNullOrEmpty(ffmpeg))
+            {
+                MilErrorLog.Note($"{Name}: anomaly clips off - ffmpeg was not found");
+                return;
+            }
+
+            var clipSettings = new AnomalyClipSettings(around, OutputSettings.SegmentSeconds);
+            double retention = clipSettings.RequiredRingSec(
+                DetectionThresholds.MaxEventFrames / Math.Max(1.0, _detectionFps));
+
+            double fps = VideoRatePolicy.Declared(
+                TryGetResultingFps(out double r) ? r : 0.0, _frameRate, 0.0);
+
+            var sink = new FfmpegVideoSink(_sysId, ffmpeg);
+            var spec = new VideoStreamSpec(
+                _dispBufId, fps, Output.EnsureSegmentFolder(), SafeName(), 1.0,
+                new[]
+                {
+                    // Every frame, and a keyframe several times a segment so a boundary can land
+                    // where the muxer wants it. Never scaled: a shrunken clip is weak evidence.
+                    //
+                    // H.264 whatever the session recording is set to, and not for want of asking:
+                    // this ring is written for as long as the grab runs, and 3 channels of raw is
+                    // 884 MB/s - 76 TB a day against an SSD rated for 750 TB in total. The clip is
+                    // context; the measurement is the lossless stills beside it.
+                    new VideoOutputSpec("seg", 1,
+                                        segmentSeconds: OutputSettings.SegmentSeconds,
+                                        keyframeSeconds: OutputSettings.SegmentSeconds / 4.0,
+                                        encoding: VideoEncoding.H264),
+                });
+
+            sink.SharedFrames = EnsureFrames();
+            if (!sink.Start(spec, out string err))
+            {
+                MilErrorLog.Note($"{Name}: anomaly clips off - {err}");
+                sink.Dispose();
+                return;
+            }
+
+            _eventSink = sink;
+            _segmentPattern = sink.FilePaths.Count > 0 ? sink.FilePaths[0] : null;
+            _segmentList = sink.SegmentListPaths.Count > 0 ? sink.SegmentListPaths[0] : null;
+            _segments = new SegmentRing(
+                sink.SegmentListPaths.Count > 0 ? sink.SegmentListPaths[0] : null, retention);
+            _clips = new ClipScheduler(clipSettings);
+            _clipper = new FfmpegClipExtractor(ffmpeg);
+            _extractingFromSec = double.MaxValue;
+
+            MilErrorLog.Note($"{Name}: anomaly clips on - {around:0.#} s either side, "
+                           + $"{OutputSettings.SegmentSeconds:0.#} s segments, "
+                           + $"ring {retention:0.#} s, at {fps:F3} fps");
+        }
+
+        /// <summary>
+        /// Polls the segment list, cuts anything due, and trims the ring.
+        ///
+        /// On the stats tick, and in that order: a clip cannot be cut from a file the muxer has not
+        /// closed, and a file a pending clip needs must not be deleted first.
+        /// </summary>
+        private void ServiceClips()
+        {
+            SegmentRing ring = _segments;
+            ClipScheduler clips = _clips;
+            if (ring == null || clips == null) return;
+
+            ring.Poll();
+
+            double now = LastBoardTimeSec;
+            if (now > 0.0 && Interlocked.CompareExchange(ref _clipBusy, 0, 0) == 0)
+            {
+                if (clips.TryTakeDue(now, out ClipRequest request))
+                    BeginExtract(request);
+            }
+
+            // Reserved from the oldest thing still wanted: the pending queue, and the cut in
+            // flight. ffmpeg cannot seek a concat input and reads from the first file's start, so
+            // a file deleted under it breaks the clip mid-read.
+            double reserve = Math.Min(clips.OldestPendingFromSec, _extractingFromSec);
+            ring.Trim(reserve);
+        }
+
+        /// <summary>
+        /// Cuts one clip on a background thread.
+        ///
+        /// Off the UI thread because the cut runs ffmpeg - under a second for ten seconds of stream
+        /// copy, but the stats tick must not wait for a process. One at a time per channel, and the
+        /// window stays reserved in the ring until it finishes.
+        /// </summary>
+        private void BeginExtract(ClipRequest request)
+        {
+            if (Interlocked.Exchange(ref _clipBusy, 1) != 0) return;
+
+            SegmentRing ring = _segments;
+            IClipExtractor clipper = _clipper;
+            if (ring == null || clipper == null) { Interlocked.Exchange(ref _clipBusy, 0); return; }
+
+            SegmentCoverage coverage = ring.Cover(request.FromSec, request.ToSec);
+            if (!coverage.Any)
+            {
+                MilErrorLog.Note($"{Name}: {request} - no segments hold that window, nothing cut "
+                               + $"(anchored {ring.Anchored} at {ring.AnchorBoardSec:F3} s, "
+                               + $"{ring.Count} segments {ring.OldestSec:F2}-{ring.NewestSec:F2} s, "
+                               + $"wanted {ring.ToRecordingSec(request.FromSec):F2}-"
+                               + $"{ring.ToRecordingSec(request.ToSec):F2} s)");
+                Interlocked.Exchange(ref _clipBusy, 0);
+                return;
+            }
+
+            _extractingFromSec = request.FromSec;
+            string path = System.IO.Path.Combine(
+                Output.EnsureFolder(),
+                $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{request.Kind}.mp4");
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    bool ok = clipper.Extract(coverage, path, out string err);
+                    long bytes = ok && System.IO.File.Exists(path)
+                        ? new System.IO.FileInfo(path).Length : 0;
+                    MilErrorLog.Note(ok
+                        ? $"{Name}: clip written - {request}, {coverage.Files.Count} segment(s), "
+                          + $"{coverage.LengthSec:F2} s, {bytes / 1024.0:F0} kB"
+                          + (coverage.ClippedAtStart ? ", short at the front" : string.Empty)
+                          + (coverage.ClippedAtEnd ? ", short at the end" : string.Empty)
+                          + $" -> {System.IO.Path.GetFileName(path)}"
+                        : $"{Name}: clip failed - {request}: {err}");
+                }
+                finally
+                {
+                    _extractingFromSec = double.MaxValue;
+                    Interlocked.Exchange(ref _clipBusy, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Stops the tier and clears the ring.
+        ///
+        /// Pending clips are flushed first, short of their trailing seconds: those frames never
+        /// arrived, which is the truth about a fault that was still running, and better than
+        /// discarding the evidence for being incomplete.
+        /// </summary>
+        private void StopEventTier()
+        {
+            ClipScheduler clips = _clips;
+            SegmentRing ring = _segments;
+            IVideoSink sink = _eventSink;
+
+            if (clips != null && ring != null && _clipper != null && Output != null)
+            {
+                foreach (ClipRequest r in clips.Flush())
+                {
+                    SegmentCoverage c = ring.Cover(r.FromSec, r.ToSec);
+                    if (!c.Any) { MilErrorLog.Note($"{Name}: {r} - nothing held, not cut"); continue; }
+                    string path = System.IO.Path.Combine(
+                        Output.EnsureFolder(),
+                        $"{SafeName()}_{DateTime.Now:yyyyMMdd_HHmmss}_{r.Kind}.mp4");
+                    bool ok = _clipper.Extract(c, path, out string err);
+                    MilErrorLog.Note(ok
+                        ? $"{Name}: clip written at stop - {r} -> {System.IO.Path.GetFileName(path)}"
+                        : $"{Name}: clip failed at stop - {r}: {err}");
+                }
+            }
+
+            if (sink != null)
+            {
+                VideoSinkStats st = sink.Stats;
+                sink.Stop();
+                sink.WaitFinalize(15000);
+                sink.Dispose();
+                if (st.FramesFed > 0)
+                    MilErrorLog.Note($"{Name}: event tier - {st.FramesFed} fed, {st.FramesSkipped} skipped, "
+                                   + $"{st.FramesDropped} dropped, queue mean {st.MeanFeedUs:F0} us / "
+                                   + $"max {st.MaxFeedUs:F0} us"
+                                   + (clips != null
+                                      ? $"; clips {clips.Emitted} cut, {clips.Merged} merged, "
+                                        + $"{clips.Suppressed} in cooldown, {clips.Overflowed} overflowed"
+                                      : string.Empty));
+            }
+
+            if (ring != null && ring.PollFailures > 0)
+                MilErrorLog.Note($"{Name}: segment list unreadable on {ring.PollFailures} polls - "
+                               + $"{ring.LastPollError}. Every clip this run failed for that reason, "
+                               + $"not because its window was too old.");
+
+            // The ring is scratch: the clips that mattered are already in the output folder, and
+            // leaving tens of megabytes of segments behind after every run is not a recording.
+            //
+            // Swept by name as well as through the ring, because the ring only knows the files the
+            // list told it about - and when the list could not be read, that was none of them.
+            int cleared = ring?.DeleteAll() ?? 0;
+            cleared += SweepSegmentFiles();
+            if (cleared > 0)
+                MilErrorLog.Note($"{Name}: segments cleared - {cleared} file(s)");
+
+            _eventSink = null;
+            _segments = null;
+            _clips = null;
+            _clipper = null;
+            _segmentPattern = null;
+            _segmentList = null;
+            _extractingFromSec = double.MaxValue;
+            Interlocked.Exchange(ref _clipBusy, 0);
+        }
+
+        /// <summary>
+        /// Deletes this run's segment files and its list, by name.
+        ///
+        /// The pattern ffmpeg was given is "..._seg_%05d.mp4", so the files are "..._seg_" plus
+        /// digits - which is specific enough to sweep without a wildcard that could reach another
+        /// run's files.
+        /// </summary>
+        private int SweepSegmentFiles()
+        {
+            int removed = 0;
+            try
+            {
+                if (!string.IsNullOrEmpty(_segmentPattern))
+                {
+                    string dir = System.IO.Path.GetDirectoryName(_segmentPattern);
+                    string name = System.IO.Path.GetFileName(_segmentPattern);
+                    int marker = name.IndexOf("%", StringComparison.Ordinal);
+                    if (dir != null && marker > 0 && System.IO.Directory.Exists(dir))
+                    {
+                        string glob = name.Substring(0, marker) + "*.mp4";
+                        foreach (string f in System.IO.Directory.GetFiles(dir, glob))
+                        {
+                            try { System.IO.File.Delete(f); removed++; }
+                            catch (System.IO.IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(_segmentList) && System.IO.File.Exists(_segmentList))
+                {
+                    try { System.IO.File.Delete(_segmentList); removed++; }
+                    catch (System.IO.IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (Exception e)
+            {
+                MilErrorLog.Note($"{Name}: sweeping the segment files failed - {e.Message}");
+            }
+            return removed;
         }
 
         #endregion
@@ -1842,21 +2439,6 @@ namespace MatroxFrameGrabber.Mil
         #endregion
 
         #region Output helpers
-
-        /// <summary>Allocates a destination buffer scaled from <paramref name="src"/> by <paramref name="scale"/>.</summary>
-        private MIL_ID AllocScaledBuffer(MIL_ID src, double scale, bool evenDims = false)
-        {
-            MIL_INT band = MIL.MbufInquire(src, MIL.M_SIZE_BAND, MIL.M_NULL);
-            MIL_INT type = MIL.MbufInquire(src, MIL.M_TYPE, MIL.M_NULL);
-            long srcW = MIL.MbufInquire(src, MIL.M_SIZE_X, MIL.M_NULL);
-            long srcH = MIL.MbufInquire(src, MIL.M_SIZE_Y, MIL.M_NULL);
-            long dstW = Math.Max(2, (long)(srcW * scale));
-            long dstH = Math.Max(2, (long)(srcH * scale));
-            if (evenDims) { dstW &= ~1L; dstH &= ~1L; }   // H.264 needs even dimensions
-            MIL_ID dst = MIL.M_NULL;
-            MIL.MbufAllocColor(_sysId, band, dstW, dstH, type, MIL.M_IMAGE + MIL.M_PROC, ref dst);
-            return dst;
-        }
 
         private string SafeName()
         {
@@ -2210,6 +2792,16 @@ namespace MatroxFrameGrabber.Mil
             MilErrorLog.Note($"{Name}: grab stopped - {FrameCount} frames, {_frameRate:F1} fps, "
                            + $"{missed} missed, {BytesPerFrame / 1048576.0:F2} MiB/frame, decim {_decimation}");
 
+            // The one read every sink shared, reported once rather than per sink. Its worst case is
+            // what to compare against the frame period: one read over that is a missed frame, and
+            // two reads per frame is what used to put it there.
+            FrameExtractor frames = _frames;
+            if (frames != null && frames.Fed > 0)
+                MilErrorLog.Note($"{Name}: frames read out - {frames.Fed}, "
+                               + $"read mean {frames.MeanUs:F0} us / max {frames.MaxUs:F0} us, "
+                               + $"pool dry {frames.Exhausted}x, {frames.Failures} failed, "
+                               + $"{frames.InUse} still out");
+
             // What detection cost and what it found, on the same line as the losses it must not
             // have caused. The worst reduction matters more than the average: the frame period at
             // 124 fps is 8045 us, and one reduction over that is a missed frame.
@@ -2228,11 +2820,21 @@ namespace MatroxFrameGrabber.Mil
             VideoSinkStats rec = _recording?.Stats ?? default;
             if (rec.FramesFed > 0 || rec.FramesSkipped > 0)
             {
+                // Both rates named: the pipe carries every frame while a file may declare a
+                // quarter of that, and the two silently disagreeing is what this line is for.
+                var fileRates = new System.Text.StringBuilder();
+                foreach (double r in _recording.FileRates)
+                {
+                    if (fileRates.Length > 0) fileRates.Append(", ");
+                    fileRates.Append(r.ToString("0.###", CultureInfo.InvariantCulture));
+                }
+
                 MilErrorLog.Note($"{Name}: recording ({_recording.Name}) - {rec.FramesFed} fed, "
                                + $"{rec.FramesSkipped} skipped (encoder full), {rec.FramesDropped} dropped, "
-                               + $"{rec.WrittenFps:F1} fps written vs {rec.DeclaredFps:F2} fps declared "
-                               + $"over {rec.ElapsedSeconds:F1} s, "
-                               + $"extract mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
+                               + $"fed at {rec.WrittenFps:F1}/s over {rec.ElapsedSeconds:F1} s "
+                               + $"(source {rec.DeclaredFps:F2} fps), "
+                               + $"file declares {fileRates} fps, "
+                               + $"queue mean {rec.MeanFeedUs:F0} us / max {rec.MaxFeedUs:F0} us "
                                + $"of the {(_frameRate > 0 ? 1e6 / _frameRate : 0):F0} us frame period");
             }
 
@@ -2304,7 +2906,28 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>Size of the frames actually arriving, which is what the ROI is clamped to.</summary>
-        private bool TryGetFrameSize(out int width, out int height)
+        /// <summary>
+        /// The frame size plus how many bands it carries, which is what a size-per-minute estimate
+        /// needs: 3 bands is three times the bytes of 1, and the Bayer-conversion state decides
+        /// which it is.
+        /// </summary>
+        internal bool TryGetFrameShape(out int width, out int height, out int bands)
+        {
+            bands = 3;
+            if (!TryGetFrameSize(out width, out height)) return false;
+            try
+            {
+                bands = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
+                if (bands < 1) bands = 1;
+            }
+            catch (MILException e)
+            {
+                MilErrorLog.Write($"{Name}: read band count", e);
+            }
+            return true;
+        }
+
+        internal bool TryGetFrameSize(out int width, out int height)
         {
             width = 0; height = 0;
             if (_dispBufId == MIL.M_NULL) return false;

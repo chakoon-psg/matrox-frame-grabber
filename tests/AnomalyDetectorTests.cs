@@ -80,7 +80,7 @@ namespace MatroxFrameGrabber.Tests
 
             Assert.Single(events);
             Assert.Equal(1, events[0].FrameCount);
-            Assert.Equal(1.0, events[0].MaxDepth, 3);
+            Assert.Equal(1.0, events[0].MaxDeviation, 3);
         }
 
         [Fact]
@@ -349,7 +349,7 @@ namespace MatroxFrameGrabber.Tests
 
             AnomalyEvent one = Assert.Single(emitted);
             Assert.Equal(1, one.FrameCount);
-            Assert.True(one.MaxDepth > 0.8, $"depth was {one.MaxDepth}");
+            Assert.True(one.MaxDeviation > 0.8, $"depth was {one.MaxDeviation}");
         }
 
         /// <summary>Thresholds with a short event cap, for the truncation rules.</summary>
@@ -434,7 +434,7 @@ namespace MatroxFrameGrabber.Tests
                 "a dropout after a capped event must still be reported");
             AnomalyEvent found = events[events.Count - 1];
             Assert.False(found.Truncated);
-            Assert.True(found.MaxDepth > 0.5, $"depth was {found.MaxDepth}");
+            Assert.True(found.MaxDeviation > 0.5, $"depth was {found.MaxDeviation}");
         }
 
         [Fact]

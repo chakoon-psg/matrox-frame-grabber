@@ -96,6 +96,8 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- Detection region: which pixels the anomaly metrics are computed over. Software
@@ -128,11 +130,29 @@
                         ToolTip="Measure the whole frame" />
             </StackPanel>
 
+            <!-- What this camera watches for, as a line. The checkboxes are in the app settings,
+                 because which faults the rig looks for is one policy rather than four - a rig where
+                 camera 1 watches for Blackout and camera 2 does not produces a report nobody can
+                 read. What stays per camera is below: the thresholds, which had to be measured per
+                 optical path.
+
+                 The count of what is off is on purpose. Naming only what is on would let a pane
+                 with nothing to report read as "nothing wrong" while six of seven kinds go
+                 unexamined. -->
+            <Label Grid.Row="1" Grid.Column="0" Content="Watching" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding DetectionKindsText}"
+                       VerticalAlignment="Center" Margin="0,2,0,5" FontSize="11"
+                       Foreground="#9A9A9A" TextTrimming="CharacterEllipsis"
+                       ToolTip="검출 종류는 앱 전체 설정에서 켜고 끕니다 — 임계값은 카메라마다 따로입니다" />
+
             <!-- Detection thresholds. Per channel because the cameras do not see the same thing:
                  measured against one clip, the dimmest of three produced nine shallow false
-                 positives where the other two produced none. Takes effect on the next Start. -->
-            <Label Grid.Row="1" Grid.Column="0" Content="Detect" />
-            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                 positives where the other two produced none. Takes effect on the next Start.
+
+                 Labelled with the kind it edits: it is Dropout's pair, and the four other kinds
+                 are listed above it. -->
+            <Label Grid.Row="2" Grid.Column="0" Content="Dropout" />
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
                 <TextBlock Text="depth" Margin="0,0,3,0" VerticalAlignment="Center"
                            Foreground="#9A9A9A" FontSize="10" />
                 <TextBox Width="50" FontSize="11" VerticalContentAlignment="Center"
@@ -151,13 +171,21 @@
                         ToolTip="Saved to settings; takes effect on the next Start" />
             </StackPanel>
 
+            <!-- The budget and the share, because the split is invisible otherwise: five
+                 detectors each allowed one false positive an hour is five an hour, and the total
+                 is the number anybody was told to expect. -->
+            <Label Grid.Row="3" Grid.Column="0" Content="Budget" />
+            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding BudgetText}" Margin="0,0,0,3"
+                       VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                       TextTrimming="CharacterEllipsis" ToolTip="{Binding BudgetText}" />
+
             <!-- Where the depth threshold came from, and what the last run would propose instead.
                  Applying is a separate act on purpose: the histogram is collected on every run
                  because it costs nothing, but only a person can say the run was on a healthy
                  panel. TextTrimming rather than a fixed width, so a window shows all of it and a
                  pane shows as much as it has room for. -->
-            <Label Grid.Row="2" Grid.Column="0" Content="Calib" />
-            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal">
+            <Label Grid.Row="4" Grid.Column="0" Content="Calib" />
+            <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal">
                 <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
                            Foreground="#9A9A9A" FontSize="10"
                            TextTrimming="CharacterEllipsis"
@@ -190,7 +218,7 @@
                     <TextBox Width="140" FontSize="11" VerticalContentAlignment="Center"
                              Text="{Binding OutputName, UpdateSourceTrigger=LostFocus}"
                              ToolTip="File name prefix for snapshots/recordings" />
-                    <TextBlock Text="_yyyyMMdd_HHmmss.png / .mp4" Margin="6,0,0,0"
+                    <TextBlock Text="_yyyyMMdd_HHmmss.png / .mp4·.mkv·.mov" Margin="6,0,0,0"
                                VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
                 </StackPanel>
 

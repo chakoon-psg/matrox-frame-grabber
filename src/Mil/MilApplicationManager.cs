@@ -50,6 +50,19 @@ namespace MatroxFrameGrabber.Mil
         public HashSet<int> OwnedChannels { get; set; }
 
         /// <summary>
+        /// Whether the channels this manager builds reduce and judge frames.
+        ///
+        /// Applied when each channel is created, which is the point of having it here: it used to
+        /// be pushed onto every channel by MainViewModel's constructor, so the flag was false for
+        /// as long as it took to get there and a grab in that window would have judged nothing
+        /// without saying so. Set by the caller from the command line, like OwnedChannels.
+        /// </summary>
+        public bool DetectionEnabled { get; set; } = true;
+
+        /// <summary>Whether they sample brightness. Same story, same place.</summary>
+        public bool BrightnessEnabled { get; set; } = true;
+
+        /// <summary>
         /// Allocates the MIL application and system and builds the camera channels.
         /// Throws <see cref="MILException"/> if no system can be allocated.
         /// </summary>
@@ -81,6 +94,11 @@ namespace MatroxFrameGrabber.Mil
             {
                 var channel = new CameraChannel(i);
                 channel.Output = Output;
+                // Before Allocate, so neither flag has a window in which it is false. Both are on
+                // for the whole session in ordinary use; the switches exist for one measurement -
+                // frames missed with the reduction on the acquisition path against without it.
+                channel.DetectionEnabled = DetectionEnabled;
+                channel.BrightnessEnabled = BrightnessEnabled;
                 // A channel outside OwnedChannels gets a pane but no digitizer, exactly like an
                 // empty port. That is what lets one process hold a subset of the board's channels,
                 // which is the only way to answer whether several processes can share it.

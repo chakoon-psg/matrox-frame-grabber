@@ -93,8 +93,12 @@ App.xaml ──> Views/MainWindow.xaml
 ### 2.2 `Views/MainWindow.xaml(.cs)` (217 + 912줄)
 
 **툴바 구성** (커밋 `121d605` → `07e9cbc`에서 단순화)
-- 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` / `⚙ Rec` 팝업 │ `Open` / `Browse…`
-- 가끔 쓰는 설정(출력 해상도, ffmpeg 경로, 표시 fps)은 `RecSettingsPopup` 뒤로 숨김.
+- 항상 필요한 것만 노출: `Start All` / `Stop All` │ `● Rec All` │ `⚙ Settings` │ `Open`
+- 설정은 `AppSettingsWindow`(앱 전역)와 `CameraSettingsWindow`(카메라별) 두 창에 모임.
+  팝업이던 `⚙ Rec`을 대체한다 — 그 팝업은 "recording settings"라는 이름으로 세 줄을 들고
+  있었는데 녹화인 것은 해상도 하나였고(ffmpeg 경로는 읽기 전용 진단, 표시 fps는 프리뷰),
+  출력 폴더는 툴바에 있었고 녹화 백엔드는 둘 자리가 없었다. `Browse…`도 창 안으로 옮겼다:
+  폴더는 한 번 정하는 값이고, 폴더가 둘 이상이 되면 툴바 버튼으로는 어느 쪽인지 말할 수 없다.
 - 오른쪽 끝에 `SystemStatus`(할당된 시스템 디스크립터 + 디지타이저 수) 고정.
 
 **생명주기 (중요한 순서 규약)**
@@ -319,8 +323,9 @@ W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형�
 
 ### 2.8 `Mil/RecordingSession.cs` (234줄) — 컬러 라이브 녹화
 
-- `Start(sourceBuf, settings, baseName, fps)`가 소스 버퍼에서 **geometry/포맷을 추론**하고,
-  해상도 프리셋(`ScaleFactorFor`)을 적용한 뒤 폭·높이를 `&= ~1`로 짝수화(H.264 요구).
+- `Start(...)`가 소스 버퍼에서 **geometry/포맷을 추론**하고, 호출자가 준 배율(현재 항상 1.0)을
+  적용한 뒤 폭·높이를 `&= ~1`로 짝수화(H.264 요구). **배율과 레이트는 설정이 아니라 취득에서
+  나온다** — 계약에는 남아 있지만 앱은 언제나 원본 크기·매 프레임을 넘긴다.
 - fps는 `CameraChannel`이 넘긴다: 실측 `_frameRate > 1.0`이면 그것, 아니면
   `M_SELECTED_FRAME_RATE`, 그것도 없으면 30.0.
 - **컬러 프레임 추출 방식이 이 파일의 핵심 함정(커밋 `4db0b71`)**:
@@ -361,15 +366,22 @@ W×H 영역을 **packed**로 복사하고, X 오프셋을 받는 유일한 형�
 ### 2.10 `Infrastructure/OutputSettings.cs` (311줄)
 
 - 저장 위치: `%LocalAppData%\MatroxFrameGrabber\settings.json`
-- 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `Resolution`(Original / P1080 / P720),
-  `FfmpegPath`, `DisplayUpdateFps`, 채널별 `ChannelRois` / `ChannelDecimation` /
-  `ChannelThresholds`
+- 항목: `OutputFolder`(기본 `내 비디오\MatroxCapture`), `FfmpegPath`, `DisplayUpdateFps`,
+  `VideoSink`, `RecordingEncoding`, `EnabledKinds`, `SegmentFolder`, `KeepStills`,
+  `AnomalyClipSeconds`, 채널별 `ChannelRois` / `ChannelDecimation` / `ChannelDetection`
+- `EnabledKinds`는 **앱 전체 정책**이고 채널의 `KindSettings.Enabled`는 그 사본이다(`[JsonIgnore]`).
+  옛 파일의 채널별 플래그는 `StoredEnabled`로 읽어 **합집합**으로 이관한다 — 교집합을 쓰면 한
+  카메라에서만 켜 둔 종류를 조용히 끄게 된다.
+- **열거형은 숫자가 아니라 이름으로 저장한다**(`VideoSink`, `RecordingEncoding`). 못 알아보는
+  이름은 가장 싼 기본값으로 떨어진다 — 인덱스로 저장하면 범위를 벗어난 값이 분당 71 GB를 쓰는
+  인코딩을 고를 수 있다.
 - **모든 setter가 값 변경 시 즉시 `Save()`** — 별도 저장 버튼이 없다.
 - 방어 장치 두 개가 핵심이다:
   1. **`_loading` 플래그**로 `Load()`가 값을 적용하는 동안 재저장을 억제
   2. (de)serialization이 **관찰 가능한 setter를 절대 거치지 않도록 별도 `Dto` 클래스**를 사용
 - `Load()` / `Save()` 모두 예외를 삼킨다("설정이 이번엔 저장 안 될 뿐" = 비치명적).
-- `ScaleFactorFor(h)`: 업스케일 금지, 원본이 목표보다 작으면 1.0. `TargetHeight`는 `[JsonIgnore]`.
+- 녹화 레이트와 해상도 프리셋은 **여기 없다**. 둘 다 선택이 아니라 결과였다 — 상한이 취득
+  레이트이고 크기가 취득 크기다. 설정 창은 그 사실을 읽기 전용 한 줄로 말한다.
 
 ### 2.11 `Infrastructure/NativeMethods.cs` (36줄) / `RelayCommand.cs` (38줄)
 

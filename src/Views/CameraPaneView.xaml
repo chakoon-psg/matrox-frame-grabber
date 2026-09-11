@@ -81,7 +81,12 @@
                 </StackPanel>
             </Expander.Header>
             <Border Background="#2A2A2A" BorderBrush="#404040" BorderThickness="1" Padding="5">
-                <local:CameraSettingsView x:Name="InlineSettings" />
+                <!-- Scrolls, because a pane is not tall enough for the whole list and an expander
+                     docked to the bottom of one just stops drawing where the pane ends. A
+                     scrollbar says there is more; the pop-out window shows all of it. -->
+                <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="260">
+                    <local:CameraSettingsView x:Name="InlineSettings" />
+                </ScrollViewer>
             </Border>
         </Expander>
 
