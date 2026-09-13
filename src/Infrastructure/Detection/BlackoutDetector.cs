@@ -231,17 +231,8 @@ namespace MatroxFrameGrabber.Infrastructure
     public sealed class BlackoutDetector
     {
         private readonly BlackoutThresholds _t;
+        private readonly SustainedFaultTracker _run = new SustainedFaultTracker(AnomalyKind.Blackout);
 
-        private int _darkRun;          // consecutive dark-and-flat frames
-        private int _clearRun;         // consecutive frames back above ExitLuma
-        private bool _inBlackout;
-        private bool _reported;
-
-        private long _startFrame, _lastFrame;
-        private long _previousFrame = -1;
-        private double _startTime, _lastTime, _previousTime;
-        private double _framePeriodSec;
-        private double _darkestLuma = double.MaxValue;
         private long _judged;
         private double _healthyFloor = double.MaxValue;
         private double _spreadAtFloor;
@@ -259,13 +250,13 @@ namespace MatroxFrameGrabber.Infrastructure
         public double LastSpread { get; private set; }
 
         /// <summary>Whether the picture is currently gone. What health and the timeline read.</summary>
-        public bool InBlackout => _inBlackout;
+        public bool InBlackout => _run.InFault;
 
         /// <summary>Frames the current blackout has run, or 0.</summary>
-        public int RunningFrames => _inBlackout ? (int)(_lastFrame - _startFrame + 1) : 0;
+        public int RunningFrames => _run.RunningFrames;
 
         /// <summary>How long the current blackout has run, in ms, or 0.</summary>
-        public double RunningMs => _inBlackout ? RunningFrames * _framePeriodSec * 1000.0 : 0.0;
+        public double RunningMs => _run.RunningMs;
 
         /// <summary>Frames judged, which is what the proposal needs enough of.</summary>
         public long Judged => _judged;
@@ -277,16 +268,16 @@ namespace MatroxFrameGrabber.Infrastructure
         /// against a rate of zero, and the safe answer at the start of a grab is to judge nothing
         /// rather than to judge with a dwell of one frame.
         /// </summary>
-        public bool RateKnown => _framePeriodSec > 0.0;
+        public bool RateKnown => _run.RateKnown;
 
         /// <summary>Frames skipped because the numbering jumped. The dwell restarts across a hole.</summary>
-        public long FramesSkippedForGaps { get; private set; }
+        public long FramesSkippedForGaps => _run.FramesSkippedForGaps;
 
         /// <summary>True on the frame the fault was confirmed, so stills can be kept.</summary>
-        public bool EnteredThisFrame { get; private set; }
+        public bool EnteredThisFrame => _run.EnteredThisFrame;
 
         /// <summary>True on the first frame the picture is back.</summary>
-        public bool RecoveredThisFrame { get; private set; }
+        public bool RecoveredThisFrame => _run.RecoveredThisFrame;
 
         /// <summary>
         /// Judges one frame. Returns the event on the frame the dwell confirms it, and null every
@@ -296,102 +287,31 @@ namespace MatroxFrameGrabber.Infrastructure
         {
             if (grid == null) return null;
 
-            EnteredThisFrame = false;
-            RecoveredThisFrame = false;
-
-            long frame = grid.FrameNumber;
-
-            // A hole in the numbering is not a measurement. The level would still be readable
-            // across it - this detector needs no delta - but the dwell is a claim about how long
-            // something held, and frames nobody saw cannot support it. So the run restarts.
-            if (_previousFrame >= 0 && frame != _previousFrame + 1)
-            {
-                FramesSkippedForGaps++;
-                _darkRun = 0;
-                _clearRun = 0;
-                _previousFrame = frame;
-                _previousTime = timeStampSec;
-                return null;
-            }
-
-            if (_previousFrame >= 0 && timeStampSec > _previousTime)
-                _framePeriodSec = timeStampSec - _previousTime;
-            _previousFrame = frame;
-            _previousTime = timeStampSec;
-
             double luma = grid.TileMedian();
             double spread = Spread(grid);
             LastLuma = luma;
             LastSpread = spread;
             _judged++;
 
-            if (luma < _darkestLuma) _darkestLuma = luma;
-
             bool dark = luma <= _t.EnterLuma && spread <= _t.MaxSpread;
             bool back = luma >= _t.ExitLuma;
 
             // The floor a threshold has to clear, taken only from frames that are not a fault -
             // the same discipline the depth floor uses.
-            if (!_inBlackout && !dark && luma < _healthyFloor)
+            if (!_run.InFault && !dark && luma < _healthyFloor)
             {
                 _healthyFloor = luma;
                 _spreadAtFloor = spread;
             }
 
-            AnomalyEvent? emitted = null;
+            // How far below the entry level it went, as a fraction of that level, so the report
+            // carries a number of the same shape Dropout's depth has.
+            double below = _t.EnterLuma > 0.0 ? (_t.EnterLuma - luma) / _t.EnterLuma : 0.0;
+            if (below < 0.0) below = 0.0;
+            if (below > 1.0) below = 1.0;
 
-            if (dark)
-            {
-                _clearRun = 0;
-                if (_darkRun == 0) { _startFrame = frame; _startTime = timeStampSec; }
-                _darkRun++;
-                _lastFrame = frame;
-                _lastTime = timeStampSec;
-
-                // RateKnown first. The dwell is a claim about elapsed time and there is no way
-                // to convert it to frames before a frame period has been measured - which takes
-                // two frames. Without this guard EnterFrames(0) collapses to 1 and the first flat
-                // dark frame of a grab is reported as a blackout, and the start of a grab is
-                // exactly when the picture can legitimately be black: the panel may not be
-                // showing yet and the display buffer still holds the last run's frame. Found by
-                // the startup log reading "dwell 1f in / 1f out" on hardware, 2026-09-11.
-                if (!_reported && RateKnown && _darkRun >= _t.EnterFrames(Fps()))
-                {
-                    _inBlackout = true;
-                    _reported = true;
-                    EnteredThisFrame = true;
-                    emitted = Emit();
-                }
-                else if (_inBlackout)
-                {
-                    _lastFrame = frame;
-                }
-            }
-            else
-            {
-                _darkRun = 0;
-                if (_inBlackout) _lastFrame = frame;
-
-                if (back)
-                {
-                    _clearRun++;
-                    if (RateKnown && _clearRun >= _t.RecoverFrames(Fps()))
-                    {
-                        if (_inBlackout) RecoveredThisFrame = true;
-                        _inBlackout = false;
-                        _reported = false;
-                        _clearRun = 0;
-                    }
-                }
-                else
-                {
-                    // Between the two levels: neither dark enough to start nor bright enough to
-                    // end. That gap is the hysteresis, and sitting in it changes nothing.
-                    _clearRun = 0;
-                }
-            }
-
-            return emitted;
+            return _run.Observe(grid.FrameNumber, timeStampSec, dark, back,
+                                below, _t.EnterMs, _t.RecoverMs);
         }
 
         /// <summary>
@@ -400,20 +320,13 @@ namespace MatroxFrameGrabber.Infrastructure
         /// A panel that died four frames before the run ended would otherwise be lost entirely -
         /// the dwell never completed and nothing was emitted.
         /// </summary>
-        public AnomalyEvent? Flush()
-        {
-            if (_reported || _darkRun < 1) return null;
-            _inBlackout = true;
-            _reported = true;
-            return Emit(truncated: true);
-        }
+        public AnomalyEvent? Flush() => _run.Flush();
 
         /// <summary>
-        /// What a run says the thresholds could be. Half the observed floor, in both axes.
+        /// What a run says the thresholds could be.
         ///
         /// Halving rather than fitting a distribution: the quantity is a hard floor, not a noise
-        /// population, so the question is margin and not probability. It is the same doubling of
-        /// margin the depth threshold was set with.
+        /// population, so the question is margin and not probability.
         /// </summary>
         public BlackoutProposal Propose()
         {
@@ -433,25 +346,16 @@ namespace MatroxFrameGrabber.Infrastructure
 
         public void Reset()
         {
-            _darkRun = 0;
-            _clearRun = 0;
-            _inBlackout = false;
-            _reported = false;
-            _previousFrame = -1;
-            _previousTime = 0.0;
-            _framePeriodSec = 0.0;
-            _darkestLuma = double.MaxValue;
+            _run.Reset();
             _healthyFloor = double.MaxValue;
             _spreadAtFloor = 0.0;
             _judged = 0;
-            FramesSkippedForGaps = 0;
             LastLuma = 0.0;
             LastSpread = 0.0;
-            EnteredThisFrame = false;
-            RecoveredThisFrame = false;
         }
 
         /// <summary>
+        /// Max minus min of the populated tile means.        /// <summary>
         /// Max minus min of the populated tile means.
         ///
         /// Means and not standard deviations: what tells a dead panel from a dark picture is that
@@ -473,33 +377,6 @@ namespace MatroxFrameGrabber.Infrastructure
                 seen++;
             }
             return seen < 2 ? 0.0 : hi - lo;
-        }
-
-        private double Fps() => _framePeriodSec > 0.0 ? 1.0 / _framePeriodSec : 0.0;
-
-        private AnomalyEvent Emit(bool truncated = false)
-        {
-            int frames = (int)(_lastFrame - _startFrame + 1);
-            double period = _framePeriodSec > 0.0 ? _framePeriodSec : 0.0;
-
-            // MaxDeviation carries how far below the entry level it went, as a fraction of that
-            // level, so the report has a number of the same shape Dropout's depth has. Coherence
-            // is not measured here - this detector never looks at a delta - and saying 0 would
-            // read as "the tiles disagreed". 1.0 is the truth: every tile agrees, which is the
-            // whole finding.
-            double below = _t.EnterLuma > 0.0
-                ? (_t.EnterLuma - _darkestLuma) / _t.EnterLuma
-                : 0.0;
-            if (below < 0.0) below = 0.0;
-            if (below > 1.0) below = 1.0;
-
-            return new AnomalyEvent(
-                _startFrame, _lastFrame, frames,
-                below, 1.0,
-                _startTime, frames * period * 1000.0,
-                truncated,
-                onsetSpreadFrames: 0, onsetTiles: 0,
-                kind: AnomalyKind.Blackout);
         }
     }
 }

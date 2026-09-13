@@ -97,7 +97,9 @@ namespace MatroxFrameGrabber.Infrastructure
         /// carries that shape; until then two kinds are true.
         /// </summary>
         public static bool Implemented(AnomalyKind kind) =>
-            kind == AnomalyKind.Dropout || kind == AnomalyKind.Blackout;
+            kind == AnomalyKind.Dropout
+         || kind == AnomalyKind.Blackout
+         || kind == AnomalyKind.Washout;
 
         /// <summary>
         /// Whether the kind is judged by the sustained detector rather than the event one.
@@ -105,7 +107,8 @@ namespace MatroxFrameGrabber.Infrastructure
         /// The caller needs this because the two take different settings and emit on different
         /// occasions - one on close, one on confirm.
         /// </summary>
-        public static bool IsSustained(AnomalyKind kind) => kind == AnomalyKind.Blackout;
+        public static bool IsSustained(AnomalyKind kind) =>
+            kind == AnomalyKind.Blackout || kind == AnomalyKind.Washout;
 
         /// <summary>Which way this kind moves brightness.</summary>
         public static AnomalyDirection DirectionOf(AnomalyKind kind)

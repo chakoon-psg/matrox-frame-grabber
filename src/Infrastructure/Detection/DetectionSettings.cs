@@ -107,6 +107,35 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>How long the picture has to be back before the fault is over, in ms.</summary>
         public double BlackoutRecoverMs { get; set; } = 500.0;
 
+        // ----- Washout only -----
+        //
+        // Its own five, not Blackout's with the comparison flipped. The levels mean opposite
+        // things and MaxDetail has no Blackout counterpart at all.
+
+        /// <summary>Luma at or above which the frame is bright enough to be a candidate.</summary>
+        public double WashoutEnterLuma { get; set; } = 200.0;
+
+        /// <summary>Luma it has to fall back to. **Below** the entry - the hysteresis runs the other way.</summary>
+        public double WashoutExitLuma { get; set; } = 180.0;
+
+        /// <summary>How far apart the tile means may be and still count as structureless.</summary>
+        public double WashoutMaxSpread { get; set; } = 4.0;
+
+        /// <summary>
+        /// How much detail may remain inside a tile.
+        ///
+        /// **The test Washout cannot do without.** A white UI background is bright and flat
+        /// between tiles but carries text, so the variance inside a tile stays high; a saturated
+        /// panel has neither. Without this a white settings screen is reported as a fault.
+        /// </summary>
+        public double WashoutMaxDetail { get; set; } = 3.0;
+
+        /// <summary>How long bright-and-structureless has to hold, in ms.</summary>
+        public double WashoutEnterMs { get; set; } = 500.0;
+
+        /// <summary>How long the picture has to be back, in ms.</summary>
+        public double WashoutRecoverMs { get; set; } = 500.0;
+
         /// <summary>
         /// How much of a head start the first falling tile may have over the last. A surface that
         /// dims at once is near zero; the periodic horizontal wipe on these panels took 193 ms and
@@ -168,6 +197,15 @@ namespace MatroxFrameGrabber.Infrastructure
             BlackoutMaxSpread = C(BlackoutMaxSpread, 0.0, 255.0);
             BlackoutEnterMs = C(BlackoutEnterMs, 1.0, 600000.0);
             BlackoutRecoverMs = C(BlackoutRecoverMs, 1.0, 600000.0);
+
+            WashoutEnterLuma = C(WashoutEnterLuma, 1.0, 255.0);
+            WashoutExitLuma = C(WashoutExitLuma, 0.0, 254.0);
+            if (WashoutExitLuma >= WashoutEnterLuma) WashoutExitLuma = WashoutEnterLuma - 1.0;
+            if (WashoutExitLuma < 0.0) WashoutExitLuma = 0.0;
+            WashoutMaxSpread = C(WashoutMaxSpread, 0.0, 255.0);
+            WashoutMaxDetail = C(WashoutMaxDetail, 0.0, 255.0);
+            WashoutEnterMs = C(WashoutEnterMs, 1.0, 600000.0);
+            WashoutRecoverMs = C(WashoutRecoverMs, 1.0, 600000.0);
         }
 
         private static double C(double v, double lo, double hi) =>
@@ -194,6 +232,12 @@ namespace MatroxFrameGrabber.Infrastructure
             BlackoutRecoverMs = other.BlackoutRecoverMs;
             PreviousDeviation = other.PreviousDeviation;
             AutoCalibratedAt = other.AutoCalibratedAt ?? string.Empty;
+            WashoutEnterLuma = other.WashoutEnterLuma;
+            WashoutExitLuma = other.WashoutExitLuma;
+            WashoutMaxSpread = other.WashoutMaxSpread;
+            WashoutMaxDetail = other.WashoutMaxDetail;
+            WashoutEnterMs = other.WashoutEnterMs;
+            WashoutRecoverMs = other.WashoutRecoverMs;
             // StoredEnabled is deliberately NOT copied. It is the old file's key, read once by
             // the migration; carrying it onto the live instance would put "Enabled" back into
             // every save, and the file would again hold four answers beside the one.
@@ -287,6 +331,23 @@ namespace MatroxFrameGrabber.Infrastructure
                 MaxSpread = k.BlackoutMaxSpread,
                 EnterMs = k.BlackoutEnterMs,
                 RecoverMs = k.BlackoutRecoverMs,
+            });
+            return t;
+        }
+
+        /// <summary>Thresholds for the washout detector. Only Washout has one.</summary>
+        public WashoutThresholds ResolveWashout(AnomalyKind kind)
+        {
+            KindSettings k = For(kind);
+            var t = new WashoutThresholds();
+            t.CopyFrom(new WashoutThresholds
+            {
+                EnterLuma = k.WashoutEnterLuma,
+                ExitLuma = k.WashoutExitLuma,
+                MaxSpread = k.WashoutMaxSpread,
+                MaxDetail = k.WashoutMaxDetail,
+                EnterMs = k.WashoutEnterMs,
+                RecoverMs = k.WashoutRecoverMs,
             });
             return t;
         }

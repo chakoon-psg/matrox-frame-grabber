@@ -108,6 +108,7 @@ namespace MatroxFrameGrabber.Mil
         // cannot share a state machine: Dropout measures a fall against a running baseline and
         // confirms on one frame, Blackout measures an absolute level with hysteresis and must not.
         private BlackoutDetector _blackout;
+        private WashoutDetector _washout;
 
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
@@ -800,6 +801,12 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>How long it has been gone, in ms, or 0.</summary>
         public double BlackoutRunningMs => _blackout?.RunningMs ?? 0.0;
+
+        /// <summary>Mean per-tile deviation on the last frame - the detail the picture still has.</summary>
+        public double WashoutDetail => _washout?.LastDetail ?? 0.0;
+
+        /// <summary>Whether the picture is washed out right now.</summary>
+        public bool InWashout => _washout?.InWashout ?? false;
         public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
         public double DetectionBaseline => _detector?.Baseline ?? 0.0;
 
@@ -1553,7 +1560,21 @@ namespace MatroxFrameGrabber.Mil
                 ? new BlackoutDetector(Detection.ResolveBlackout(AnomalyKind.Blackout))
                 : null;
 
-            bool watching = _detector != null || _blackout != null;
+            bool wantWashout = DetectionEnabled && Detection.For(AnomalyKind.Washout).Enabled
+                            && AnomalyCatalog.Implemented(AnomalyKind.Washout);
+            _washout = wantWashout
+                ? new WashoutDetector(Detection.ResolveWashout(AnomalyKind.Washout))
+                : null;
+
+            bool watching = _detector != null || _blackout != null || _washout != null;
+            if (_washout != null)
+            {
+                WashoutThresholds wt = Detection.ResolveWashout(AnomalyKind.Washout);
+                MilErrorLog.Note($"{Name}: washout watch on - bright at or above "
+                               + $"{wt.EnterLuma:0.#} luma with spread within {wt.MaxSpread:0.#} "
+                               + $"and detail within {wt.MaxDetail:0.#}, back at {wt.ExitLuma:0.#}, "
+                               + $"dwell {wt.EnterMs:0} ms in / {wt.RecoverMs:0} ms out");
+            }
             if (_blackout != null)
             {
                 BlackoutThresholds bt = Detection.ResolveBlackout(AnomalyKind.Blackout);
@@ -1664,6 +1685,19 @@ namespace MatroxFrameGrabber.Mil
             if (stillGone.HasValue)
                 RecordAnomaly(stillGone.Value);
 
+            if (DetectionEnabled && _washout != null)
+            {
+                MilErrorLog.Note($"{Name}: {_washout.Propose()}");
+                MilErrorLog.Note($"{Name}: washout ceiling - last frame {_washout.LastLuma:F1} luma, "
+                               + $"spread {_washout.LastSpread:F1}, detail {_washout.LastDetail:F1}; "
+                               + $"{(_washout.InWashout ? "STILL WHITE" : "picture present")} at stop; "
+                               + $"{_washout.Judged} frames judged");
+            }
+
+            AnomalyEvent? stillWhite = _washout?.Flush();
+            if (stillWhite.HasValue)
+                RecordAnomaly(stillWhite.Value);
+
             if (_stills != null && _stills.IsAllocated)
             {
                 MilErrorLog.Note($"{Name}: stills - {_stills.Copies} kept, "
@@ -1688,6 +1722,7 @@ namespace MatroxFrameGrabber.Mil
                     DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
             _detector = null;
             _blackout = null;
+            _washout = null;
             RaisePropertyChanged(nameof(CalibrationText));
             RaiseCommandStates();
 
@@ -1959,7 +1994,8 @@ namespace MatroxFrameGrabber.Mil
 
             AnomalyDetector detector = _detector;
             BlackoutDetector blackout = _blackout;
-            if (detector == null && blackout == null)
+            WashoutDetector washout = _washout;
+            if (detector == null && blackout == null && washout == null)
                 return;
 
             // A failed reduction leaves the grid empty, and an empty grid is not a dark one -
@@ -1996,6 +2032,16 @@ namespace MatroxFrameGrabber.Mil
                     RecordAnomaly(gone.Value);
             }
 
+            // Third judge, same reduction. It reads one more number off the grid - the mean of
+            // the per-tile deviations - which is what tells a white UI screen from a saturated
+            // panel; the levels alone cannot.
+            if (washout != null)
+            {
+                AnomalyEvent? white = washout.Observe(_grid, timeStampSec);
+                if (white.HasValue)
+                    RecordAnomaly(white.Value);
+            }
+
             // ---- Lossless stills: the detector says which frame each slot wants ----
             //
             // Kept here rather than when the event is reported, because by then the picture has
@@ -2029,6 +2075,16 @@ namespace MatroxFrameGrabber.Mil
                                     blackout.LastLuma);
                 }
 
+                if (washout != null)
+                {
+                    if (washout.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    washout.LastLuma);
+                    if (washout.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    washout.LastLuma);
+                }
+
                 // A healthy frame from up to 258 ms back, so the pair shows what changed.
                 //
                 // Frozen from the onset until the export clears the slots, not merely while the
@@ -2037,6 +2093,7 @@ namespace MatroxFrameGrabber.Mil
                 // fall" was one from 52 frames after it. The tick can be up to 500 ms behind.
                 if (!(detector?.InEvent ?? false)
                     && !(blackout?.InBlackout ?? false)
+                    && !(washout?.InWashout ?? false)
                     && !stills.Has(StillRing.Slot.Onset)
                     && frameNumber % StillRing.ReferenceEveryFrames == 0)
                     stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);

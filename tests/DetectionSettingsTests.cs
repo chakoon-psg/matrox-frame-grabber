@@ -116,11 +116,18 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
-        public void Only_dropout_counts_as_running_even_if_another_kind_is_switched_on()
+        public void A_kind_counts_as_running_only_when_it_has_a_detector()
         {
             var s = new DetectionSettings();
-            s.For(AnomalyKind.Washout).Enabled = true;   // no detector for it yet
-            Assert.Equal(1, s.EnabledCount);
+
+            // Washout has one now, so switching it on adds to the count.
+            s.For(AnomalyKind.Washout).Enabled = true;
+            Assert.Equal(2, s.EnabledCount);
+
+            // Flip does not, so switching it on does not - and the settings window greys it.
+            s.For(AnomalyKind.Flip).Enabled = true;
+            Assert.Equal(2, s.EnabledCount);
+            Assert.False(AnomalyCatalog.Implemented(AnomalyKind.Flip));
         }
 
         // ----- migration -----
@@ -286,13 +293,15 @@ namespace MatroxFrameGrabber.Tests
         /// window says so rather than hiding them.
         /// </summary>
         [Fact]
-        public void Two_kinds_have_a_detector_and_the_rest_say_so()
+        public void Three_kinds_have_a_detector_and_the_rest_say_so()
         {
-            Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Dropout));
-            Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Blackout));
+            var done = new[] { AnomalyKind.Dropout, AnomalyKind.Blackout, AnomalyKind.Washout };
+
+            foreach (AnomalyKind k in done)
+                Assert.True(AnomalyCatalog.Implemented(k), $"{k} should have a detector");
 
             foreach (AnomalyKind k in AnomalyCatalog.All)
-                if (k != AnomalyKind.Dropout && k != AnomalyKind.Blackout)
+                if (Array.IndexOf(done, k) < 0)
                     Assert.False(AnomalyCatalog.Implemented(k), $"{k} has no detector yet");
         }
 
@@ -301,10 +310,30 @@ namespace MatroxFrameGrabber.Tests
         /// and emit on different occasions - one on close, one on confirm.
         /// </summary>
         [Fact]
-        public void Only_blackout_is_judged_by_the_sustained_detector()
+        public void The_sustained_kinds_are_the_ones_that_stay()
         {
+            // Both hold no baseline, so neither needs the event cap Dropout cannot do without.
             Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Blackout));
+            Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Washout));
+
+            // Dropout is the one that has to confirm on a single frame.
             Assert.False(AnomalyCatalog.IsSustained(AnomalyKind.Dropout));
+        }
+
+        /// <summary>
+        /// Washout's levels run the other way round, and reading them as Blackout's would make
+        /// the detector either silent or permanently on.
+        /// </summary>
+        [Fact]
+        public void Washout_resolves_a_hysteresis_that_falls_to_recover()
+        {
+            var s = new DetectionSettings();
+
+            WashoutThresholds t = s.ResolveWashout(AnomalyKind.Washout);
+
+            Assert.True(t.ExitLuma < t.EnterLuma, "recovery is a fall, not a rise");
+            Assert.InRange(t.EnterLuma, 1.0, 255.0);
+            Assert.True(t.MaxDetail > 0.0, "the structure test is what decides this kind");
         }
 
         /// <summary>
