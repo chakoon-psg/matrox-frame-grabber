@@ -29,6 +29,12 @@ namespace MatroxFrameGrabber.Infrastructure
 
         /// <summary>The move was too small to be worth writing down.</summary>
         NotWorthIt = 7,
+
+        /// <summary>
+        /// The move would loosen the detector on the strength of one quiet run, which is a
+        /// person's decision rather than a machine's.
+        /// </summary>
+        WouldLoosen = 8,
     }
 
     /// <summary>What the policy decided, and the sentence that goes in the log.</summary>
@@ -86,6 +92,14 @@ namespace MatroxFrameGrabber.Infrastructure
     /// the depth where the false-positive budget is met exactly, which on the 2026-09-11 hour sat
     /// 1.04x above the loudest noise measured - correct statistics and no margin. Doubling is what
     /// this repo used when it set the threshold by hand.
+    ///
+    /// **And it only ever tightens.** Dropout's floor is the loudest noise a run saw, so a quiet
+    /// run measures a low floor and would propose a low threshold - but a quiet hour is evidence
+    /// that hour was quiet, not that the rig is. Measured: the 09-11 hour floored at 0.0289 and
+    /// the 09-13 hour, on the same rig with nobody in the room, floored at 0.0087. Adopting twice
+    /// the second would have set 0.017, and an hour like the first would then have produced false
+    /// positives all night. So a run may raise a threshold on its own and may not lower one;
+    /// loosening is left to a person, with the proposal in the log to look at.
     /// </summary>
     public sealed class AutoCalibrationPolicy
     {
@@ -195,6 +209,17 @@ namespace MatroxFrameGrabber.Infrastructure
                                            + "the limit - a jump that size is a changed rig, not a "
                                            + "calibration", currentThreshold, adopt, factor,
                                         MaxChangeFactor));
+
+            // Tightening only. The floor is a maximum over the run, so a quieter run produces a
+            // lower one - and following it down trades a real risk during a noisier hour for a
+            // speculative gain now. The change cap would have caught this particular case by
+            // luck; this catches it by intent.
+            if (adopt < currentThreshold)
+                return No(AutoCalibrationVerdict.WouldLoosen, currentThreshold, floor, framesJudged,
+                          string.Format(inv, "{0:0.####} -> {1:0.####} would loosen the detector on "
+                                           + "the strength of one quiet run. A quiet hour says that "
+                                           + "hour was quiet, not that the rig is - lowering is a "
+                                           + "person's call", currentThreshold, adopt));
 
             if (currentThreshold > 0.0
                 && Math.Abs(adopt - currentThreshold) / currentThreshold < MinRelativeChange)
