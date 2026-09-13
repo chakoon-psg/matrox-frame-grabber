@@ -5,8 +5,8 @@ namespace MatroxFrameGrabber.Infrastructure
     /// <summary>
     /// The kinds of screen fault this app is for, from CONTEXT.md.
     ///
-    /// All of them are here even though only <see cref="Dropout"/> is implemented, because the
-    /// settings file needs a key per kind and the settings window needs to list what is *not* being
+    /// All of them are here whether or not a detector exists, because the settings file needs a
+    /// key per kind and the settings window needs to list what is *not* being
     /// checked - a quiet panel must not read as "nothing wrong" when one of several things is being
     /// looked at. Whether a kind has a detector is <see cref="AnomalyCatalog.Implemented"/>, not a
     /// property of the enum.
@@ -28,7 +28,7 @@ namespace MatroxFrameGrabber.Infrastructure
     /// </summary>
     public enum AnomalyKind
     {
-        /// <summary>Brightness falls and comes back. The only one implemented.</summary>
+        /// <summary>Brightness falls and comes back. The first one implemented.</summary>
         Dropout = 0,
         /// <summary>The picture goes, or nearly goes, and stays gone.</summary>
         Blackout = 1,
@@ -80,27 +80,30 @@ namespace MatroxFrameGrabber.Infrastructure
         public const int Count = 7;
 
         /// <summary>
-        /// Whether a detector exists. Only Dropout does, and it took a week of measurement to
-        /// trust: a rate-based depth threshold, a coherence gate, an onset-spread gate, an event
-        /// cap and a histogram that excludes the frames around an event.
-        /// </summary>
-        /// <summary>
         /// Whether anything in this build judges this kind.
         ///
-        /// Two now. They do not share a state machine and could not: Dropout measures a fall
-        /// relative to a running baseline and confirms on one frame; Blackout measures an
-        /// absolute level with hysteresis and must not. `CONTEXT.md` makes that the dividing line
-        /// between an event kind and a sustained one.
+        /// **The count is deliberately not written here.** It was "only Dropout", then "two now",
+        /// and each time it went stale on the one day it mattered - the day a detector was added.
+        /// The list below is the answer; the tests check it against
+        /// <see cref="IsSustained"/> as a property rather than by counting.
+        ///
+        /// What the implemented kinds have in common is only that a detector exists. They do not
+        /// share a state machine and could not: Dropout measures a fall relative to a running
+        /// baseline and confirms on one frame, while the sustained kinds measure an absolute
+        /// condition with hysteresis and must not. `CONTEXT.md` makes that the dividing line.
         ///
         /// When a learned inspector arrives this stops being a yes-or-no question - a kind will
         /// be implemented by the tiles, by the inspector, or by nothing yet. `docs/adr/0002`
-        /// carries that shape; until then two kinds are true.
+        /// carries that shape.
         /// </summary>
         public static bool Implemented(AnomalyKind kind) =>
             kind == AnomalyKind.Dropout
          || kind == AnomalyKind.Blackout
          || kind == AnomalyKind.Washout
-         || kind == AnomalyKind.Freeze;
+         || kind == AnomalyKind.Freeze
+         || kind == AnomalyKind.ColorShift
+         || kind == AnomalyKind.Flicker
+         || kind == AnomalyKind.Flip;
 
         /// <summary>
         /// Whether the kind is judged by the sustained detector rather than the event one.
@@ -111,7 +114,10 @@ namespace MatroxFrameGrabber.Infrastructure
         public static bool IsSustained(AnomalyKind kind) =>
             kind == AnomalyKind.Blackout
          || kind == AnomalyKind.Washout
-         || kind == AnomalyKind.Freeze;
+         || kind == AnomalyKind.Freeze
+         || kind == AnomalyKind.ColorShift
+         || kind == AnomalyKind.Flicker
+         || kind == AnomalyKind.Flip;
 
         /// <summary>Which way this kind moves brightness.</summary>
         public static AnomalyDirection DirectionOf(AnomalyKind kind)

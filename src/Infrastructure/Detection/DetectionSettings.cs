@@ -155,6 +155,102 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>How long moving again before the fault is over, in ms.</summary>
         public double FreezeRecoverMs { get; set; } = 500.0;
 
+        // ----- ColorShift only -----
+        //
+        // The only kind whose reference is measured rather than argued for. Zero baselines mean
+        // uncalibrated, and an uncalibrated ColorShift detector reports nothing - it measures.
+
+        /// <summary>Measured share of the frame's colour carried by band 0. 0 = uncalibrated.</summary>
+        public double ColorShiftBaselineR { get; set; }
+
+        /// <summary>Measured share of band 1. 0 = uncalibrated.</summary>
+        public double ColorShiftBaselineG { get; set; }
+
+        /// <summary>Measured share of band 2. 0 = uncalibrated.</summary>
+        public double ColorShiftBaselineB { get; set; }
+
+        /// <summary>How far one band's share may move from its baseline before it is a fault.</summary>
+        public double ColorShiftMaxDeviation { get; set; } = 0.10;
+
+        /// <summary>Deviation it has to fall back to before the fault is over.</summary>
+        public double ColorShiftExitDeviation { get; set; } = 0.07;
+
+        /// <summary>Luma below which shares are noise and nothing is judged.</summary>
+        public double ColorShiftMinLuma { get; set; } = 12.0;
+
+        /// <summary>How long the colour has to be wrong before it is a fault, in ms.</summary>
+        public double ColorShiftEnterMs { get; set; } = 1000.0;
+
+        /// <summary>How long it has to be back before the fault is over, in ms.</summary>
+        public double ColorShiftRecoverMs { get; set; } = 500.0;
+
+        // ----- Flicker only -----
+        //
+        // Relative rather than in luma: the same modulation on a panel reading 117 and one
+        // reading 35 is the same fault, and these three cameras sit a factor of three apart.
+
+        /// <summary>How far brightness swings across the window, as a fraction of its mean.</summary>
+        public double FlickerEnterAmplitude { get; set; } = 0.06;
+
+        /// <summary>Amplitude it has to fall back under. Below the entry.</summary>
+        public double FlickerExitAmplitude { get; set; } = 0.04;
+
+        /// <summary>Slowest oscillation still called a flicker, in Hz.</summary>
+        public double FlickerMinHz { get; set; } = 3.0;
+
+        /// <summary>Fastest, in Hz. Above this it is aliasing rather than something visible.</summary>
+        public double FlickerMaxHz { get; set; } = 25.0;
+
+        /// <summary>
+        /// How much brightness the window holds, in ms.
+        ///
+        /// In milliseconds and not frames, like every other dwell here: the same frame count is a
+        /// different duration at a different exposure, and the window sets the slowest
+        /// oscillation that can be counted at all.
+        /// </summary>
+        public double FlickerWindowMs { get; set; } = 1000.0;
+
+        /// <summary>
+        /// Times the brightness has to cross its own mean inside the window. **What keeps a
+        /// dropout out**: a single dip crosses twice, an oscillation crosses over and over.
+        /// </summary>
+        public int FlickerMinCrossings { get; set; } = 6;
+
+        /// <summary>How long the oscillation has to hold before it is a fault, in ms.</summary>
+        public double FlickerEnterMs { get; set; } = 1000.0;
+
+        /// <summary>How long it has to be steady before the fault is over, in ms.</summary>
+        public double FlickerRecoverMs { get; set; } = 1000.0;
+
+        /// <summary>Luma below which a relative amplitude is noise over noise.</summary>
+        public double FlickerMinLuma { get; set; } = 12.0;
+
+        // ----- Flip only -----
+        //
+        // Not one of these is a brightness: every brightness-derived scalar is invariant under a
+        // mirror, so what these bound is a comparison of arrangements.
+
+        /// <summary>How much better the mirrored match must be than the straight one, as a ratio.</summary>
+        public double FlipMaxMatchRatio { get; set; } = 0.25;
+
+        /// <summary>How different two frames must be before the comparison means anything, in luma.</summary>
+        public double FlipMinChange { get; set; } = 1.0;
+
+        /// <summary>
+        /// How asymmetric the picture must be about an axis to be judged at all, in luma.
+        /// A symmetric picture is its own mirror and no measurement can say it was turned over.
+        /// </summary>
+        public double FlipMinAsymmetry { get; set; } = 2.0;
+
+        /// <summary>How long it must stay turned over before it is a fault, in ms.</summary>
+        public double FlipEnterMs { get; set; } = 1000.0;
+
+        /// <summary>How long it must be back the right way before the fault is over, in ms.</summary>
+        public double FlipRecoverMs { get; set; } = 1000.0;
+
+        /// <summary>Luma below which nothing is judged - a dark frame has no arrangement.</summary>
+        public double FlipMinLuma { get; set; } = 12.0;
+
         /// <summary>
         /// How much of a head start the first falling tile may have over the last. A surface that
         /// dims at once is near zero; the periodic horizontal wipe on these panels took 193 ms and
@@ -231,6 +327,37 @@ namespace MatroxFrameGrabber.Infrastructure
             if (FreezeExitDelta <= FreezeEnterDelta) FreezeExitDelta = FreezeEnterDelta * 2.0 + 1e-6;
             FreezeEnterMs = C(FreezeEnterMs, 1.0, 600000.0);
             FreezeRecoverMs = C(FreezeRecoverMs, 1.0, 600000.0);
+
+            ColorShiftBaselineR = C(ColorShiftBaselineR, 0.0, 1.0);
+            ColorShiftBaselineG = C(ColorShiftBaselineG, 0.0, 1.0);
+            ColorShiftBaselineB = C(ColorShiftBaselineB, 0.0, 1.0);
+            ColorShiftMaxDeviation = C(ColorShiftMaxDeviation, 1e-4, 1.0);
+            ColorShiftExitDeviation = C(ColorShiftExitDeviation, 0.0, 1.0);
+            if (ColorShiftExitDeviation >= ColorShiftMaxDeviation)
+                ColorShiftExitDeviation = ColorShiftMaxDeviation * 0.7;
+            ColorShiftMinLuma = C(ColorShiftMinLuma, 0.0, 255.0);
+            ColorShiftEnterMs = C(ColorShiftEnterMs, 1.0, 600000.0);
+            ColorShiftRecoverMs = C(ColorShiftRecoverMs, 1.0, 600000.0);
+
+            FlickerEnterAmplitude = C(FlickerEnterAmplitude, 1e-4, 10.0);
+            FlickerExitAmplitude = C(FlickerExitAmplitude, 0.0, 10.0);
+            if (FlickerExitAmplitude >= FlickerEnterAmplitude)
+                FlickerExitAmplitude = FlickerEnterAmplitude * 0.7;
+            FlickerMinHz = C(FlickerMinHz, 0.1, 1000.0);
+            FlickerMaxHz = C(FlickerMaxHz, 0.2, 1000.0);
+            if (FlickerMaxHz <= FlickerMinHz) FlickerMaxHz = FlickerMinHz * 2.0;
+            FlickerWindowMs = C(FlickerWindowMs, 50.0, 600000.0);
+            FlickerMinCrossings = (int)C(FlickerMinCrossings, 2, 100000);
+            FlickerEnterMs = C(FlickerEnterMs, 1.0, 600000.0);
+            FlickerRecoverMs = C(FlickerRecoverMs, 1.0, 600000.0);
+            FlickerMinLuma = C(FlickerMinLuma, 0.0, 255.0);
+
+            FlipMaxMatchRatio = C(FlipMaxMatchRatio, 1e-3, 1.0);
+            FlipMinChange = C(FlipMinChange, 0.0, 255.0);
+            FlipMinAsymmetry = C(FlipMinAsymmetry, 0.0, 255.0);
+            FlipEnterMs = C(FlipEnterMs, 1.0, 600000.0);
+            FlipRecoverMs = C(FlipRecoverMs, 1.0, 600000.0);
+            FlipMinLuma = C(FlipMinLuma, 0.0, 255.0);
         }
 
         private static double C(double v, double lo, double hi) =>
@@ -267,6 +394,29 @@ namespace MatroxFrameGrabber.Infrastructure
             FreezeExitDelta = other.FreezeExitDelta;
             FreezeEnterMs = other.FreezeEnterMs;
             FreezeRecoverMs = other.FreezeRecoverMs;
+            ColorShiftBaselineR = other.ColorShiftBaselineR;
+            ColorShiftBaselineG = other.ColorShiftBaselineG;
+            ColorShiftBaselineB = other.ColorShiftBaselineB;
+            ColorShiftMaxDeviation = other.ColorShiftMaxDeviation;
+            ColorShiftExitDeviation = other.ColorShiftExitDeviation;
+            ColorShiftMinLuma = other.ColorShiftMinLuma;
+            ColorShiftEnterMs = other.ColorShiftEnterMs;
+            ColorShiftRecoverMs = other.ColorShiftRecoverMs;
+            FlickerEnterAmplitude = other.FlickerEnterAmplitude;
+            FlickerExitAmplitude = other.FlickerExitAmplitude;
+            FlickerMinHz = other.FlickerMinHz;
+            FlickerMaxHz = other.FlickerMaxHz;
+            FlickerWindowMs = other.FlickerWindowMs;
+            FlickerMinCrossings = other.FlickerMinCrossings;
+            FlickerEnterMs = other.FlickerEnterMs;
+            FlickerRecoverMs = other.FlickerRecoverMs;
+            FlickerMinLuma = other.FlickerMinLuma;
+            FlipMaxMatchRatio = other.FlipMaxMatchRatio;
+            FlipMinChange = other.FlipMinChange;
+            FlipMinAsymmetry = other.FlipMinAsymmetry;
+            FlipEnterMs = other.FlipEnterMs;
+            FlipRecoverMs = other.FlipRecoverMs;
+            FlipMinLuma = other.FlipMinLuma;
             // StoredEnabled is deliberately NOT copied. It is the old file's key, read once by
             // the migration; carrying it onto the live instance would put "Enabled" back into
             // every save, and the file would again hold four answers beside the one.
@@ -382,6 +532,68 @@ namespace MatroxFrameGrabber.Infrastructure
         }
 
         /// <summary>Thresholds for the freeze detector. Only Freeze has one.</summary>
+        /// <summary>Thresholds for the colour detector. Only ColorShift has one.</summary>
+        public ColorShiftThresholds ResolveColorShift(AnomalyKind kind)
+        {
+            KindSettings k = For(kind);
+            var t = new ColorShiftThresholds();
+            t.CopyFrom(new ColorShiftThresholds
+            {
+                BaselineR = k.ColorShiftBaselineR,
+                BaselineG = k.ColorShiftBaselineG,
+                BaselineB = k.ColorShiftBaselineB,
+                MaxDeviation = k.ColorShiftMaxDeviation,
+                ExitDeviation = k.ColorShiftExitDeviation,
+                MinLuma = k.ColorShiftMinLuma,
+                EnterMs = k.ColorShiftEnterMs,
+                RecoverMs = k.ColorShiftRecoverMs,
+            });
+            return t;
+        }
+
+        /// <summary>
+        /// Thresholds for the flicker detector. Only Flicker has one.
+        ///
+        /// The only Resolve that needs the rate, because the window is set in milliseconds and
+        /// counted in frames - and a window of the wrong length changes which frequencies exist
+        /// rather than only how sure the answer is.
+        /// </summary>
+        public FlickerThresholds ResolveFlicker(AnomalyKind kind, double fps)
+        {
+            KindSettings k = For(kind);
+            var t = new FlickerThresholds();
+            t.CopyFrom(new FlickerThresholds
+            {
+                EnterAmplitude = k.FlickerEnterAmplitude,
+                ExitAmplitude = k.FlickerExitAmplitude,
+                MinHz = k.FlickerMinHz,
+                MaxHz = k.FlickerMaxHz,
+                WindowFrames = Frames(k.FlickerWindowMs, fps > 0.0 ? fps : 120.0),
+                MinCrossings = k.FlickerMinCrossings,
+                EnterMs = k.FlickerEnterMs,
+                RecoverMs = k.FlickerRecoverMs,
+                MinLuma = k.FlickerMinLuma,
+            });
+            return t;
+        }
+
+        /// <summary>Thresholds for the flip detector. Only Flip has one.</summary>
+        public FlipThresholds ResolveFlip(AnomalyKind kind)
+        {
+            KindSettings k = For(kind);
+            var t = new FlipThresholds();
+            t.CopyFrom(new FlipThresholds
+            {
+                MaxMatchRatio = k.FlipMaxMatchRatio,
+                MinChange = k.FlipMinChange,
+                MinAsymmetry = k.FlipMinAsymmetry,
+                EnterMs = k.FlipEnterMs,
+                RecoverMs = k.FlipRecoverMs,
+                MinLuma = k.FlipMinLuma,
+            });
+            return t;
+        }
+
         public FreezeThresholds ResolveFreeze(AnomalyKind kind)
         {
             KindSettings k = For(kind);

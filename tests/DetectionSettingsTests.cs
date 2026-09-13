@@ -118,16 +118,25 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void A_kind_counts_as_running_only_when_it_has_a_detector()
         {
+            // Written as a property rather than against a named kind. It used to switch Flip on
+            // as the example of a kind with no detector - and then Flip got one, which is the day
+            // this test had least business failing. Every kind has a detector as of 2026-09-13,
+            // so the unimplemented branch cannot be exercised by naming one; the property holds
+            // either way and starts checking that branch again the moment a kind is added.
             var s = new DetectionSettings();
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+                s.For(k).Enabled = true;
 
-            // Washout has one now, so switching it on adds to the count.
-            s.For(AnomalyKind.Washout).Enabled = true;
-            Assert.Equal(2, s.EnabledCount);
+            int implemented = 0;
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+                if (AnomalyCatalog.Implemented(k)) implemented++;
 
-            // Flip does not, so switching it on does not - and the settings window greys it.
-            s.For(AnomalyKind.Flip).Enabled = true;
-            Assert.Equal(2, s.EnabledCount);
-            Assert.False(AnomalyCatalog.Implemented(AnomalyKind.Flip));
+            Assert.Equal(implemented, s.EnabledCount);
+
+            // And switching one off takes exactly one off the count, if it had a detector.
+            s.For(AnomalyKind.Washout).Enabled = false;
+            Assert.Equal(implemented - (AnomalyCatalog.Implemented(AnomalyKind.Washout) ? 1 : 0),
+                         s.EnabledCount);
         }
 
         // ----- migration -----

@@ -71,6 +71,10 @@ namespace MatroxFrameGrabber.Infrastructure
             Array.Copy(source._sum, _sum, TileCount);
             Array.Copy(source._sqSum, _sqSum, TileCount);
             Array.Copy(source._count, _count, TileCount);
+            _bandR = source._bandR;
+            _bandG = source._bandG;
+            _bandB = source._bandB;
+            _bandCount = source._bandCount;
             FrameNumber = source.FrameNumber;
         }
 
@@ -143,6 +147,57 @@ namespace MatroxFrameGrabber.Infrastructure
                  : (means[n / 2 - 1] + means[n / 2]) / 2.0;
         }
 
+        // ----- Per-band totals, for the one kind that cannot use luma -----
+        //
+        // Frame-level rather than per tile. A channel dropping out or a white balance collapsing
+        // is a whole-frame event, and 64 tiles x 3 bands would cost memory and cache for a
+        // resolution nothing yet asks for. Regional colour faults are not covered and that is
+        // written down rather than implied.
+
+        private long _bandR, _bandG, _bandB;
+        private long _bandCount;
+
+        /// <summary>Adds one row-block of per-band totals. Called beside the luma reduction.</summary>
+        public void AccumulateBands(long r, long g, long b, int count)
+        {
+            if (count <= 0) return;
+            _bandR += r;
+            _bandG += g;
+            _bandB += b;
+            _bandCount += count;
+        }
+
+        /// <summary>Whether per-band totals were gathered. False on a single-band (mono) ring.</summary>
+        public bool HasBands => _bandCount > 0;
+
+        /// <summary>Mean of band 0 (R), or 0.</summary>
+        public double BandMeanR => _bandCount > 0 ? (double)_bandR / _bandCount : 0.0;
+
+        /// <summary>Mean of band 1 (G), or 0.</summary>
+        public double BandMeanG => _bandCount > 0 ? (double)_bandG / _bandCount : 0.0;
+
+        /// <summary>Mean of band 2 (B), or 0.</summary>
+        public double BandMeanB => _bandCount > 0 ? (double)_bandB / _bandCount : 0.0;
+
+        /// <summary>
+        /// The weakest band over the strongest, 0 to 1.
+        ///
+        /// 1 is a neutral frame; a channel that has died drives it to 0. It is deliberately a
+        /// ratio and not a difference, so it does not move when the picture simply gets brighter
+        /// or darker - which is what separates this from every other kind here.
+        /// </summary>
+        public double BandBalance
+        {
+            get
+            {
+                if (_bandCount <= 0) return 1.0;
+                double r = BandMeanR, g = BandMeanG, b = BandMeanB;
+                double lo = Math.Min(r, Math.Min(g, b));
+                double hi = Math.Max(r, Math.Max(g, b));
+                return hi <= 0.0 ? 1.0 : lo / hi;
+            }
+        }
+
         /// <summary>
         /// Clears the accumulators so one grid can serve every frame of a channel. Allocating 64
         /// tiles per frame inside the acquisition hook is precisely the work that budget cannot
@@ -153,6 +208,8 @@ namespace MatroxFrameGrabber.Infrastructure
             Array.Clear(_sum, 0, TileCount);
             Array.Clear(_sqSum, 0, TileCount);
             Array.Clear(_count, 0, TileCount);
+            _bandR = _bandG = _bandB = 0L;
+            _bandCount = 0L;
             FrameNumber = 0;
         }
     }

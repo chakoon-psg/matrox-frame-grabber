@@ -80,6 +80,17 @@ namespace MatroxFrameGrabber.Mil
         /// <summary>Consecutive MIL failures. Non-zero means the detector is being fed nothing.</summary>
         public int ConsecutiveFailures { get; private set; }
 
+        /// <summary>
+        /// Whether to carry per-band totals alongside luma. Off unless a kind asks for it.
+        ///
+        /// The three bytes are already in registers - the luma line reads all of them - so the
+        /// cost is three adds per pixel and nothing else. It is still a flag rather than always-on
+        /// because this loop runs inside the acquisition budget, and the rule in this repo is that
+        /// a kind nobody enabled costs nothing (turning every kind off skips the reduction
+        /// entirely). Measure the reduce time rather than trusting the paragraph.
+        /// </summary>
+        public bool WantBands { get; set; }
+
         public void ResetCost()
         {
             LastReduceUs = 0;
@@ -241,16 +252,40 @@ namespace MatroxFrameGrabber.Mil
 
                 long sum = 0, sqSum = 0;
                 int count = 0;
-                for (int row = 0; row < rows; row++)
+                if (WantBands)
                 {
-                    int offset = row * rw;
-                    for (int x = x0; x < x1; x++)
+                    long bandR = 0, bandG = 0, bandB = 0;
+                    for (int row = 0; row < rows; row++)
                     {
-                        int i = offset + x;
-                        int luma = (LumaR * _r[i] + LumaG * _g[i] + LumaB * _b[i]) / LumaScale;
-                        sum += luma;
-                        sqSum += (long)luma * luma;
-                        count++;
+                        int offset = row * rw;
+                        for (int x = x0; x < x1; x++)
+                        {
+                            int i = offset + x;
+                            int r = _r[i], g = _g[i], b = _b[i];
+                            int luma = (LumaR * r + LumaG * g + LumaB * b) / LumaScale;
+                            sum += luma;
+                            sqSum += (long)luma * luma;
+                            bandR += r;
+                            bandG += g;
+                            bandB += b;
+                            count++;
+                        }
+                    }
+                    grid.AccumulateBands(bandR, bandG, bandB, count);
+                }
+                else
+                {
+                    for (int row = 0; row < rows; row++)
+                    {
+                        int offset = row * rw;
+                        for (int x = x0; x < x1; x++)
+                        {
+                            int i = offset + x;
+                            int luma = (LumaR * _r[i] + LumaG * _g[i] + LumaB * _b[i]) / LumaScale;
+                            sum += luma;
+                            sqSum += (long)luma * luma;
+                            count++;
+                        }
                     }
                 }
                 grid.Accumulate(tileBase + column, sum, sqSum, count);

@@ -52,6 +52,7 @@ namespace MatroxFrameGrabber.Views
                 case "roi":      ApplyRoi_Click(sender, e); break;
                 case "detect":   ApplyThresholds_Click(sender, e); break;
                 case "blackout": ApplyBlackout_Click(sender, e); break;
+                case "sustained": ApplySustained_Click(sender, e); break;
                 default: return;
             }
             e.Handled = true;
@@ -125,6 +126,36 @@ namespace MatroxFrameGrabber.Views
             if (channel == null) return;
             if (!channel.ApplyBlackoutThresholds())
                 MessageBox.Show("Blackout levels must all be numbers, in luma (0-255).",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        /// <summary>
+        /// Washout, Freeze and ColorShift share one Apply, because each is one number or a pair
+        /// and they fail together: a value that will not parse leaves all of them alone.
+        /// </summary>
+        private void ApplySustained_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplySustainedThresholds())
+                MessageBox.Show(
+                    "값을 적용하지 못했습니다. 다섯 칸이 모두 숫자여야 합니다.",
+                    channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        /// <summary>
+        /// Takes the colour the run measured as this camera's baseline.
+        ///
+        /// A person presses this, and that is the whole safeguard: no frame statistic separates a
+        /// panel whose colour is right from one that has been wrong all run and steady about it.
+        /// </summary>
+        private void ApplyColorBaseline_Click(object sender, RoutedEventArgs e)
+        {
+            var channel = Channel;
+            if (channel == null) return;
+            if (!channel.ApplyColorBaseline())
+                MessageBox.Show(
+                    "잴 것이 없습니다. ColorShift를 켠 채로 충분히 긴 실행을 한 번 마쳐야 합니다.",
                     channel.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 

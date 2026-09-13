@@ -110,6 +110,9 @@ namespace MatroxFrameGrabber.Mil
         private BlackoutDetector _blackout;
         private WashoutDetector _washout;
         private FreezeDetector _freeze;
+        private ColorShiftDetector _colorShift;
+        private FlickerDetector _flicker;
+        private FlipDetector _flip;
 
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
@@ -655,6 +658,281 @@ namespace MatroxFrameGrabber.Mil
             return true;
         }
 
+
+        // ----- Washout, Freeze and ColorShift -----
+        //
+        // Three kinds shipped with settings and no way to reach them, which is the same as
+        // shipping a number nobody can check. Each row is the kind's own units, and each hint
+        // carries what the panel actually reads - a threshold is not defensible on screen until
+        // the live figure is beside it.
+
+        /// <summary>Washout's entry level, in luma. Bright, not a fraction.</summary>
+        public string WashoutEnterInput
+        {
+            get => _washoutEnterInput ??= Detection.For(AnomalyKind.Washout)
+                        .WashoutEnterLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _washoutEnterInput = value; RaisePropertyChanged(nameof(WashoutEnterInput)); }
+        }
+
+        /// <summary>How much detail may remain inside a tile. This is the test that decides.</summary>
+        public string WashoutDetailInput
+        {
+            get => _washoutDetailInput ??= Detection.For(AnomalyKind.Washout)
+                        .WashoutMaxDetail.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _washoutDetailInput = value; RaisePropertyChanged(nameof(WashoutDetailInput)); }
+        }
+
+        private string _washoutEnterInput;
+        private string _washoutDetailInput;
+
+        public string WashoutHint
+        {
+            get
+            {
+                WashoutThresholds t = Detection.ResolveWashout(AnomalyKind.Washout);
+                string dwell = $"back≤{t.ExitLuma:0.#}, flat≤{t.MaxSpread:0.#}, "
+                             + $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                return _washout != null
+                    ? $"{dwell} · now {_washout.LastLuma:0.#} luma, detail {_washout.LastDetail:0.#}"
+                      + (InWashout ? $" · WHITE for {_washout.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Washout on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Freeze's entry, in luma of change per frame. **A floor, not a ceiling** - it has to sit
+        /// *under* the sensor noise, so a number that looks safely small here is the one that
+        /// makes the detector fire on a live picture.
+        /// </summary>
+        public string FreezeEnterInput
+        {
+            get => _freezeEnterInput ??= Detection.For(AnomalyKind.Freeze)
+                        .FreezeEnterDelta.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _freezeEnterInput = value; RaisePropertyChanged(nameof(FreezeEnterInput)); }
+        }
+
+        public string FreezeExitInput
+        {
+            get => _freezeExitInput ??= Detection.For(AnomalyKind.Freeze)
+                        .FreezeExitDelta.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _freezeExitInput = value; RaisePropertyChanged(nameof(FreezeExitInput)); }
+        }
+
+        private string _freezeEnterInput;
+        private string _freezeExitInput;
+
+        public string FreezeHint
+        {
+            get
+            {
+                FreezeThresholds t = Detection.ResolveFreeze(AnomalyKind.Freeze);
+                string dwell = $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                return _freeze != null
+                    ? $"{dwell} · now {_freeze.LastChange:0.####} luma/frame"
+                      + (InFreeze ? $" · FROZEN for {_freeze.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Freeze on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Flip's ratio: how much better a mirror has to fit than the unturned frame.
+        ///
+        /// The two gates beside it - how much the pair changed, how asymmetric the picture is -
+        /// are in the hint and not editable. They are the conditions under which the question can
+        /// be asked at all, not a sensitivity anybody should be tuning by feel.
+        /// </summary>
+        public string FlipRatioInput
+        {
+            get => _flipRatioInput ??= Detection.For(AnomalyKind.Flip)
+                        .FlipMaxMatchRatio.ToString("0.###", CultureInfo.InvariantCulture);
+            set { _flipRatioInput = value; RaisePropertyChanged(nameof(FlipRatioInput)); }
+        }
+
+        private string _flipRatioInput;
+
+        public string FlipHint
+        {
+            get
+            {
+                FlipThresholds t = Detection.ResolveFlip(AnomalyKind.Flip);
+                string gates = $"pair ≥{t.MinChange:0.#}, asym ≥{t.MinAsymmetry:0.#} luma";
+                if (_flip == null)
+                    return $"{gates} · not watching (switch Flip on in app Settings)";
+                return $"{gates} · now {_flip.LastRatio:0.###} ({_flip.LastAxis}), asym "
+                     + $"{_flip.LastAsymmetry:0.#}, {_flip.Judged} judged / "
+                     + $"{_flip.TooSymmetric} too symmetric"
+                     + (InFlip ? $" · TURNED OVER for {_flip.RunningMs / 1000.0:0.0} s" : string.Empty);
+            }
+        }
+
+        /// <summary>Flicker's entry swing, as a fraction of the window mean.</summary>
+        public string FlickerAmplitudeInput
+        {
+            get => _flickerAmpInput ??= Detection.For(AnomalyKind.Flicker)
+                        .FlickerEnterAmplitude.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _flickerAmpInput = value; RaisePropertyChanged(nameof(FlickerAmplitudeInput)); }
+        }
+
+        private string _flickerAmpInput;
+
+        public string FlickerHint
+        {
+            get
+            {
+                double rate = _frameRate > 0.0 ? _frameRate : 120.0;
+                FlickerThresholds t = Detection.ResolveFlicker(AnomalyKind.Flicker, rate);
+                string band = $"{t.MinHz:0.#}-{t.MaxHz:0.#} Hz, ≥{t.MinCrossings} crossings in "
+                            + $"{t.WindowFrames}f";
+                return _flicker != null
+                    ? $"{band} · now {_flicker.LastAmplitude:0.####} at {_flicker.LastHz:0.#} Hz"
+                      + (InFlicker ? $" · FLICKERING for {_flicker.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{band} · not watching (switch Flicker on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// ColorShift's tolerance, in share of the frame's colour. The baseline beside it is
+        /// measured rather than typed, which is why only this one number is editable here.
+        /// </summary>
+        public string ColorShiftDeviationInput
+        {
+            get => _colorShiftDevInput ??= Detection.For(AnomalyKind.ColorShift)
+                        .ColorShiftMaxDeviation.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _colorShiftDevInput = value; RaisePropertyChanged(nameof(ColorShiftDeviationInput)); }
+        }
+
+        private string _colorShiftDevInput;
+
+        public string ColorShiftHint
+        {
+            get
+            {
+                ColorShiftThresholds t = Detection.ResolveColorShift(AnomalyKind.ColorShift);
+                if (!t.Calibrated)
+                    return "no baseline yet - run once and press Use measured. "
+                         + "Until then this kind reports nothing";
+
+                string basis = $"base R {t.BaselineR:0.###} G {t.BaselineG:0.###} B {t.BaselineB:0.###}";
+                return _colorShift != null
+                    ? $"{basis} · now R {_colorShift.LastShareR:0.###} G {_colorShift.LastShareG:0.###} "
+                      + $"B {_colorShift.LastShareB:0.###}, off by {_colorShift.LastDeviation:0.####}"
+                      + (InColorShift ? $" · SHIFTED for {_colorShift.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{basis} · not watching (switch ColorShift on in app Settings)";
+            }
+        }
+
+        /// <summary>Whether a run has measured a colour baseline that could be adopted.</summary>
+        public bool CanAdoptColorBaseline =>
+            _colourProposal.HasValue && _colourProposal.Value.IsUsable;
+
+        private ColorShiftProposal? _colourProposal;
+
+        /// <summary>
+        /// Takes the measured shares as this camera's baseline.
+        ///
+        /// A separate act from watching, and it has to be: nothing in a frame statistic can tell a
+        /// panel whose colour is correct from one whose colour has been wrong all run and steady
+        /// about it. Only a person knows the run was on a healthy panel - the same reason
+        /// Dropout's histogram proposal is not applied on its own.
+        /// </summary>
+        public bool ApplyColorBaseline()
+        {
+            if (!CanAdoptColorBaseline)
+                return false;
+
+            ColorShiftProposal p = _colourProposal.Value;
+            KindSettings k = Detection.For(AnomalyKind.ColorShift);
+            k.ColorShiftBaselineR = p.BaselineR;
+            k.ColorShiftBaselineG = p.BaselineG;
+            k.ColorShiftBaselineB = p.BaselineB;
+            k.Clamp();
+            Output?.SaveThresholds();
+
+            RaisePropertyChanged(nameof(ColorShiftHint));
+            MilErrorLog.Note($"{Name}: {AnomalyKind.ColorShift} baseline now R {k.ColorShiftBaselineR:F4} "
+                           + $"G {k.ColorShiftBaselineG:F4} B {k.ColorShiftBaselineB:F4} from "
+                           + $"{p.FramesJudged} frames - takes effect on the next Start");
+            return true;
+        }
+
+        /// <summary>
+        /// Applies the typed levels for the three kinds that share this method.
+        ///
+        /// One method rather than three, because each of them is a single number or a pair and
+        /// the failure mode is the same: a value that will not parse leaves every setting alone.
+        /// </summary>
+        public bool ApplySustainedThresholds()
+        {
+            if (!double.TryParse(_washoutEnterInput ?? WashoutEnterInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double wEnter) ||
+                !double.TryParse(_washoutDetailInput ?? WashoutDetailInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double wDetail) ||
+                !double.TryParse(_freezeEnterInput ?? FreezeEnterInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double fEnter) ||
+                !double.TryParse(_freezeExitInput ?? FreezeExitInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double fExit) ||
+                !double.TryParse(_colorShiftDevInput ?? ColorShiftDeviationInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double cDev) ||
+                !double.TryParse(_flickerAmpInput ?? FlickerAmplitudeInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double lAmp) ||
+                !double.TryParse(_flipRatioInput ?? FlipRatioInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double pRatio))
+                return false;
+
+            KindSettings w = Detection.For(AnomalyKind.Washout);
+            w.WashoutEnterLuma = wEnter;
+            w.WashoutMaxDetail = wDetail;
+            w.Clamp();
+
+            KindSettings f = Detection.For(AnomalyKind.Freeze);
+            f.FreezeEnterDelta = fEnter;
+            f.FreezeExitDelta = fExit;
+            f.Clamp();
+
+            KindSettings c = Detection.For(AnomalyKind.ColorShift);
+            c.ColorShiftMaxDeviation = cDev;
+            c.Clamp();
+
+            KindSettings l = Detection.For(AnomalyKind.Flicker);
+            l.FlickerEnterAmplitude = lAmp;
+            l.Clamp();
+
+            KindSettings p = Detection.For(AnomalyKind.Flip);
+            p.FlipMaxMatchRatio = pRatio;
+            p.Clamp();
+
+            Output?.SaveThresholds();
+
+            // Show what was kept, not what was typed.
+            _washoutEnterInput = null;
+            _washoutDetailInput = null;
+            _freezeEnterInput = null;
+            _freezeExitInput = null;
+            _colorShiftDevInput = null;
+            _flickerAmpInput = null;
+            _flipRatioInput = null;
+            RaisePropertyChanged(nameof(FlipRatioInput));
+            RaisePropertyChanged(nameof(FlipHint));
+            RaisePropertyChanged(nameof(FlickerAmplitudeInput));
+            RaisePropertyChanged(nameof(FlickerHint));
+            RaisePropertyChanged(nameof(WashoutEnterInput));
+            RaisePropertyChanged(nameof(WashoutDetailInput));
+            RaisePropertyChanged(nameof(FreezeEnterInput));
+            RaisePropertyChanged(nameof(FreezeExitInput));
+            RaisePropertyChanged(nameof(ColorShiftDeviationInput));
+            RaisePropertyChanged(nameof(WashoutHint));
+            RaisePropertyChanged(nameof(FreezeHint));
+            RaisePropertyChanged(nameof(ColorShiftHint));
+
+            MilErrorLog.Note($"{Name}: washout enter {w.WashoutEnterLuma:0.#} luma detail "
+                           + $"{w.WashoutMaxDetail:0.#}; freeze {f.FreezeEnterDelta:0.####} in / "
+                           + $"{f.FreezeExitDelta:0.####} out; colorshift {c.ColorShiftMaxDeviation:0.####} "
+                           + $"share; flicker {l.FlickerEnterAmplitude:0.####} relative; "
+                           + $"flip ratio {p.FlipMaxMatchRatio:0.###} "
+                           + "- all take effect on the next Start");
+            return true;
+        }
+
         /// <summary>
         /// The thresholds that are not on the pane, in the units they actually act in. Frames are
         /// what the detector counts, but nobody reasons in frames at 124 fps -- and the same frame
@@ -814,6 +1092,24 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Whether the picture has stopped being updated.</summary>
         public bool InFreeze => _freeze?.InFreeze ?? false;
+
+        /// <summary>Furthest any band sat from its measured baseline, in share. 0 if uncalibrated.</summary>
+        public double ColorDeviation => _colorShift?.LastDeviation ?? 0.0;
+
+        /// <summary>Whether the colour has come away from what this camera measured as its own.</summary>
+        public bool InColorShift => _colorShift?.InColorShift ?? false;
+
+        /// <summary>How far brightness swung across the last window, as a fraction of its mean.</summary>
+        public double FlickerAmplitude => _flicker?.LastAmplitude ?? 0.0;
+
+        /// <summary>Whether the picture is oscillating rather than stepping.</summary>
+        public bool InFlicker => _flicker?.InFlicker ?? false;
+
+        /// <summary>Which way the picture is turned over, if it is.</summary>
+        public FlipAxis FlipAxis => _flip?.Axis ?? Infrastructure.FlipAxis.None;
+
+        /// <summary>Whether the picture has been turned over during this run.</summary>
+        public bool InFlip => _flip?.InFlip ?? false;
         public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
         public double DetectionBaseline => _detector?.Baseline ?? 0.0;
 
@@ -1579,8 +1875,71 @@ namespace MatroxFrameGrabber.Mil
                 ? new FreezeDetector(Detection.ResolveFreeze(AnomalyKind.Freeze))
                 : null;
 
-            bool watching = _detector != null || _blackout != null
-                         || _washout != null || _freeze != null;
+            bool wantColour = DetectionEnabled && Detection.For(AnomalyKind.ColorShift).Enabled
+                           && AnomalyCatalog.Implemented(AnomalyKind.ColorShift);
+            _colorShift = wantColour
+                ? new ColorShiftDetector(Detection.ResolveColorShift(AnomalyKind.ColorShift))
+                : null;
+
+            // The only kind that changes what the reduction gathers. Three more adds per pixel,
+            // inside the acquisition budget - so it is asked for rather than always paid.
+            _reducer.WantBands = _colorShift != null;
+
+            // The one detector whose settings need the rate before the first frame: its window
+            // is set in milliseconds and counted in frames, and a window of the wrong length
+            // changes which frequencies exist rather than only how sure the answer is. The rate
+            // from the previous run is the best estimate available here, and the resolved window
+            // is logged in both units so a wrong one is visible rather than inferred.
+            double rateForWindow = _frameRate > 0.0 ? _frameRate : 120.0;
+            bool wantFlicker = DetectionEnabled && Detection.For(AnomalyKind.Flicker).Enabled
+                            && AnomalyCatalog.Implemented(AnomalyKind.Flicker);
+            _flicker = wantFlicker
+                ? new FlickerDetector(Detection.ResolveFlicker(AnomalyKind.Flicker, rateForWindow))
+                : null;
+
+            bool wantFlip = DetectionEnabled && Detection.For(AnomalyKind.Flip).Enabled
+                         && AnomalyCatalog.Implemented(AnomalyKind.Flip);
+            _flip = wantFlip
+                ? new FlipDetector(Detection.ResolveFlip(AnomalyKind.Flip))
+                : null;
+
+            bool watching = _detector != null || _blackout != null || _washout != null
+                         || _freeze != null || _colorShift != null || _flicker != null
+                         || _flip != null;
+            if (_flip != null)
+            {
+                FlipThresholds pt = Detection.ResolveFlip(AnomalyKind.Flip);
+                MilErrorLog.Note($"{Name}: flip watch on - a mirror has to fit "
+                               + $"{pt.MaxMatchRatio:0.###} as well as the unturned frame, on a "
+                               + $"pair that changed at least {pt.MinChange:0.#} luma and a "
+                               + $"picture at least {pt.MinAsymmetry:0.#} luma asymmetric, dwell "
+                               + $"{pt.EnterMs:0} ms in / {pt.RecoverMs:0} ms out. **It watches "
+                               + "for the moment of the turn, so a rig that was already flipped "
+                               + "when this run started reads as normal.**");
+            }
+            if (_flicker != null)
+            {
+                FlickerThresholds lt = Detection.ResolveFlicker(AnomalyKind.Flicker, rateForWindow);
+                MilErrorLog.Note($"{Name}: flicker watch on - swing at or above "
+                               + $"{lt.EnterAmplitude:0.####} of the mean, steady under "
+                               + $"{lt.ExitAmplitude:0.####}, only between {lt.MinHz:0.#} and "
+                               + $"{lt.MaxHz:0.#} Hz with at least {lt.MinCrossings} crossings, "
+                               + $"window {lt.WindowFrames}f ({lt.WindowFrames / rateForWindow * 1000.0:0} ms "
+                               + $"at {rateForWindow:0.###} fps), dwell {lt.EnterMs:0} ms in / "
+                               + $"{lt.RecoverMs:0} ms out");
+            }
+            if (_colorShift != null)
+            {
+                ColorShiftThresholds ct = Detection.ResolveColorShift(AnomalyKind.ColorShift);
+                MilErrorLog.Note(ct.Calibrated
+                    ? $"{Name}: colorshift watch on - baseline R {ct.BaselineR:F4} "
+                    + $"G {ct.BaselineG:F4} B {ct.BaselineB:F4}, fault past {ct.MaxDeviation:F4} "
+                    + $"share, back at {ct.ExitDeviation:F4}, dwell {ct.EnterMs:0} ms in / "
+                    + $"{ct.RecoverMs:0} ms out, ignored below {ct.MinLuma:0.#} luma"
+                    : $"{Name}: colorshift MEASURING ONLY - no baseline has been calibrated for "
+                    + "this camera, so nothing will be reported this run. Read the proposal at "
+                    + "stop and put it in the camera settings.");
+            }
             if (_freeze != null)
             {
                 FreezeThresholds ft = Detection.ResolveFreeze(AnomalyKind.Freeze);
@@ -1734,6 +2093,56 @@ namespace MatroxFrameGrabber.Mil
             if (stillStuck.HasValue)
                 RecordAnomaly(stillStuck.Value);
 
+            if (DetectionEnabled && _colorShift != null)
+            {
+                // Held past the detector's own lifetime: the operator presses Use measured after
+                // the run has stopped, which is exactly when _colorShift becomes null.
+                _colourProposal = _colorShift.Propose();
+                RaisePropertyChanged(nameof(CanAdoptColorBaseline));
+                MilErrorLog.Note($"{Name}: {_colorShift.Propose()}");
+                MilErrorLog.Note($"{Name}: colorshift - last shares R {_colorShift.LastShareR:F4} "
+                               + $"G {_colorShift.LastShareG:F4} B {_colorShift.LastShareB:F4}; "
+                               + (_colorShift.Calibrated
+                                    ? $"deviation {_colorShift.LastDeviation:F4} at stop"
+                                    : "no baseline, so nothing was judged")
+                               + $"; {_colorShift.Judged} frames bright enough to judge");
+            }
+
+            AnomalyEvent? stillShifted = _colorShift?.Flush();
+            if (stillShifted.HasValue)
+                RecordAnomaly(stillShifted.Value);
+
+            if (DetectionEnabled && _flicker != null)
+            {
+                MilErrorLog.Note($"{Name}: {_flicker.Propose()}");
+                MilErrorLog.Note($"{Name}: flicker - last window swung {_flicker.LastAmplitude:F4} "
+                               + $"of its mean, {_flicker.LastCrossings} crossings "
+                               + $"({_flicker.LastHz:F1} Hz); "
+                               + $"{(_flicker.InFlicker ? "STILL FLICKERING" : "steady")} at stop; "
+                               + $"{_flicker.Judged} windows judged");
+            }
+
+            AnomalyEvent? stillSwinging = _flicker?.Flush();
+            if (stillSwinging.HasValue)
+                RecordAnomaly(stillSwinging.Value);
+
+            if (DetectionEnabled && _flip != null)
+            {
+                MilErrorLog.Note($"{Name}: {_flip.Propose()}");
+                MilErrorLog.Note($"{Name}: flip - {_flip.Judged} pairs judged, "
+                               + $"{_flip.TooSymmetric} too symmetric to judge; "
+                               + $"{(_flip.InFlip ? $"TURNED OVER ({_flip.Axis})" : "upright")} at stop"
+                               + (_flip.Judged < 1
+                                    ? ". No pair changed enough to compare - these panels move "
+                                    + "about 0.06 luma a frame, so a still rig gives this kind "
+                                    + "almost nothing to work with until something moves"
+                                    : string.Empty));
+            }
+
+            AnomalyEvent? stillTurned = _flip?.Flush();
+            if (stillTurned.HasValue)
+                RecordAnomaly(stillTurned.Value);
+
             if (_stills != null && _stills.IsAllocated)
             {
                 MilErrorLog.Note($"{Name}: stills - {_stills.Copies} kept, "
@@ -1760,6 +2169,10 @@ namespace MatroxFrameGrabber.Mil
             _blackout = null;
             _washout = null;
             _freeze = null;
+            _colorShift = null;
+            _flicker = null;
+            _flip = null;
+            _reducer.WantBands = false;
             RaisePropertyChanged(nameof(CalibrationText));
             RaiseCommandStates();
 
@@ -1900,8 +2313,17 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(FramesMissed));
             // The watched kinds live in the app settings, which is a second window that can be open
             // at the same time as this camera's. Nothing here hears that change, so it is re-read
-            // on the tick - the convention for every other live value.
+            // on the tick - the convention for every other live value. The same goes for the
+            // hints: each carries a live reading, and BlackoutHint was raised only when someone
+            // applied a threshold - so the one line that exists to say what the panel is doing
+            // right now sat stale.
             RaisePropertyChanged(nameof(DetectionKindsText));
+            RaisePropertyChanged(nameof(BlackoutHint));
+            RaisePropertyChanged(nameof(WashoutHint));
+            RaisePropertyChanged(nameof(FreezeHint));
+            RaisePropertyChanged(nameof(ColorShiftHint));
+            RaisePropertyChanged(nameof(FlickerHint));
+            RaisePropertyChanged(nameof(FlipHint));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));
@@ -2033,7 +2455,11 @@ namespace MatroxFrameGrabber.Mil
             BlackoutDetector blackout = _blackout;
             WashoutDetector washout = _washout;
             FreezeDetector freeze = _freeze;
-            if (detector == null && blackout == null && washout == null && freeze == null)
+            ColorShiftDetector colour = _colorShift;
+            FlickerDetector flicker = _flicker;
+            FlipDetector flip = _flip;
+            if (detector == null && blackout == null && washout == null && freeze == null
+             && colour == null && flicker == null && flip == null)
                 return;
 
             // A failed reduction leaves the grid empty, and an empty grid is not a dark one -
@@ -2089,6 +2515,34 @@ namespace MatroxFrameGrabber.Mil
                     RecordAnomaly(stuck.Value);
             }
 
+            // Fifth judge, and the only one that does not read the tile means at all - it reads
+            // the per-band totals the same pass gathered. Luma cannot see what it is looking for.
+            if (colour != null)
+            {
+                AnomalyEvent? shifted = colour.Observe(_grid, timeStampSec);
+                if (shifted.HasValue)
+                    RecordAnomaly(shifted.Value);
+            }
+
+            // Sixth judge, and the only one that answers about a stretch of time rather than a
+            // frame - it reports nothing until its window has filled, which is correct rather
+            // than a limitation: an oscillation is not a property of one frame.
+            if (flicker != null)
+            {
+                AnomalyEvent? swinging = flicker.Observe(_grid, timeStampSec);
+                if (swinging.HasValue)
+                    RecordAnomaly(swinging.Value);
+            }
+
+            // Seventh judge, and the only one that asks about the tile *arrangement* rather than
+            // the numbers in it. Every figure the other six read is invariant under a mirror.
+            if (flip != null)
+            {
+                AnomalyEvent? turned = flip.Observe(_grid, timeStampSec);
+                if (turned.HasValue)
+                    RecordAnomaly(turned.Value);
+            }
+
             // ---- Lossless stills: the detector says which frame each slot wants ----
             //
             // Kept here rather than when the event is reported, because by then the picture has
@@ -2142,6 +2596,9 @@ namespace MatroxFrameGrabber.Mil
                     && !(blackout?.InBlackout ?? false)
                     && !(washout?.InWashout ?? false)
                     && !(freeze?.InFreeze ?? false)
+                    && !(colour?.InColorShift ?? false)
+                    && !(flicker?.InFlicker ?? false)
+                    && !(flip?.InFlip ?? false)
                     && !stills.Has(StillRing.Slot.Onset)
                     && frameNumber % StillRing.ReferenceEveryFrames == 0)
                     stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);
