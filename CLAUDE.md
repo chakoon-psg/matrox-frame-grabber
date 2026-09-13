@@ -110,7 +110,7 @@ src/
                                  VideoSinkPolicy, RecordingRecord, SharedFramePool,
                                  StoragePolicy(+StorageWarden), EvidenceRing, EvidenceGate,
                                  SegmentRing, ClipExtractor
-tests/                         MatroxFrameGrabber.Tests (570개). csproj가 `Infrastructure/**`를
+tests/                         MatroxFrameGrabber.Tests (618개). csproj가 `Infrastructure/**`를
                                ProjectReference가 아니라 **소스로 포함**한다 — 앱을 참조하면
                                MIL NuGet(x64 전용)을 끌어와 MIL 없는 머신에서 못 돈다. 목록이
                                아니라 패턴이라, 그 폴더에 MIL을 넣으면 테스트 빌드가 깨진다.
@@ -128,9 +128,10 @@ research.md                    src/ 심층 분석
 핵심은 `CameraChannel`이다. 채널마다 `MdigAlloc(M_DEV0+i)` + `MdispAlloc(M_WPF)` +
 디스플레이 버퍼 + grab 링 버퍼 + `MdigProcess` 훅을 잡고, GenICam 피처 제어까지 한다.
 이 클래스는 **모델이자 뷰모델**이다(`INotifyPropertyChanged`를 구현하고 `RelayCommand`를
-노출하며 pane의 `DataContext`로 직접 바인딩된다) — 그래서 약 2400줄이다. 검출을 붙이면서
-1400줄에서 늘었고, **MIL과 검출·녹화를 잇는 코드를 `Infrastructure`로 내리는 것**이 다음 정리
-대상이다.
+노출하며 pane의 `DataContext`로 직접 바인딩된다) — 그래서 **약 4400줄**이다. 1400줄에서
+검출기 하나를 붙이며 2400줄이 됐고, 일곱 종류와 그 노브를 붙이며 다시 두 배가 됐다.
+**MIL과 검출·녹화를 잇는 코드를 `Infrastructure`로 내리는 것**이 다음 정리 대상이고, 그 줄 수가
+곧 미루는 비용이다 — 검출기를 하나 더 붙일 때마다 이 파일이 늘어난다.
 `MilApplicationManager`는 공유 앱·시스템을 소유하고 채널마다 `CameraChannel`을 하나씩 만든다.
 
 ## 녹화
