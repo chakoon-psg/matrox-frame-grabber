@@ -549,7 +549,26 @@ namespace MatroxFrameGrabber.Views
             if (_viewModel == null)
                 return;
 
-            MilErrorLog.Note($"autostart: grabbing for {seconds}s"
+            // Refuse rather than pretend. An unattended run that grabs nothing looks exactly
+            // like one that grabbed perfectly - it exits zero after the full duration and writes
+            // no summary, because there was no grab to summarise. Sixteen hours went that way
+            // once. A script that checks the exit code now finds out in seconds instead.
+            int present = 0;
+            foreach (CameraChannel c in _viewModel.Channels)
+                if (c.CameraPresent) present++;
+
+            if (present == 0)
+            {
+                MilErrorLog.Note("autostart: REFUSING - no camera is present, so there is nothing "
+                               + "to grab. Either none is connected or another process holds the "
+                               + "board. Exiting with code 2 rather than sleeping "
+                               + $"{seconds}s and reporting success");
+                Environment.ExitCode = 2;
+                Close();
+                return;
+            }
+
+            MilErrorLog.Note($"autostart: grabbing for {seconds}s on {present} camera(s)"
                            + (App.RecordDuringAutoRun ? ", recording" : "") + ", then closing");
             _viewModel.StartAllCommand.Execute(null);
 
