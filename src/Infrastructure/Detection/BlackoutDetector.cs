@@ -20,9 +20,24 @@ namespace MatroxFrameGrabber.Infrastructure
         /// at **121.6 / 90.4 / 36.9** luma, so 6 clears the darkest of them by a factor of six.
         /// That is far more headroom than the earlier reading suggested - 17.2 / 13.6 / 7.8 on the
         /// unlit bench on 2026-09-10, which would have left under two luma - and the difference
-        /// is the exposure and what the panels were showing. **A level this far below the floor is
-        /// safe against false positives and says nothing about whether it catches a real fault**;
-        /// a panel that dies reads near zero, so the question is only whether anything else does.
+        /// is the exposure and what the panels were showing.
+        ///
+        /// **Both sides are now measured, and the margin on the catch side is thin.** An exposure
+        /// sweep on 2026-09-12 (8289 / 2000 / 500 / 150 us) showed the curve is not proportional -
+        /// it has a pedestal. Extrapolated to zero light the three channels read **4.94 / 5.36 /
+        /// 5.07** luma, which is what a covered lens would give. So 6.0 is on the right side of a
+        /// real blackout, but by **0.64 luma on the worst channel**, against a measurement spread
+        /// of 0.75 at the lowest exposure. Sensor noise is the same size as the margin.
+        ///
+        /// That sweep also produced the **first unforced detection on hardware**: at 150 us
+        /// Camera 2 read 5.1 luma with a spread of 0.3, and the detector confirmed and held -
+        /// no thresholds moved to make it happen. The other two read 7.3 and 6.6, flat enough but
+        /// not dark enough, and correctly did not fire.
+        ///
+        /// **Open decision.** The proposal suggests 10, which would sit 4.6 luma above the
+        /// pedestal - six times the noise - and still 28% of the darkest working panel. Left at 6
+        /// until somebody covers a lens and measures it directly, since an extrapolation is not a
+        /// covered camera.
         /// </summary>
         public double EnterLuma { get; set; } = 6.0;
 
