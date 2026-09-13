@@ -1673,6 +1673,12 @@ namespace MatroxFrameGrabber.Mil
                                + $"max {_stills.MaxExportMs:F1} ms, total {_stills.ExportMsSum:F1} ms");
             }
 
+            // Auto-calibration, before the detector is released - it is the source of every
+            // number the decision rests on. After the floor and proposal lines above, so the log
+            // reads in the order a person would reason: here is the floor, here is what it
+            // proposes, here is what was done about it.
+            RunAutoCalibration();
+
             // Before releasing it: LogGrabSummary reads these, and a detector that is gone reports
             // nothing rather than what it found.
             _rejectedAtStop = _detector?.EventsRejectedForSpread ?? 0;
@@ -2511,6 +2517,55 @@ namespace MatroxFrameGrabber.Mil
 
             _evidence = null;
             _evidenceClips = null;
+        }
+
+        /// <summary>
+        /// Lets the finished run move its own threshold, if the option is on and the run earned it.
+        ///
+        /// Every outcome is logged, including every refusal. This feature spends most of its life
+        /// declining, and a feature that silently does nothing cannot be told from a broken one.
+        /// </summary>
+        private void RunAutoCalibration()
+        {
+            OutputSettings o = Output;
+            AnomalyDetector d = _detector;
+            if (o == null || d == null || !DetectionEnabled) return;
+
+            AutoCalibrationPolicy policy = o.CalibrationPolicy;
+            if (!policy.Enabled) return;      // silent only in the one case a person chose
+
+            DepthProposal p = d.Propose(DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
+            KindSettings k = Detection.For(AnomalyKind.Dropout);
+
+            AutoCalibrationDecision decision = policy.Decide(
+                currentThreshold: k.Deviation,
+                floor: d.MaxCoherentNormalDepth,
+                framesJudged: d.Observed,
+                fps: _frameRate,
+                anomalies: Interlocked.CompareExchange(ref _anomalyCount, 0, 0),
+                rejectedForSpread: d.EventsRejectedForSpread,
+                framesMissed: _framesMissed,
+                proposalUsable: p.IsUsable);
+
+            if (!decision.Adopted)
+            {
+                MilErrorLog.Note($"{Name}: {decision}");
+                return;
+            }
+
+            Detection.ApplyAutoCalibration(
+                AnomalyKind.Dropout, decision.To,
+                DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
+                decision.Frames, decision.Floor);
+            o.SaveThresholds();
+
+            _depthInput = null;
+            RaisePropertyChanged(nameof(DepthInput));
+            RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(CalibrationText));
+
+            MilErrorLog.Note($"{Name}: {decision} - was {decision.From:0.####}, "
+                           + $"kept as PreviousDeviation so it can be put back");
         }
 
         /// <summary>

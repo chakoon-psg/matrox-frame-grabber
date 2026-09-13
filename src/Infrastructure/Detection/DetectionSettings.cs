@@ -118,6 +118,20 @@ namespace MatroxFrameGrabber.Infrastructure
         public int MinOnsetTiles { get; set; } = 8;
 
         /// <summary>When the threshold above was last measured, ISO date. Empty means never.</summary>
+        /// <summary>
+        /// What this threshold was before auto-calibration last moved it, and when.
+        ///
+        /// Kept so the move is reversible without a backup file. A person coming back to a rig
+        /// that ran unattended for two days needs to see both numbers to judge whether to keep
+        /// the new one - the log has it too, but the log rotates and this does not.
+        ///
+        /// 0 means automation has never moved this threshold.
+        /// </summary>
+        public double PreviousDeviation { get; set; }
+
+        /// <summary>When automation last moved it. Empty when it never has.</summary>
+        public string AutoCalibratedAt { get; set; } = string.Empty;
+
         public string CalibratedAt { get; set; } = string.Empty;
 
         /// <summary>Frames the calibration was taken over.</summary>
@@ -178,6 +192,8 @@ namespace MatroxFrameGrabber.Infrastructure
             BlackoutMaxSpread = other.BlackoutMaxSpread;
             BlackoutEnterMs = other.BlackoutEnterMs;
             BlackoutRecoverMs = other.BlackoutRecoverMs;
+            PreviousDeviation = other.PreviousDeviation;
+            AutoCalibratedAt = other.AutoCalibratedAt ?? string.Empty;
             // StoredEnabled is deliberately NOT copied. It is the old file's key, read once by
             // the migration; carrying it onto the live instance would put "Enabled" back into
             // every save, and the file would again hold four answers beside the one.
@@ -368,6 +384,22 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>
         /// Writes a measured threshold back into one kind, with where it came from.
         /// </summary>
+        /// <summary>
+        /// Moves a threshold the way automation does, keeping what it replaced.
+        ///
+        /// Separate from <see cref="ApplyCalibration"/> because the two are different acts. A
+        /// person pressing Use proposal has looked at the run; this has only checked conditions,
+        /// and the difference has to be visible afterwards.
+        /// </summary>
+        public void ApplyAutoCalibration(AnomalyKind kind, double deviation, string atIso,
+                                         long frames, double floor)
+        {
+            KindSettings k = For(kind);
+            k.PreviousDeviation = k.Deviation;
+            k.AutoCalibratedAt = atIso ?? string.Empty;
+            ApplyCalibration(kind, deviation, atIso, frames, floor);
+        }
+
         public void ApplyCalibration(AnomalyKind kind, double deviation, string atIso,
                                      long frames, double floor)
         {

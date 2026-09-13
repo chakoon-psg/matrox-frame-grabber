@@ -35,6 +35,9 @@ namespace MatroxFrameGrabber.Infrastructure
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
         private double _evidenceSeconds = DefaultEvidenceSeconds;
+        private bool _autoCalibrate;
+        private double _autoCalibrateMinMinutes = 30.0;
+        private double _autoCalibrateMaxChange = 2.0;
         private bool[] _enabledKinds = AnomalyKindSet.Default();
 
         private string _outputFolder = DefaultFolder;
@@ -215,6 +218,69 @@ namespace MatroxFrameGrabber.Infrastructure
         /// here is RAM and not time: measured 2026-09-11 on three channels over 120 s, +-3 s lost
         /// 8/7/8 frames of 15100 while writing 13 GB of evidence, and +-2 s lost 5/1/1.
         /// </summary>
+        /// <summary>
+        /// Lets a finished run move its own thresholds, when nobody can be at the bench to say
+        /// the run was on a healthy panel.
+        ///
+        /// **Off by default and meant to stay off on a rig somebody can reach.** The manual
+        /// path - Use proposal, in a camera's own settings - exists because only a person can
+        /// confirm that a quiet run was quiet for the right reason. This replaces that judgement
+        /// with conditions a machine can check (see <see cref="AutoCalibrationPolicy"/>), which is
+        /// weaker, and it is switched on only when the alternative is thresholds that nobody
+        /// updates at all.
+        ///
+        /// App-wide rather than per camera, because it is a policy about how the rig is operated.
+        /// The thresholds it moves stay per camera, as they must - the dimmest of three produced
+        /// nine shallow false positives where the other two produced none.
+        /// </summary>
+        public bool AutoCalibrate
+        {
+            get => _autoCalibrate;
+            set { if (_autoCalibrate != value) { _autoCalibrate = value; RaiseChanged(nameof(AutoCalibrate)); Save(); } }
+        }
+
+        /// <summary>
+        /// How long a run has to be before it may move anything, in minutes.
+        ///
+        /// Five minutes resolves a false-positive budget only to 11.8/hour against a target of 1,
+        /// so a run that short measures a quieter rig than the one that has to survive the night.
+        /// </summary>
+        public double AutoCalibrateMinMinutes
+        {
+            get => _autoCalibrateMinMinutes;
+            set
+            {
+                double v = value < 1.0 ? 1.0 : (value > 1440.0 ? 1440.0 : value);
+                if (Math.Abs(_autoCalibrateMinMinutes - v) < 1e-9) return;
+                _autoCalibrateMinMinutes = v;
+                RaiseChanged(nameof(AutoCalibrateMinMinutes));
+                Save();
+            }
+        }
+
+        /// <summary>
+        /// The largest factor one run may move a threshold by.
+        ///
+        /// A jump bigger than this is a changed rig, not a calibration - a light moved, an
+        /// exposure changed, a camera came loose - and it is declined so a person looks.
+        /// </summary>
+        public double AutoCalibrateMaxChange
+        {
+            get => _autoCalibrateMaxChange;
+            set
+            {
+                double v = value < 1.1 ? 1.1 : (value > 100.0 ? 100.0 : value);
+                if (Math.Abs(_autoCalibrateMaxChange - v) < 1e-9) return;
+                _autoCalibrateMaxChange = v;
+                RaiseChanged(nameof(AutoCalibrateMaxChange));
+                Save();
+            }
+        }
+
+        /// <summary>The policy this settings object describes.</summary>
+        public AutoCalibrationPolicy CalibrationPolicy =>
+            new AutoCalibrationPolicy(AutoCalibrate, AutoCalibrateMinMinutes, AutoCalibrateMaxChange);
+
         public double EvidenceSeconds
         {
             get => _evidenceSeconds;
@@ -507,6 +573,9 @@ namespace MatroxFrameGrabber.Infrastructure
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
             public double? EvidenceSeconds { get; set; }
+            public bool? AutoCalibrate { get; set; }
+            public double? AutoCalibrateMinMinutes { get; set; }
+            public double? AutoCalibrateMaxChange { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -554,6 +623,12 @@ namespace MatroxFrameGrabber.Infrastructure
                             ? 0.0 : (ev < 0.5 ? 0.5 : (ev > 30.0 ? 30.0 : ev));
                         s._segmentFolder = string.IsNullOrWhiteSpace(dto.SegmentFolder)
                             ? DefaultSegmentFolder : dto.SegmentFolder;
+
+                        // Absent means off, which is what a file written before the option
+                        // existed should mean.
+                        s._autoCalibrate = dto.AutoCalibrate ?? false;
+                        s._autoCalibrateMinMinutes = dto.AutoCalibrateMinMinutes ?? 30.0;
+                        s._autoCalibrateMaxChange = dto.AutoCalibrateMaxChange ?? 2.0;
 
                         double around = dto.AnomalyClipSeconds ?? DefaultAnomalyClipSeconds;
                         s._anomalyClipSeconds = around <= 0.0
@@ -718,6 +793,9 @@ namespace MatroxFrameGrabber.Infrastructure
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,
                     EvidenceSeconds = _evidenceSeconds,
+                    AutoCalibrate = _autoCalibrate,
+                    AutoCalibrateMinMinutes = _autoCalibrateMinMinutes,
+                    AutoCalibrateMaxChange = _autoCalibrateMaxChange,
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelDetection = _channelDetection
                 };
