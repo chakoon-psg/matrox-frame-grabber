@@ -2586,6 +2586,53 @@ namespace MatroxFrameGrabber.Mil
                                     washout.LastLuma);
                 }
 
+                // Freeze keeps its picture even though the picture looks fine, because that is
+                // the finding: the onset still and the reference from 258 ms earlier are the same
+                // image, and a pair that is bit-identical is the only evidence a freeze leaves.
+                // A clip cannot show it - x264 encodes a still screen to nearly nothing and the
+                // result looks the same as a screen that was meant to be still.
+                if (freeze != null)
+                {
+                    if (freeze.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    freeze.LastChange);
+                    if (freeze.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    freeze.LastChange);
+                }
+
+                // ColorShift after the brightness kinds, and last but for Flip, because it is the
+                // most specific thing that can be true of a frame that is otherwise normal - and
+                // because it is the one kind whose still is worth more than its numbers. The
+                // deviation says a band moved; the picture says which way it went wrong.
+                if (colour != null)
+                {
+                    if (colour.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    colour.LastDeviation);
+                    if (colour.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    colour.LastDeviation);
+                }
+
+                // Flip last: if a turn coincides with anything else, the turn is what the picture
+                // has to show, and one look at the still settles a finding that took a comparison
+                // of tile arrangements to reach.
+                if (flip != null)
+                {
+                    if (flip.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    1.0 - flip.LastRatio);
+                    if (flip.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    1.0 - flip.LastRatio);
+                }
+
+                // **Flicker deliberately keeps nothing.** Its finding is a property of a second of
+                // video, and one frame of an oscillation is just a frame at one phase - a still
+                // that shows nothing wrong, filed as evidence that something was. The clip is the
+                // right artefact for this kind, and it already gets one.
+
                 // A healthy frame from up to 258 ms back, so the pair shows what changed.
                 //
                 // Frozen from the onset until the export clears the slots, not merely while the

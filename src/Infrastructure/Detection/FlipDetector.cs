@@ -180,6 +180,7 @@ namespace MatroxFrameGrabber.Infrastructure
         // one frame of an arm across the lens would drag a mean and cannot move a median.
         private readonly double[] _asymmetries = new double[1024];
         private int _asymmetryCount;
+        private long _asymmetrySeen;
 
         public FlipDetector(FlipThresholds thresholds)
         {
@@ -324,6 +325,7 @@ namespace MatroxFrameGrabber.Infrastructure
             _tooSymmetric = 0;
             _bestRatio = double.MaxValue;
             _asymmetryCount = 0;
+            _asymmetrySeen = 0;
             LastAxis = FlipAxis.None;
             LastRatio = 1.0;
             LastAsymmetry = 0.0;
@@ -390,17 +392,22 @@ namespace MatroxFrameGrabber.Infrastructure
 
         private void Record(double asymmetry)
         {
+            _asymmetrySeen++;
             if (_asymmetryCount < _asymmetries.Length)
             {
                 _asymmetries[_asymmetryCount++] = asymmetry;
                 return;
             }
 
-            // Full: keep the reservoir current rather than frozen on the first thousand frames,
-            // by replacing one at a stride. The summary is a scale, not a statistic anybody
-            // computes a threshold from, so an exact median over the whole run is not worth
-            // holding a run's worth of doubles for.
-            _asymmetries[(int)(_judged % _asymmetries.Length)] = asymmetry;
+            // Full: keep the reservoir current rather than frozen on the first thousand
+            // frames, by replacing one at a stride. Strided on its own counter, not on _judged -
+            // _judged does not advance on a frame whose pair changed too little to compare, and
+            // on these still panels that is most of them, so striding on it rewrote one slot over
+            // and over and left the other 1023 as they were at start-up.
+            //
+            // The summary is a scale, not a statistic anybody computes a threshold from, so an
+            // exact median over the whole run is not worth holding a run's worth of doubles for.
+            _asymmetries[(int)(_asymmetrySeen % _asymmetries.Length)] = asymmetry;
         }
 
         private double MedianAsymmetry()

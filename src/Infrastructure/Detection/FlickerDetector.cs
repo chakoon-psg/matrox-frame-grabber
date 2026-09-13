@@ -247,8 +247,14 @@ namespace MatroxFrameGrabber.Infrastructure
             _next = (_next + 1) % _window.Length;
             if (_filled < _window.Length) _filled++;
 
+            // Still filling. The tracker is fed anyway, with nothing wrong: it needs
+            // consecutive frame numbers to measure the rate, and skipping the first window would
+            // make the first judged frame look like a 120-frame gap - which the tracker would
+            // correctly treat as a hole in the numbering and restart the dwell for. It would also
+            // count as a skipped frame in a figure that is supposed to mean dropped frames.
             if (_filled < _window.Length)
-                return null;
+                return _run.Observe(grid.FrameNumber, timeStampSec, false, true,
+                                    0.0, _t.EnterMs, _t.RecoverMs);
 
             Measure();
             _windows++;
