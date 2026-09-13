@@ -109,6 +109,7 @@ namespace MatroxFrameGrabber.Mil
         // confirms on one frame, Blackout measures an absolute level with hysteresis and must not.
         private BlackoutDetector _blackout;
         private WashoutDetector _washout;
+        private FreezeDetector _freeze;
 
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
@@ -807,6 +808,12 @@ namespace MatroxFrameGrabber.Mil
 
         /// <summary>Whether the picture is washed out right now.</summary>
         public bool InWashout => _washout?.InWashout ?? false;
+
+        /// <summary>Mean change in tile means on the last frame, in luma - what Freeze judges.</summary>
+        public double FreezeChange => _freeze?.LastChange ?? 0.0;
+
+        /// <summary>Whether the picture has stopped being updated.</summary>
+        public bool InFreeze => _freeze?.InFreeze ?? false;
         public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
         public double DetectionBaseline => _detector?.Baseline ?? 0.0;
 
@@ -1566,7 +1573,24 @@ namespace MatroxFrameGrabber.Mil
                 ? new WashoutDetector(Detection.ResolveWashout(AnomalyKind.Washout))
                 : null;
 
-            bool watching = _detector != null || _blackout != null || _washout != null;
+            bool wantFreeze = DetectionEnabled && Detection.For(AnomalyKind.Freeze).Enabled
+                           && AnomalyCatalog.Implemented(AnomalyKind.Freeze);
+            _freeze = wantFreeze
+                ? new FreezeDetector(Detection.ResolveFreeze(AnomalyKind.Freeze))
+                : null;
+
+            bool watching = _detector != null || _blackout != null
+                         || _washout != null || _freeze != null;
+            if (_freeze != null)
+            {
+                FreezeThresholds ft = Detection.ResolveFreeze(AnomalyKind.Freeze);
+                MilErrorLog.Note($"{Name}: freeze watch on - stopped at or below "
+                               + $"{ft.EnterDelta:0.####} luma/frame, moving again at "
+                               + $"{ft.ExitDelta:0.####}, dwell {ft.EnterMs:0} ms in / "
+                               + $"{ft.RecoverMs:0} ms out. **This threshold is a floor, not a "
+                               + "ceiling** - it must sit under the sensor noise, so check the "
+                               + "proposal at stop.");
+            }
             if (_washout != null)
             {
                 WashoutThresholds wt = Detection.ResolveWashout(AnomalyKind.Washout);
@@ -1698,6 +1722,18 @@ namespace MatroxFrameGrabber.Mil
             if (stillWhite.HasValue)
                 RecordAnomaly(stillWhite.Value);
 
+            if (DetectionEnabled && _freeze != null)
+            {
+                MilErrorLog.Note($"{Name}: {_freeze.Propose()}");
+                MilErrorLog.Note($"{Name}: freeze - last change {_freeze.LastChange:F4} luma/frame; "
+                               + $"{(_freeze.InFreeze ? "STILL FROZEN" : "picture moving")} at stop; "
+                               + $"{_freeze.Judged} frames judged");
+            }
+
+            AnomalyEvent? stillStuck = _freeze?.Flush();
+            if (stillStuck.HasValue)
+                RecordAnomaly(stillStuck.Value);
+
             if (_stills != null && _stills.IsAllocated)
             {
                 MilErrorLog.Note($"{Name}: stills - {_stills.Copies} kept, "
@@ -1723,6 +1759,7 @@ namespace MatroxFrameGrabber.Mil
             _detector = null;
             _blackout = null;
             _washout = null;
+            _freeze = null;
             RaisePropertyChanged(nameof(CalibrationText));
             RaiseCommandStates();
 
@@ -1995,7 +2032,8 @@ namespace MatroxFrameGrabber.Mil
             AnomalyDetector detector = _detector;
             BlackoutDetector blackout = _blackout;
             WashoutDetector washout = _washout;
-            if (detector == null && blackout == null && washout == null)
+            FreezeDetector freeze = _freeze;
+            if (detector == null && blackout == null && washout == null && freeze == null)
                 return;
 
             // A failed reduction leaves the grid empty, and an empty grid is not a dark one -
@@ -2040,6 +2078,15 @@ namespace MatroxFrameGrabber.Mil
                 AnomalyEvent? white = washout.Observe(_grid, timeStampSec);
                 if (white.HasValue)
                     RecordAnomaly(white.Value);
+            }
+
+            // Fourth judge, and the only one that keeps a copy of the previous grid - it is the
+            // one asking what changed rather than what this frame is.
+            if (freeze != null)
+            {
+                AnomalyEvent? stuck = freeze.Observe(_grid, timeStampSec);
+                if (stuck.HasValue)
+                    RecordAnomaly(stuck.Value);
             }
 
             // ---- Lossless stills: the detector says which frame each slot wants ----
@@ -2094,6 +2141,7 @@ namespace MatroxFrameGrabber.Mil
                 if (!(detector?.InEvent ?? false)
                     && !(blackout?.InBlackout ?? false)
                     && !(washout?.InWashout ?? false)
+                    && !(freeze?.InFreeze ?? false)
                     && !stills.Has(StillRing.Slot.Onset)
                     && frameNumber % StillRing.ReferenceEveryFrames == 0)
                     stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);

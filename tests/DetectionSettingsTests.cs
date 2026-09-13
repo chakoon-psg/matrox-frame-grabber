@@ -292,17 +292,54 @@ namespace MatroxFrameGrabber.Tests
         /// absolute level with hysteresis and must not. The rest have none yet, and the settings
         /// window says so rather than hiding them.
         /// </summary>
+        /// <summary>
+        /// The catalog and the settings window have to agree about which kinds are real, whatever
+        /// the count happens to be.
+        ///
+        /// Written as a property rather than a list: the first two versions of this test froze
+        /// "only Dropout" and then "two kinds", and each broke the day a detector was added -
+        /// which is the one day the test should have been silent. What matters is that
+        /// `Implemented` and `EnabledCount` never disagree, and that every kind is decidable.
+        /// </summary>
         [Fact]
-        public void Three_kinds_have_a_detector_and_the_rest_say_so()
+        public void Implemented_kinds_are_the_ones_that_count_as_running()
         {
-            var done = new[] { AnomalyKind.Dropout, AnomalyKind.Blackout, AnomalyKind.Washout };
-
-            foreach (AnomalyKind k in done)
-                Assert.True(AnomalyCatalog.Implemented(k), $"{k} should have a detector");
-
             foreach (AnomalyKind k in AnomalyCatalog.All)
-                if (Array.IndexOf(done, k) < 0)
-                    Assert.False(AnomalyCatalog.Implemented(k), $"{k} has no detector yet");
+            {
+                var s = new DetectionSettings();
+                foreach (AnomalyKind off in AnomalyCatalog.All)
+                    s.For(off).Enabled = false;
+
+                s.For(k).Enabled = true;
+
+                Assert.Equal(AnomalyCatalog.Implemented(k) ? 1 : 0, s.EnabledCount);
+            }
+
+            // And Dropout in particular, which is the one every other measurement rests on.
+            Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Dropout));
+        }
+
+        /// <summary>
+        /// A sustained kind is one that holds no baseline, so none of them needs the event cap
+        /// Dropout cannot do without. Anything implemented is one or the other, never neither.
+        /// </summary>
+        [Fact]
+        public void Every_implemented_kind_is_either_sustained_or_an_event_kind()
+        {
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+            {
+                if (!AnomalyCatalog.Implemented(k))
+                {
+                    Assert.False(AnomalyCatalog.IsSustained(k), $"{k} has no detector to be either");
+                    continue;
+                }
+
+                bool sustained = AnomalyCatalog.IsSustained(k);
+                if (k == AnomalyKind.Dropout)
+                    Assert.False(sustained, "Dropout confirms on a single frame");
+                else
+                    Assert.True(sustained, $"{k} is implemented but claims to be neither");
+            }
         }
 
         /// <summary>
@@ -312,11 +349,9 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void The_sustained_kinds_are_the_ones_that_stay()
         {
-            // Both hold no baseline, so neither needs the event cap Dropout cannot do without.
             Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Blackout));
             Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Washout));
-
-            // Dropout is the one that has to confirm on a single frame.
+            Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Freeze));
             Assert.False(AnomalyCatalog.IsSustained(AnomalyKind.Dropout));
         }
 

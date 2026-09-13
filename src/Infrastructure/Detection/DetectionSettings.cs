@@ -136,6 +136,25 @@ namespace MatroxFrameGrabber.Infrastructure
         /// <summary>How long the picture has to be back, in ms.</summary>
         public double WashoutRecoverMs { get; set; } = 500.0;
 
+        // ----- Freeze only -----
+        //
+        // The inverted kind: these confirm by being under-run, not exceeded.
+
+        /// <summary>
+        /// Mean change in tile means, per frame, at or below which the picture counts as stopped.
+        /// **Must sit under the sensor noise a live rig cannot help producing** - measure it.
+        /// </summary>
+        public double FreezeEnterDelta { get; set; } = 0.02;
+
+        /// <summary>Change it has to reach again to be moving. Above the entry.</summary>
+        public double FreezeExitDelta { get; set; } = 0.06;
+
+        /// <summary>How long unchanging before it is a fault, in ms. Longer than the other kinds.</summary>
+        public double FreezeEnterMs { get; set; } = 1000.0;
+
+        /// <summary>How long moving again before the fault is over, in ms.</summary>
+        public double FreezeRecoverMs { get; set; } = 500.0;
+
         /// <summary>
         /// How much of a head start the first falling tile may have over the last. A surface that
         /// dims at once is near zero; the periodic horizontal wipe on these panels took 193 ms and
@@ -206,6 +225,12 @@ namespace MatroxFrameGrabber.Infrastructure
             WashoutMaxDetail = C(WashoutMaxDetail, 0.0, 255.0);
             WashoutEnterMs = C(WashoutEnterMs, 1.0, 600000.0);
             WashoutRecoverMs = C(WashoutRecoverMs, 1.0, 600000.0);
+
+            FreezeEnterDelta = C(FreezeEnterDelta, 0.0, 255.0);
+            FreezeExitDelta = C(FreezeExitDelta, 0.0, 255.0);
+            if (FreezeExitDelta <= FreezeEnterDelta) FreezeExitDelta = FreezeEnterDelta * 2.0 + 1e-6;
+            FreezeEnterMs = C(FreezeEnterMs, 1.0, 600000.0);
+            FreezeRecoverMs = C(FreezeRecoverMs, 1.0, 600000.0);
         }
 
         private static double C(double v, double lo, double hi) =>
@@ -238,6 +263,10 @@ namespace MatroxFrameGrabber.Infrastructure
             WashoutMaxDetail = other.WashoutMaxDetail;
             WashoutEnterMs = other.WashoutEnterMs;
             WashoutRecoverMs = other.WashoutRecoverMs;
+            FreezeEnterDelta = other.FreezeEnterDelta;
+            FreezeExitDelta = other.FreezeExitDelta;
+            FreezeEnterMs = other.FreezeEnterMs;
+            FreezeRecoverMs = other.FreezeRecoverMs;
             // StoredEnabled is deliberately NOT copied. It is the old file's key, read once by
             // the migration; carrying it onto the live instance would put "Enabled" back into
             // every save, and the file would again hold four answers beside the one.
@@ -348,6 +377,21 @@ namespace MatroxFrameGrabber.Infrastructure
                 MaxDetail = k.WashoutMaxDetail,
                 EnterMs = k.WashoutEnterMs,
                 RecoverMs = k.WashoutRecoverMs,
+            });
+            return t;
+        }
+
+        /// <summary>Thresholds for the freeze detector. Only Freeze has one.</summary>
+        public FreezeThresholds ResolveFreeze(AnomalyKind kind)
+        {
+            KindSettings k = For(kind);
+            var t = new FreezeThresholds();
+            t.CopyFrom(new FreezeThresholds
+            {
+                EnterDelta = k.FreezeEnterDelta,
+                ExitDelta = k.FreezeExitDelta,
+                EnterMs = k.FreezeEnterMs,
+                RecoverMs = k.FreezeRecoverMs,
             });
             return t;
         }
