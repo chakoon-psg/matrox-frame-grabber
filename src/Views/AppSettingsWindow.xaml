@@ -70,7 +70,54 @@
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
             <TextBlock Text="thresholds, ROI and calibration are per camera — open a camera's own Settings"
-                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,8" TextWrapping="Wrap" />
+
+            <!-- Auto-calibration.
+                 App-wide, like the kind checkboxes and for the same reason: whether a machine may
+                 move a threshold on its own is one policy for the rig, not a per-camera taste.
+                 The value it writes is per camera, because that is where thresholds live.
+
+                 Off by default. It is here because the rig is sometimes unattended for days, and
+                 a threshold nobody can adjust is worse than one that tightens itself - but every
+                 word in the tooltip is a condition it has to clear first, and it will decline far
+                 more often than it acts. That is the intended behaviour, not a fault. -->
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Auto-calibrate" />
+                <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                          Content="let a quiet run tighten Dropout on its own"
+                          IsChecked="{Binding Output.AutoCalibrate}"
+                          ToolTip="사람이 없는 동안 임계값을 스스로 조일 수 있게 합니다. 기본 꺼짐&#x0a;&#x0a;**Dropout 하나만** 건드립니다. 나머지 여섯을 제외한 이유는 종류마다 다르고 CLAUDE.md에 표로 있습니다&#x0a;**조이기만 하고 풀지 않습니다** — 조용한 한 시간은 그 시간이 조용했다는 증거이지 장비가 조용하다는 증거가 아닙니다(실측: 같은 리그가 0.0289와 0.0087)&#x0a;&#x0a;그랩을 멈출 때 판정하고, 채택하지 않았으면 그 이유를 로그에 남깁니다" />
+            </Grid>
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Needs" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                             Text="{Binding Output.AutoCalibrateMinMinutes, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="이 시간보다 짧은 실행은 채택하지 않습니다 (분)&#x0a;5분은 오검출 예산을 11.8/시간까지만 분해합니다 — 1/시간을 보이려면 한 시간이 필요합니다" />
+                    <TextBlock Text="min of quiet running, and at most" Margin="6,0,6,0"
+                               VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                    <TextBox Width="40" FontSize="11" VerticalContentAlignment="Center"
+                             Text="{Binding Output.AutoCalibrateMaxChange, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="한 번에 바꿀 수 있는 배수의 상한&#x0a;이보다 큰 변화가 필요하다면 그건 캘리브레이션이 아니라 리그가 달라진 것이고, 사람이 봐야 합니다" />
+                    <TextBlock Text="× change" Margin="6,0,0,0"
+                               VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Margin="0,0,0,10" TextWrapping="Wrap"
+                       Foreground="#5A5A5A" FontSize="10"
+                       Text="it declines more often than it acts: the run must have reported nothing, missed nothing, and still want a tighter value than the one in place. Every refusal says which condition failed, in mil-errors.log."
+                       ToolTip="거절 사유는 전부 로그에 남습니다 — SwitchedOff / TooShort / NotQuiet / Degraded / NoProposal / WouldLoosen / TooBigAChange / NotWorthIt&#x0a;&#x0a;&quot;사건 0건&quot; 조건이 되먹임 고리를 끊습니다: 임계값↑ → 사건↓ → 바닥 계산에서 빠지는 프레임↓ → 바닥↑ → 임계값↑" />
+
 
             <!-- ============ RECORDING (the session file) ============ -->
             <TextBlock Text="RECORDING" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,1" />
