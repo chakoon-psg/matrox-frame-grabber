@@ -13,6 +13,7 @@
 > [`docs/measurements/2026-09-14-inspector-before-after.md`](../measurements/2026-09-14-inspector-before-after.md).
 > 그 실측이 이 문서의 예측 **둘을 뒤집었다** — 아래 "실측이 뒤집은 것" 절을 먼저 볼 것.
 > 판단만 필요하면 **적용하면 얻는 것과 잃는 것** · **권고** 두 절이면 된다.
+> 남에게 설명할 요약이 필요하면 [`../cs-adoption-summary.md`](../cs-adoption-summary.md).
 > 이 문서에 코드는 없고 저장소에도 없다. 계약 초안을
 > 한 번 써 보고 되돌렸으며, 그때 나온 것들은 아래 요구사항으로 남겼다. 네 가지를 검토해
 > 확정했다 — **이름**(`Screen*` + `Inspector`/`Finding`), **붙는 자리**(사건 판독 + 순찰 판독
