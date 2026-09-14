@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- No window and no MIL. This harness exists so the model can be developed and measured
+         without the app, which is the same reason tools/MilVideoSink exists. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>OnnxInspectorHarness</RootNamespace>
+    <AssemblyName>OnnxInspector</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+  </ItemGroup>
+
+  <!-- Source-included rather than copied, so the harness measures the same letterbox and decoder
+       the app would run. A number measured here is a number about the app. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\Infrastructure\Detection\ScreenFinding.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\IScreenInspector.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\BgrLetterbox.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\CenterNetDecoder.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\AnomalyKind.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+</Project>

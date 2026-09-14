@@ -193,6 +193,55 @@ namespace MatroxFrameGrabber.Infrastructure
         /// clip is x264 at CRF 23, so re-running the detector over it would not reproduce the
         /// deviation that was reported, while a lossless still of the extreme frame would.
         /// </summary>
+        /// <summary>
+        /// Whether a screen inspector runs at all. Off by default.
+        ///
+        /// App-wide rather than per camera, by the same rule as the kind checkboxes: whether a
+        /// model judges this rig is one policy, and a report where camera 1 was inspected and
+        /// camera 2 was not cannot be read.
+        /// </summary>
+        public bool Inspect
+        {
+            get => _inspect;
+            set { if (_inspect != value) { _inspect = value; RaiseChanged(nameof(Inspect)); Save(); } }
+        }
+
+        /// <summary>
+        /// How often each camera hands a frame to the inspector, in seconds. 0 switches the
+        /// patrol off and leaves only whatever event path exists.
+        ///
+        /// Seconds rather than a rate because that is how the cost is reasoned about: one frame
+        /// every two seconds across three cameras is 1.5 inferences a second, against a measured
+        /// ceiling of about 212.
+        /// </summary>
+        public double InspectSeconds
+        {
+            get => _inspectSeconds;
+            set
+            {
+                double v = double.IsNaN(value) || value < 0.0 ? 0.0 : (value > 3600.0 ? 3600.0 : value);
+                if (_inspectSeconds != v) { _inspectSeconds = v; RaiseChanged(nameof(InspectSeconds)); Save(); }
+            }
+        }
+
+        /// <summary>
+        /// Where the model file is. Empty means look beside the app, the way ffmpeg is found.
+        /// </summary>
+        public string InspectModelPath
+        {
+            get => _inspectModelPath;
+            set
+            {
+                string v = value ?? string.Empty;
+                if (!string.Equals(_inspectModelPath, v, StringComparison.Ordinal))
+                { _inspectModelPath = v; RaiseChanged(nameof(InspectModelPath)); Save(); }
+            }
+        }
+
+        private bool _inspect;
+        private double _inspectSeconds = 2.0;
+        private string _inspectModelPath = string.Empty;
+
         public bool KeepStills
         {
             get => _keepStills;
@@ -573,6 +622,9 @@ namespace MatroxFrameGrabber.Infrastructure
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
             public double? EvidenceSeconds { get; set; }
+            public bool? Inspect { get; set; }
+            public double? InspectSeconds { get; set; }
+            public string InspectModelPath { get; set; }
             public bool? AutoCalibrate { get; set; }
             public double? AutoCalibrateMinMinutes { get; set; }
             public double? AutoCalibrateMaxChange { get; set; }
@@ -626,6 +678,9 @@ namespace MatroxFrameGrabber.Infrastructure
 
                         // Absent means off, which is what a file written before the option
                         // existed should mean.
+                        s._inspect = dto.Inspect ?? false;
+                        s._inspectSeconds = dto.InspectSeconds ?? 2.0;
+                        s._inspectModelPath = dto.InspectModelPath ?? string.Empty;
                         s._autoCalibrate = dto.AutoCalibrate ?? false;
                         s._autoCalibrateMinMinutes = dto.AutoCalibrateMinMinutes ?? 30.0;
                         s._autoCalibrateMaxChange = dto.AutoCalibrateMaxChange ?? 2.0;
@@ -793,6 +848,9 @@ namespace MatroxFrameGrabber.Infrastructure
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,
                     EvidenceSeconds = _evidenceSeconds,
+                    Inspect = _inspect,
+                    InspectSeconds = _inspectSeconds,
+                    InspectModelPath = _inspectModelPath,
                     AutoCalibrate = _autoCalibrate,
                     AutoCalibrateMinMinutes = _autoCalibrateMinMinutes,
                     AutoCalibrateMaxChange = _autoCalibrateMaxChange,

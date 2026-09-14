@@ -91,6 +91,81 @@ namespace MatroxFrameGrabber.Mil
         /// </summary>
         public bool WantBands { get; set; }
 
+        // Whole-region planes, separate from the strip buffers above.
+        //
+        // The reduction reads a tile row at a time and reuses one strip, which is why _r/_g/_b
+        // cannot simply be handed out - by the time Reduce returns they hold the last strip only.
+        // An inspector needs the whole region at once, so it gets its own arrays, allocated the
+        // first time one is asked for and never on a frame that does not ask.
+        private byte[] _roiR, _roiG, _roiB;
+        private int _roiW, _roiH;
+
+        /// <summary>
+        /// Reads one whole region out of the grab buffer as three band planes.
+        ///
+        /// **This is a second host read of the same frame**, which this repository measured as
+        /// expensive and forbade: two sinks reading every frame made each read four times slower,
+        /// not twice, because they contend for the same memory path the acquisition DMA uses.
+        ///
+        /// It is allowed here because of how rarely it happens. The patrol asks for one frame
+        /// every two seconds per camera - one in 240 at 120 fps, 0.4% of them. The rule is about
+        /// what every frame costs; this is not on that path. If something ever wants this on
+        /// every frame, it has to share the reduction's read instead.
+        ///
+        /// Returns false when there is nothing to read, in which case the planes are untouched.
+        /// Never throws: this runs inside the acquisition hook.
+        /// </summary>
+        public bool TryReadRoi(MIL_ID grabBuffer, ChannelRoi roi,
+                               out byte[] r, out byte[] g, out byte[] b, out int width, out int height)
+        {
+            r = null; g = null; b = null; width = 0; height = 0;
+            if (grabBuffer == MIL.M_NULL) return false;
+
+            try
+            {
+                if (!_bandsUsable || !_bands.TryGetValue(grabBuffer, out MIL_ID[] children))
+                    return false;
+                if (MIL.MbufInquire(grabBuffer, MIL.M_SIZE_BIT, MIL.M_NULL) > 8)
+                    return false;
+
+                MIL_INT fw = MIL.MbufInquire(grabBuffer, MIL.M_SIZE_X, MIL.M_NULL);
+                MIL_INT fh = MIL.MbufInquire(grabBuffer, MIL.M_SIZE_Y, MIL.M_NULL);
+
+                bool full = roi.IsFullFrame;
+                int rx = full ? 0 : roi.OffsetX;
+                int ry = full ? 0 : roi.OffsetY;
+                int rw = full ? (int)fw : roi.Width;
+                int rh = full ? (int)fh : roi.Height;
+
+                if (rx < 0 || ry < 0 || rw <= 0 || rh <= 0 ||
+                    rx + rw > (int)fw || ry + rh > (int)fh)
+                    return false;
+
+                if (_roiR == null || _roiW != rw || _roiH != rh)
+                {
+                    _roiR = new byte[rw * rh];
+                    _roiG = new byte[rw * rh];
+                    _roiB = new byte[rw * rh];
+                    _roiW = rw;
+                    _roiH = rh;
+                }
+
+                // MbufGet2d for the same reason the reduction uses it: these buffers carry row
+                // padding, and a padded read into a tight array shears every row.
+                MIL.MbufGet2d(children[0], rx, ry, rw, rh, _roiR);
+                MIL.MbufGet2d(children[1], rx, ry, rw, rh, _roiG);
+                MIL.MbufGet2d(children[2], rx, ry, rw, rh, _roiB);
+
+                r = _roiR; g = _roiG; b = _roiB;
+                width = rw; height = rh;
+                return true;
+            }
+            catch (MILException)
+            {
+                return false;
+            }
+        }
+
         public void ResetCost()
         {
             LastReduceUs = 0;

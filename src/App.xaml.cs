@@ -160,6 +160,14 @@ namespace MatroxFrameGrabber
             RecordDuringAutoRun = HasSwitch(e.Args, RecordSwitch);
             ExposureScan = ParseExposures(ParseSwitchValue(e.Args, ExposureScanSwitch));
             DwellSeconds = ParseDwellSeconds(e.Args);
+
+            // The one place the application knows the ONNX project exists. Infrastructure never
+            // does - it holds the contract and asks a delegate for an implementation - so taking
+            // the feature out is deleting the project reference and this lambda, and the factory
+            // then reports "no inspector implementation was registered in this build".
+            ScreenInspectorFactory.Implementation = (model, opt) =>
+                new MatroxFrameGrabber.Onnx.OnnxScreenInspector(
+                    model, opt.ScoreThreshold, opt.IouThreshold, opt.MaxFindings, opt.IntraOpThreads);
             int.TryParse(ParseSwitchValue(e.Args, DecimSwitch), NumberStyles.Integer,
                          CultureInfo.InvariantCulture, out int decim);
             StartupDecimation = decim;

@@ -26,6 +26,20 @@
     <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- The screen inspector, and the entire dependency on it. Three things to delete and the
+       feature is gone: this PackageReference, the src/Onnx folder, and the one lambda in
+       App.xaml.cs that registers it. ScreenInspectorFactory then finds no implementation and
+       hands back NullScreenInspector, and every call site keeps compiling. See docs/adr/0002.
+
+       A separate assembly was tried first and does not work here: the contract lives in
+       Infrastructure, which is compiled into this exe, so a second project can only get at it by
+       source-including it - and then the interface exists twice under one name and nothing
+       implements the right one. Splitting Infrastructure into a library would fix that and would
+       also change how tests are arranged, which is a bigger change than this feature earns. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Matrox.MatroxImagingLibrary" Version="10.*" />
     <PackageReference Include="Matrox.MatroxImagingLibrary.WPF" Version="10.*" />

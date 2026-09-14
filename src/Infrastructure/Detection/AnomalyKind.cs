@@ -42,6 +42,41 @@ namespace MatroxFrameGrabber.Infrastructure
         Freeze = 5,
         /// <summary>Colour is wrong: a band is missing, swapped, or badly out of balance.</summary>
         ColorShift = 6,
+
+        /// <summary>
+        /// A screen inspector found something it cannot name in our vocabulary.
+        ///
+        /// **Not a fault kind so much as an honest refusal.** A learned inspector reports what it
+        /// was trained on, and the mapping from its labels to these kinds is a table we maintain.
+        /// When the table has no row for a label, the finding still has to go somewhere - dropping
+        /// it hides the fact that the model is seeing something, and forcing it into the nearest
+        /// kind produces a report that reads as a fault we can name and is not.
+        ///
+        /// The label the model actually used travels with the finding
+        /// (<see cref="ScreenFinding.Label"/>), so a run full of `Unknown` can be read afterwards
+        /// and the table fixed.
+        ///
+        /// No tile detector will ever produce this - see <see cref="AnomalyCatalog.SourceOf"/>.
+        /// </summary>
+        Unknown = 7,
+    }
+
+    /// <summary>
+    /// What kind of judge a kind needs.
+    ///
+    /// The distinction exists because the two answer different questions at different rates from
+    /// different data - tiles say *when* something deviated, 120 times a second from 64 numbers;
+    /// an inspector says *what is there*, rarely, from the picture. A kind belongs to one or the
+    /// other, and one or two kinds belong to neither yet.
+    /// </summary>
+    public enum KindSource
+    {
+        /// <summary>Nothing judges this kind in this build.</summary>
+        None = 0,
+        /// <summary>A tile detector judges it, always, with no model file needed.</summary>
+        Tiles = 1,
+        /// <summary>A screen inspector judges it - so only when one is loaded.</summary>
+        Inspector = 2,
     }
 
     /// <summary>
@@ -73,11 +108,11 @@ namespace MatroxFrameGrabber.Infrastructure
         {
             AnomalyKind.Dropout, AnomalyKind.Blackout, AnomalyKind.Washout,
             AnomalyKind.Flicker, AnomalyKind.Flip, AnomalyKind.Freeze,
-            AnomalyKind.ColorShift,
+            AnomalyKind.ColorShift, AnomalyKind.Unknown,
         };
 
         /// <summary>Number of kinds, for arrays indexed by <see cref="AnomalyKind"/>.</summary>
-        public const int Count = 7;
+        public const int Count = 8;
 
         /// <summary>
         /// Whether anything in this build judges this kind.
@@ -118,6 +153,20 @@ namespace MatroxFrameGrabber.Infrastructure
          || kind == AnomalyKind.ColorShift
          || kind == AnomalyKind.Flicker
          || kind == AnomalyKind.Flip;
+
+        /// <summary>
+        /// What is able to judge a kind at all.
+        ///
+        /// Deliberately **static**. "Is an inspector loaded right now" is a runtime fact, and
+        /// letting the catalog know it would put global mutable state into a pure lookup that
+        /// `Infrastructure/` depends on and tests read in any order. So the catalog answers the
+        /// question that never changes - *who could* judge this - and whoever holds the inspector
+        /// combines the two.
+        /// </summary>
+        public static KindSource SourceOf(AnomalyKind kind) =>
+            kind == AnomalyKind.Unknown ? KindSource.Inspector
+          : Implemented(kind) ? KindSource.Tiles
+          : KindSource.None;
 
         /// <summary>Which way this kind moves brightness.</summary>
         public static AnomalyDirection DirectionOf(AnomalyKind kind)
@@ -175,6 +224,7 @@ namespace MatroxFrameGrabber.Infrastructure
                 case AnomalyKind.Flip: return "화면이 회전·반전됩니다";
                 case AnomalyKind.Freeze: return "화면이 갱신을 멈춥니다 — 같은 그림이 계속 옵니다";
                 case AnomalyKind.ColorShift: return "색이 틀어집니다 — 채널이 빠지거나 뒤바뀝니다";
+                case AnomalyKind.Unknown: return "판독기가 뭔가 찾았지만 우리 종류로 이름 붙일 수 없습니다";
                 default: return string.Empty;
             }
         }

@@ -111,6 +111,15 @@ namespace MatroxFrameGrabber.Mil
         private WashoutDetector _washout;
         private FreezeDetector _freeze;
         private ColorShiftDetector _colorShift;
+
+        // The screen inspector and the three things it needs. All null unless a model loaded,
+        // and all released at stop - so a build without src/Onnx carries five null fields.
+        private IScreenInspector _inspector;
+        private ScreenPatrol _patrol;
+        private BgrLetterbox _letterbox;
+        private ScreenFinding[] _findings;
+        private long _inspections;
+        private double _inspectUsTotal, _inspectUsMax;
         private FlickerDetector _flicker;
         private FlipDetector _flip;
 
@@ -1897,6 +1906,31 @@ namespace MatroxFrameGrabber.Mil
                 ? new FlickerDetector(Detection.ResolveFlicker(AnomalyKind.Flicker, rateForWindow))
                 : null;
 
+            // The inspector is not one of the kinds - it is a second judge with its own
+            // switch, because whether a model runs is a different question from which faults are
+            // watched for. It costs nothing when off: the factory hands back a null inspector and
+            // the hook's `if` is false.
+            _inspector = ScreenInspectorFactory.Create(
+                Output?.Inspect ?? false,
+                Output?.InspectModelPath,
+                AppContext.BaseDirectory,
+                new ScreenInspectorOptions());
+            MilErrorLog.Note($"{Name}: inspector - {_inspector.Describe}");
+
+            // The patrol only exists when there is something for it to feed. A null inspector
+            // reports an input size of zero, which is the cheapest way to ask "is this real".
+            _patrol = _inspector.InputWidth > 0 && (Output?.InspectSeconds ?? 0.0) > 0.0
+                ? new ScreenPatrol(Output.InspectSeconds)
+                : null;
+            if (_patrol != null)
+                MilErrorLog.Note($"{Name}: inspector patrol every {_patrol.EverySeconds:0.##} s");
+
+            _letterbox = null;
+            _findings = null;
+            _inspections = 0;
+            _inspectUsTotal = 0.0;
+            _inspectUsMax = 0.0;
+
             bool wantFlip = DetectionEnabled && Detection.For(AnomalyKind.Flip).Enabled
                          && AnomalyCatalog.Implemented(AnomalyKind.Flip);
             _flip = wantFlip
@@ -2169,6 +2203,17 @@ namespace MatroxFrameGrabber.Mil
             _blackout = null;
             _washout = null;
             _freeze = null;
+            if (_inspections > 0)
+                MilErrorLog.Note($"{Name}: inspector - {_inspections} frame(s) inspected, "
+                               + $"mean {_inspectUsTotal / _inspections:F0} us / "
+                               + $"max {_inspectUsMax:F0} us (letterbox + inference + decode)");
+
+            _inspector?.Dispose();
+            _inspector = null;
+            _patrol = null;
+            _letterbox = null;
+            _findings = null;
+
             _colorShift = null;
             _flicker = null;
             _flip = null;
@@ -2193,6 +2238,66 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
             RaiseCommandStates();
+        }
+
+        /// <summary>
+        /// Hands one frame to the screen inspector and logs what it found.
+        ///
+        /// Timed end to end - the region read, the letterbox and the inference - because that is
+        /// the number the decision needs, and the published figure for this model was the
+        /// inference alone on an idle machine.
+        ///
+        /// Runs inside the acquisition hook, like everything else here, so it is wrapped: a model
+        /// that throws must cost one frame's judgement, not the run.
+        /// </summary>
+        private void Patrol(MIL_ID grabbedBuffer, long frameNumber)
+        {
+            IScreenInspector inspector = _inspector;
+            if (inspector == null || _reducer == null) return;
+
+            long start = Stopwatch.GetTimestamp();
+            try
+            {
+                if (!_reducer.TryReadRoi(grabbedBuffer, _analysisRoi,
+                                         out byte[] r, out byte[] g, out byte[] b,
+                                         out int w, out int h))
+                    return;
+
+                // Built on the first frame, because the region's size is not known before one
+                // arrives - and refused afterwards if it changes, which is what the letterbox
+                // does rather than quietly mixing two geometries.
+                if (_letterbox == null || _letterbox.SourceWidth != w || _letterbox.SourceHeight != h)
+                {
+                    _letterbox = new BgrLetterbox(w, h, inspector.InputWidth, inspector.InputHeight);
+                    MilErrorLog.Note($"{Name}: inspector letterbox - {_letterbox}");
+                }
+
+                byte[] bgr = _letterbox.Fill(r, g, b, w, h);
+
+                _findings ??= new ScreenFinding[16];
+                int n = inspector.Inspect(bgr, _findings);
+
+                for (int i = 0; i < n; i++)
+                {
+                    ScreenFinding f = _findings[i];
+                    _letterbox.ToFrame(f.X, f.Y, f.Width, f.Height,
+                                       out float fx, out float fy, out float fw, out float fh);
+                    MilErrorLog.Note($"{Name}: finding frame {frameNumber} - {f.Kind} "
+                                   + $"(\"{f.Label}\") {f.Score:F3} at {fx:F0},{fy:F0} "
+                                   + $"{fw:F0}x{fh:F0} in the region");
+                }
+            }
+            catch (Exception e)
+            {
+                MilErrorLog.Write($"{Name}: inspector on frame {frameNumber}", e);
+            }
+            finally
+            {
+                double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
+                _inspections++;
+                _inspectUsTotal += us;
+                if (us > _inspectUsMax) _inspectUsMax = us;
+            }
         }
 
         /// <summary>Raised when a recording stops on its own (ffmpeg died); carries the error text.</summary>
@@ -2523,6 +2628,14 @@ namespace MatroxFrameGrabber.Mil
                 if (shifted.HasValue)
                     RecordAnomaly(shifted.Value);
             }
+
+            // The inspector's patrol. Not a judge in the same sense - it answers what is on the
+            // screen rather than when something deviated - so it sits after all six and does not
+            // feed RecordAnomaly. What it finds is logged; acting on it needs a model trained on
+            // our faults and a rule for what happens when it and a tile detector disagree, and
+            // neither exists yet (docs/adr/0002).
+            if (_patrol != null && _patrol.ShouldInspect(frameNumber, timeStampSec))
+                Patrol(grabbedBuffer, frameNumber);
 
             // Sixth judge, and the only one that answers about a stretch of time rather than a
             // frame - it reports nothing until its window has filled, which is correct rather
