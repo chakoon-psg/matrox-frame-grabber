@@ -40,6 +40,22 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
   </ItemGroup>
 
+  <!-- Without a RuntimeIdentifier the ONNX package copies every platform it ships into the
+       output: measured, iOS 56.9 MB + Android 49.5 + osx-arm64 41.2 + linux 50.8 + win-arm64
+       15.5, against the 15.4 this app can use. That is 214 MB of native libraries for operating
+       systems this WPF x64 application cannot run on, shipped to the field.
+       Pinning the RID makes NuGet copy the matching one only. SelfContained stays false, so this
+       remains a framework-dependent build that needs WindowsDesktop 10.0 on the machine. -->
+  <PropertyGroup>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <!-- Without this the output moves to bind\Release
+et10.0-windows\win-x64\, which
+         breaks the path written in CLAUDE.md and every script that launches the exe. The RID is
+         for what gets copied, not for where it lands. -->
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Matrox.MatroxImagingLibrary" Version="10.*" />
     <PackageReference Include="Matrox.MatroxImagingLibrary.WPF" Version="10.*" />
