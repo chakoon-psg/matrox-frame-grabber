@@ -116,9 +116,15 @@ namespace MatroxFrameGrabber.Mil
         // and all released at stop - so a build without src/Onnx carries five null fields.
         private IScreenInspector _inspector;
         private ScreenPatrol _patrol;
+
+        // Owned by the worker, never touched from the acquisition thread. IScreenInspector says
+        // it is not thread safe, and one inspection at a time per channel is what makes that
+        // true here - the busy flag below is the whole of that guarantee.
         private BgrLetterbox _letterbox;
         private ScreenFinding[] _findings;
-        private long _inspections;
+
+        private int _inspectBusy;                 // Interlocked: one inspection in flight
+        private long _inspections, _inspectSkipped;
         private double _inspectUsTotal, _inspectUsMax;
         private FlickerDetector _flicker;
         private FlipDetector _flip;
@@ -1928,6 +1934,8 @@ namespace MatroxFrameGrabber.Mil
             _letterbox = null;
             _findings = null;
             _inspections = 0;
+            _inspectSkipped = 0;
+            _inspectBusy = 0;
             _inspectUsTotal = 0.0;
             _inspectUsMax = 0.0;
 
@@ -2203,10 +2211,17 @@ namespace MatroxFrameGrabber.Mil
             _blackout = null;
             _washout = null;
             _freeze = null;
-            if (_inspections > 0)
-                MilErrorLog.Note($"{Name}: inspector - {_inspections} frame(s) inspected, "
-                               + $"mean {_inspectUsTotal / _inspections:F0} us / "
-                               + $"max {_inspectUsMax:F0} us (letterbox + inference + decode)");
+            if (_inspections > 0 || _inspectSkipped > 0)
+                MilErrorLog.Note($"{Name}: inspector - {_inspections} frame(s) inspected"
+                               + (_inspections > 0
+                                    ? $", mean {_inspectUsTotal / _inspections:F0} us / "
+                                    + $"max {_inspectUsMax:F0} us (crop + letterbox + inference + decode, "
+                                    + "off the acquisition thread)"
+                                    : string.Empty)
+                               + (_inspectSkipped > 0
+                                    ? $", {_inspectSkipped} skipped because the previous one was "
+                                    + "still running - the patrol rate is above what this model can keep up with"
+                                    : string.Empty));
 
             _inspector?.Dispose();
             _inspector = null;
@@ -2241,62 +2256,114 @@ namespace MatroxFrameGrabber.Mil
         }
 
         /// <summary>
-        /// Hands one frame to the screen inspector and logs what it found.
+        /// Hands one already-extracted frame to a worker, and returns immediately.
         ///
-        /// Timed end to end - the region read, the letterbox and the inference - because that is
-        /// the number the decision needs, and the published figure for this model was the
-        /// inference alone on an idle machine.
+        /// **The inference does not run here.** This is the acquisition hook, and `CLAUDE.md`
+        /// is explicit that whatever is added to it runs inside the frame budget - measured, an
+        /// inspection is about 5 ms against a period of 8.3. It survived on the hook only because
+        /// it runs one frame in 240 and the grab ring absorbs a single stall; that is luck rather
+        /// than design, and a busier machine or a slower model would turn it into lost frames.
+        /// Evidence dumps had the same shape of problem and were moved to a worker; so is this.
         ///
-        /// Runs inside the acquisition hook, like everything else here, so it is wrapped: a model
-        /// that throws must cost one frame's judgement, not the run.
+        /// **One inspection in flight per channel.** A second patrol tick arriving while the
+        /// worker is busy is dropped and counted rather than queued: the inspector is not thread
+        /// safe by contract, a queue would only delay frames that are already stale, and a count
+        /// of skips is the honest way to find out the rate is too high.
         /// </summary>
-        private void Patrol(MIL_ID grabbedBuffer, long frameNumber)
+        private void QueueInspection(FrameExtractor frames, byte[] frame, long frameNumber)
         {
             IScreenInspector inspector = _inspector;
-            if (inspector == null || _reducer == null) return;
+            if (inspector == null || frames == null || frame == null) return;
 
-            long start = Stopwatch.GetTimestamp();
-            try
+            if (Interlocked.CompareExchange(ref _inspectBusy, 1, 0) != 0)
             {
-                if (!_reducer.TryReadRoi(grabbedBuffer, _analysisRoi,
-                                         out byte[] r, out byte[] g, out byte[] b,
-                                         out int w, out int h))
-                    return;
-
-                // Built on the first frame, because the region's size is not known before one
-                // arrives - and refused afterwards if it changes, which is what the letterbox
-                // does rather than quietly mixing two geometries.
-                if (_letterbox == null || _letterbox.SourceWidth != w || _letterbox.SourceHeight != h)
-                {
-                    _letterbox = new BgrLetterbox(w, h, inspector.InputWidth, inspector.InputHeight);
-                    MilErrorLog.Note($"{Name}: inspector letterbox - {_letterbox}");
-                }
-
-                byte[] bgr = _letterbox.Fill(r, g, b, w, h);
-
-                _findings ??= new ScreenFinding[16];
-                int n = inspector.Inspect(bgr, _findings);
-
-                for (int i = 0; i < n; i++)
-                {
-                    ScreenFinding f = _findings[i];
-                    _letterbox.ToFrame(f.X, f.Y, f.Width, f.Height,
-                                       out float fx, out float fy, out float fw, out float fh);
-                    MilErrorLog.Note($"{Name}: finding frame {frameNumber} - {f.Kind} "
-                                   + $"(\"{f.Label}\") {f.Score:F3} at {fx:F0},{fy:F0} "
-                                   + $"{fw:F0}x{fh:F0} in the region");
-                }
+                Interlocked.Increment(ref _inspectSkipped);
+                return;
             }
-            catch (Exception e)
+
+            // The hold has to be taken here, on the acquisition thread, before the worker starts:
+            // taking it inside the task would race the caller's own Release below.
+            if (!frames.AddHold(frame))
             {
-                MilErrorLog.Write($"{Name}: inspector on frame {frameNumber}", e);
+                Interlocked.Exchange(ref _inspectBusy, 0);
+                return;
             }
-            finally
+
+            // The extractor is the authority on the shared array's geometry - it is what laid
+            // the three planes out. Asking the grab buffer would be wrong off this thread anyway,
+            // because by the time the worker runs the board may have reused it.
+            ChannelRoi roi = _analysisRoi;
+            int w = frames.Width, h = frames.Height;
+            if (w <= 0 || h <= 0 || frames.Bands != 3)
             {
-                double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
-                _inspections++;
-                _inspectUsTotal += us;
-                if (us > _inspectUsMax) _inspectUsMax = us;
+                frames.Release(frame);
+                Interlocked.Exchange(ref _inspectBusy, 0);
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                long start = Stopwatch.GetTimestamp();
+                try
+                {
+                    Inspect(inspector, frame, w, h, roi, frameNumber);
+                }
+                catch (Exception e)
+                {
+                    MilErrorLog.Write($"{Name}: inspector on frame {frameNumber}", e);
+                }
+                finally
+                {
+                    double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
+                    _inspections++;
+                    _inspectUsTotal += us;
+                    if (us > _inspectUsMax) _inspectUsMax = us;
+
+                    frames.Release(frame);
+                    Interlocked.Exchange(ref _inspectBusy, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        /// The inspection itself, on the worker. Crops the analysis region out of the shared
+        /// frame, letterboxes it, runs the model and logs what came back.
+        ///
+        /// Findings are logged and go no further. Acting on them needs a model trained on our
+        /// faults and a rule for what happens when the inspector and a tile detector disagree
+        /// about the same frame, and neither exists (docs/adr/0002).
+        /// </summary>
+        private void Inspect(IScreenInspector inspector, byte[] frame, int frameWidth,
+                             int frameHeight, ChannelRoi roi, long frameNumber)
+        {
+            bool full = roi.IsFullFrame;
+            int rx = full ? 0 : roi.OffsetX;
+            int ry = full ? 0 : roi.OffsetY;
+            int rw = full ? frameWidth : roi.Width;
+            int rh = full ? frameHeight : roi.Height;
+            if (rw <= 0 || rh <= 0 || rx + rw > frameWidth || ry + rh > frameHeight) return;
+
+            // Built on the first inspection, because the region is not known before one runs -
+            // and rebuilt if it changes, rather than quietly mixing two geometries.
+            if (_letterbox == null || _letterbox.SourceWidth != rw || _letterbox.SourceHeight != rh)
+            {
+                _letterbox = new BgrLetterbox(rw, rh, inspector.InputWidth, inspector.InputHeight);
+                MilErrorLog.Note($"{Name}: inspector letterbox - {_letterbox}");
+            }
+
+            byte[] bgr = _letterbox.Fill(frame, frameWidth, frameHeight, rx, ry);
+
+            _findings ??= new ScreenFinding[16];
+            int n = inspector.Inspect(bgr, _findings);
+
+            for (int i = 0; i < n; i++)
+            {
+                ScreenFinding f = _findings[i];
+                _letterbox.ToFrame(f.X, f.Y, f.Width, f.Height,
+                                   out float fx, out float fy, out float fw, out float fh);
+                MilErrorLog.Note($"{Name}: finding frame {frameNumber} - {f.Kind} "
+                               + $"(\"{f.Label}\") {f.Score:F3} at {fx:F0},{fy:F0} "
+                               + $"{fw:F0}x{fh:F0} in the region");
             }
         }
 
@@ -2505,7 +2572,13 @@ namespace MatroxFrameGrabber.Mil
             var eventsHost = events as IHostFrameSink;
             var sessionHost = session as IHostFrameSink;
 
-            if (eventsHost != null || sessionHost != null)
+            // The inspector wants the same bytes the sinks want, so it asks here rather than
+            // reading the frame again. ShouldInspect is evaluated once and its answer reused
+            // below - calling it twice would advance the patrol's clock twice.
+            bool inspectThisFrame = _patrol != null
+                                 && _patrol.ShouldInspect(frameNumber, timeStampSec);
+
+            if (eventsHost != null || sessionHost != null || inspectThisFrame)
             {
                 FrameExtractor frames = _frames;
                 // Nothing is read out while every encoder is behind: the live view comes first,
@@ -2515,7 +2588,8 @@ namespace MatroxFrameGrabber.Mil
                 EvidenceRing evidence = _evidence;
                 bool room = (eventsHost?.WantsFrame(frameNumber) ?? false)
                          || (sessionHost?.WantsFrame(frameNumber) ?? false)
-                         || evidence != null;
+                         || evidence != null
+                         || inspectThisFrame;
                 byte[] frame = room && frames != null ? frames.Extract(grabbedBuffer) : null;
 
                 eventsHost?.FeedShared(frame, frameNumber);
@@ -2524,6 +2598,12 @@ namespace MatroxFrameGrabber.Mil
                 // One memcpy, on the acquisition thread. The bytes are already in the layout the
                 // lossless encoder wants, so this is the whole cost of keeping them.
                 if (frame != null) evidence?.Add(frame, frameNumber, timeStampSec);
+
+                // Same contract as the sinks: take a hold before queueing, and the worker
+                // releases it. Done before the caller's own release below, or the array could go
+                // back to the pool while the inspector is still reading it.
+                if (frame != null && inspectThisFrame)
+                    QueueInspection(frames, frame, frameNumber);
 
                 // The caller's own hold, last: each sink added its own before queueing, so the
                 // array cannot go back to the pool while either writer is still reading it.
@@ -2628,14 +2708,6 @@ namespace MatroxFrameGrabber.Mil
                 if (shifted.HasValue)
                     RecordAnomaly(shifted.Value);
             }
-
-            // The inspector's patrol. Not a judge in the same sense - it answers what is on the
-            // screen rather than when something deviated - so it sits after all six and does not
-            // feed RecordAnomaly. What it finds is logged; acting on it needs a model trained on
-            // our faults and a rule for what happens when it and a tile detector disagree, and
-            // neither exists yet (docs/adr/0002).
-            if (_patrol != null && _patrol.ShouldInspect(frameNumber, timeStampSec))
-                Patrol(grabbedBuffer, frameNumber);
 
             // Sixth judge, and the only one that answers about a stretch of time rather than a
             // frame - it reports nothing until its window has filled, which is correct rather

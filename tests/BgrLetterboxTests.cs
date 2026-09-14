@@ -107,33 +107,87 @@ namespace MatroxFrameGrabber.Tests
 
         // ----- the fill -----
 
-        private static void Planes(int w, int h, byte r, byte g, byte b,
-                                   out byte[] pr, out byte[] pg, out byte[] pb)
+        /// <summary>
+        /// A frame in the layout FrameExtractor produces: planar gbrp, three planes of w*h in
+        /// the order G, B, R. Feeding the tests anything else would test a shape nothing sends.
+        /// </summary>
+        private static byte[] Frame(int w, int h, byte r, byte g, byte b)
         {
-            pr = new byte[w * h]; pg = new byte[w * h]; pb = new byte[w * h];
-            for (int i = 0; i < w * h; i++) { pr[i] = r; pg[i] = g; pb[i] = b; }
+            int wh = w * h;
+            var f = new byte[wh * 3];
+            for (int i = 0; i < wh; i++)
+            {
+                f[i] = g;
+                f[wh + i] = b;
+                f[2 * wh + i] = r;
+            }
+            return f;
         }
+
+        /// <summary>Sets one pixel of one plane, for the tests that check averaging.</summary>
+        private static void SetR(byte[] frame, int w, int h, int x, int y, byte value) =>
+            frame[2 * w * h + y * w + x] = value;
 
         [Fact]
         public void Bands_land_in_bgr_order()
         {
             var lb = new BgrLetterbox(8, 8, 8, 8);
-            Planes(8, 8, 10, 20, 30, out byte[] r, out byte[] g, out byte[] b);
+            byte[] frame = Frame(8, 8, 10, 20, 30);
 
-            byte[] outp = lb.Fill(r, g, b, 8, 8);
+            byte[] outp = lb.Fill(frame, 8, 8, 0, 0);
 
             Assert.Equal(30, outp[0]);   // B
             Assert.Equal(20, outp[1]);   // G
             Assert.Equal(10, outp[2]);   // R
         }
 
+        /// <summary>
+        /// The region is cropped out of the whole frame, which is what the acquisition path
+        /// hands over - one read shared by every consumer rather than a second read for this one.
+        /// </summary>
+        [Fact]
+        public void The_region_is_cropped_out_of_the_shared_frame()
+        {
+            // A 16x16 frame that is dark everywhere except an 8x8 patch at 8,8.
+            const int W = 16, H = 16;
+            byte[] frame = Frame(W, H, 0, 0, 0);
+            for (int y = 8; y < 16; y++)
+                for (int x = 8; x < 16; x++)
+                    SetR(frame, W, H, x, y, 200);
+
+            var lb = new BgrLetterbox(8, 8, 8, 8);
+            byte[] outp = lb.Fill(frame, W, H, 8, 8);
+
+            // Every output pixel comes from inside the patch, so red is 200 throughout.
+            for (int i = 0; i < 8 * 8; i++)
+                Assert.Equal(200, outp[i * 3 + 2]);
+        }
+
+        [Fact]
+        public void A_region_that_does_not_fit_the_frame_is_refused()
+        {
+            var lb = new BgrLetterbox(8, 8, 8, 8);
+            byte[] frame = Frame(16, 16, 1, 1, 1);
+
+            Assert.Throws<ArgumentException>(() => lb.Fill(frame, 16, 16, 12, 12));
+            Assert.Throws<ArgumentException>(() => lb.Fill(frame, 16, 16, -1, 0));
+        }
+
+        [Fact]
+        public void A_frame_shorter_than_three_planes_is_refused()
+        {
+            var lb = new BgrLetterbox(8, 8, 8, 8);
+
+            Assert.Throws<ArgumentException>(() => lb.Fill(new byte[8 * 8 * 2], 8, 8, 0, 0));
+        }
+
         [Fact]
         public void The_pad_is_zero_and_the_picture_is_not()
         {
             BgrLetterbox lb = Real();
-            Planes(SrcW, SrcH, 200, 200, 200, out byte[] r, out byte[] g, out byte[] b);
+            byte[] frame = Frame(SrcW, SrcH, 200, 200, 200);
 
-            byte[] outp = lb.Fill(r, g, b, SrcW, SrcH);
+            byte[] outp = lb.Fill(frame, SrcW, SrcH, 0, 0);
 
             // Row 0 is above the picture; row PadY is its first row.
             Assert.Equal(0, outp[0]);
@@ -154,34 +208,26 @@ namespace MatroxFrameGrabber.Tests
         {
             // 4x4 into 2x2: each destination pixel covers exactly four source pixels.
             var lb = new BgrLetterbox(4, 4, 2, 2);
-            var r = new byte[16];
-            var g = new byte[16];
-            var b = new byte[16];
+            byte[] frame = Frame(4, 4, 0, 0, 0);
             // Top-left quadrant: 0, 10, 20, 30 -> mean 15. Everything else 0.
-            r[0] = 0; r[1] = 10; r[4] = 20; r[5] = 30;
+            SetR(frame, 4, 4, 0, 0, 0);
+            SetR(frame, 4, 4, 1, 0, 10);
+            SetR(frame, 4, 4, 0, 1, 20);
+            SetR(frame, 4, 4, 1, 1, 30);
 
-            byte[] outp = lb.Fill(r, g, b, 4, 4);
+            byte[] outp = lb.Fill(frame, 4, 4, 0, 0);
 
             Assert.Equal(15, outp[2]);   // R of destination (0,0)
-        }
-
-        [Fact]
-        public void A_frame_of_the_wrong_size_is_refused()
-        {
-            BgrLetterbox lb = Real();
-            Planes(640, 480, 1, 1, 1, out byte[] r, out byte[] g, out byte[] b);
-
-            Assert.Throws<ArgumentException>(() => lb.Fill(r, g, b, 640, 480));
         }
 
         [Fact]
         public void The_buffer_is_reused_rather_than_allocated()
         {
             BgrLetterbox lb = Real();
-            Planes(SrcW, SrcH, 5, 5, 5, out byte[] r, out byte[] g, out byte[] b);
+            byte[] frame = Frame(SrcW, SrcH, 5, 5, 5);
 
-            byte[] first = lb.Fill(r, g, b, SrcW, SrcH);
-            byte[] second = lb.Fill(r, g, b, SrcW, SrcH);
+            byte[] first = lb.Fill(frame, SrcW, SrcH, 0, 0);
+            byte[] second = lb.Fill(frame, SrcW, SrcH, 0, 0);
 
             Assert.Same(first, second);
             Assert.Same(first, lb.Buffer);
@@ -199,9 +245,9 @@ namespace MatroxFrameGrabber.Tests
         public void Every_shape_fills_without_reading_out_of_bounds(int sw, int sh, int mw, int mh)
         {
             var lb = new BgrLetterbox(sw, sh, mw, mh);
-            Planes(sw, sh, 7, 8, 9, out byte[] r, out byte[] g, out byte[] b);
+            byte[] frame = Frame(sw, sh, 7, 8, 9);
 
-            byte[] outp = lb.Fill(r, g, b, sw, sh);
+            byte[] outp = lb.Fill(frame, sw, sh, 0, 0);
 
             Assert.Equal(mw * mh * 3, outp.Length);
             // The picture's first pixel carries the colour; that proves the fill ran.

@@ -144,23 +144,36 @@ namespace MatroxFrameGrabber.Infrastructure
         /// quietly lost, and nothing here can detect that. It has to be checked against the model
         /// once one exists for our problem.
         ///
-        /// A frame whose size does not match what this instance was built for is **refused**.
-        /// Reading it anyway is how a picture gets assembled out of two different decimations
-        /// right after somebody changes one.
+        /// **Takes the frame the acquisition path already read out**, planar gbrp, and crops the
+        /// analysis region out of it. It does not read anything from MIL: this repository measured
+        /// that a second read of the same frame makes *both* reads four times slower, because they
+        /// contend with the acquisition DMA, so `FrameExtractor` reads once and everything that
+        /// wants bytes shares that one array under a hold count.
+        ///
+        /// A region that does not fit the frame is **refused**. Reading it anyway is how a picture
+        /// gets assembled out of two different decimations right after somebody changes one.
         /// </summary>
-        public byte[] Fill(byte[] r, byte[] g, byte[] b, int width, int height)
+        public byte[] Fill(byte[] planar, int frameWidth, int frameHeight, int roiX, int roiY)
         {
-            if (r == null) throw new ArgumentNullException(nameof(r));
-            if (g == null) throw new ArgumentNullException(nameof(g));
-            if (b == null) throw new ArgumentNullException(nameof(b));
-            if (width != _srcW || height != _srcH)
+            if (planar == null) throw new ArgumentNullException(nameof(planar));
+            if (frameWidth <= 0 || frameHeight <= 0)
+                throw new ArgumentOutOfRangeException(nameof(frameWidth));
+            if (roiX < 0 || roiY < 0 ||
+                roiX + _srcW > frameWidth || roiY + _srcH > frameHeight)
                 throw new ArgumentException(
-                    $"frame is {width}x{height} but this letterbox was built for {_srcW}x{_srcH}",
-                    nameof(width));
+                    $"region {_srcW}x{_srcH} at {roiX},{roiY} does not fit in {frameWidth}x{frameHeight}",
+                    nameof(roiX));
 
-            int need = width * height;
-            if (r.Length < need || g.Length < need || b.Length < need)
-                throw new ArgumentException("a band plane is shorter than the frame", nameof(r));
+            int planeLength = frameWidth * frameHeight;
+            if (planar.Length < planeLength * 3)
+                throw new ArgumentException(
+                    $"frame is {planar.Length} bytes; three {frameWidth}x{frameHeight} planes need "
+                  + $"{planeLength * 3}", nameof(planar));
+
+            // gbrp, which is the order FrameExtractor already produces and ffmpeg already takes.
+            // Reading it here rather than asking a caller to slice it into three arrays is the
+            // whole point: the frame has been read out of MIL exactly once, for every consumer.
+            int offG = 0, offB = planeLength, offR = planeLength * 2;
 
             // The pad is written every call rather than once, because a model that reads it is
             // entitled to a defined value and a reused buffer would otherwise carry the previous
@@ -182,13 +195,15 @@ namespace MatroxFrameGrabber.Infrastructure
                     int sumR = 0, sumG = 0, sumB = 0;
                     for (int sy = sy0; sy < sy1; sy++)
                     {
-                        int row = sy * width;
+                        // Region coordinates into frame coordinates, once per row rather than
+                        // per pixel.
+                        int row = (roiY + sy) * frameWidth + roiX;
                         for (int sx = sx0; sx < sx1; sx++)
                         {
                             int i = row + sx;
-                            sumR += r[i];
-                            sumG += g[i];
-                            sumB += b[i];
+                            sumG += planar[offG + i];
+                            sumB += planar[offB + i];
+                            sumR += planar[offR + i];
                         }
                     }
 
