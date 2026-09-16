@@ -88,11 +88,21 @@ namespace MatroxFrameGrabber.Infrastructure
     /// <summary>What an inspector is built with. Per camera, like every other threshold here.</summary>
     public sealed class ScreenInspectorOptions
     {
-        /// <summary>Confidence a finding has to reach, 0 to 1.</summary>
-        public float ScoreThreshold { get; set; } = 0.3f;
+        /// <summary>
+        /// Confidence a finding has to reach, 0 to 1.
+        ///
+        /// **0.18 is the value the model was actually run at**, from `cs\Program.cs`. This used to
+        /// be 0.3, which was not measured anywhere - it was a round number that arrived with the
+        /// contract. The gap is not academic: the harness self-test scored 0.255 on a green block
+        /// and was reported as "did not respond", when at the ported threshold it was a detection.
+        /// </summary>
+        public float ScoreThreshold { get; set; } = 0.18f;
 
-        /// <summary>How much two findings may overlap before the weaker is dropped.</summary>
-        public float IouThreshold { get; set; } = 0.5f;
+        /// <summary>
+        /// How much two findings may overlap before the weaker is dropped. Also from
+        /// `cs\Program.cs` (`nmsIou = 0.15f`), for the same reason as above.
+        /// </summary>
+        public float IouThreshold { get; set; } = 0.15f;
 
         /// <summary>Most findings one frame may produce.</summary>
         public int MaxFindings { get; set; } = 16;

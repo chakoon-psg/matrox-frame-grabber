@@ -44,11 +44,28 @@ namespace MatroxFrameGrabber.Onnx
         // width, whether [3] is y or x. Settling it needs an image with a known ground-truth box,
         // which needs a model trained on our problem. It changes where a box is drawn; it does
         // not change what running the model costs, which is what this integration is measuring.
+        // The output layout, measured rather than assumed - 2026-09-16, with
+        // `OnnxInspector peek` over green rectangles of known size on a real frame.
+        //
+        // **The order WITHIN each pair was wrong until then, and it was wrong in a way that looks
+        // right.** A box still appeared, on roughly the right thing, so nothing failed; it was
+        // simply transposed. `docs/measurements/2026-09-14` had already recorded the pair order as
+        // unverified - this is that note being closed.
+        //
+        // | green rectangle | peak cell | ch1  | ch2  | as [w,h] | as [h,w] |
+        // |---|---|---|---|---|---|
+        // | 120x80  | on its centre | 10.392 | 7.419 | **133x95** | 95x133 |
+        // | 70x190  | col exact     |  5.354 | 6.163 | **68x79**  | 79x68  |
+        //
+        // Channel 1 followed the WIDTH both times (133 against 120, 68 against 70); reading it as
+        // the height made the tall rectangle come out wider than it is. The offsets go the same
+        // way: taking ch3 as offX put the 120x80 box at 442,296 against a true 450,300, where
+        // taking it as offY put it at 459,279.
         private const int ChannelHeat = 0;
-        private const int ChannelSizeH = 1;
-        private const int ChannelSizeW = 2;
-        private const int ChannelOffsetY = 3;
-        private const int ChannelOffsetX = 4;
+        private const int ChannelSizeW = 1;
+        private const int ChannelSizeH = 2;
+        private const int ChannelOffsetX = 3;
+        private const int ChannelOffsetY = 4;
         private const int ChannelsExpected = 5;
 
         private readonly InferenceSession _session;
