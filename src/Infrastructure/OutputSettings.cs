@@ -238,9 +238,50 @@ namespace MatroxFrameGrabber.Infrastructure
             }
         }
 
+        /// <summary>
+        /// Whether the inspector also looks at the WHOLE screen and moves each camera's analysis
+        /// region to what it finds. Off by default.
+        ///
+        /// **A different job from <see cref="Inspect"/>, done by the same model.** `Inspect` hands
+        /// it the region and asks what is wrong inside it; this hands it the screen and asks where
+        /// the region should be - which is what the rig needs when the equipment has been moved.
+        /// The second one is why the model was brought in: on its own the region only ever moves
+        /// when somebody drags it.
+        ///
+        /// App-wide, like `Inspect`, and for the same reason: a rig where camera 1 follows the
+        /// panel and camera 2 does not produces a report nobody can read.
+        /// </summary>
+        public bool LocateRoi
+        {
+            get => _locateRoi;
+            set { if (_locateRoi != value) { _locateRoi = value; RaiseChanged(nameof(LocateRoi)); Save(); } }
+        }
+
+        /// <summary>
+        /// How often each camera looks at the whole screen, in seconds. 0 switches it off.
+        ///
+        /// The default staggers three cameras one stats tick apart, so the looks do not land on
+        /// the same tick - the read happens on the UI thread and three 2.37 MB reads at once is
+        /// the one part of this a person would feel.
+        ///
+        /// It is a slow loop on purpose. Equipment is moved by hand, not at 120 fps, and measured
+        /// cost is about 8.5 ms a look beside a grab - 1.7% of one core at this rate.
+        /// </summary>
+        public double LocateSeconds
+        {
+            get => _locateSeconds;
+            set
+            {
+                double v = double.IsNaN(value) || value < 0.0 ? 0.0 : (value > 3600.0 ? 3600.0 : value);
+                if (_locateSeconds != v) { _locateSeconds = v; RaiseChanged(nameof(LocateSeconds)); Save(); }
+            }
+        }
+
         private bool _inspect;
         private double _inspectSeconds = 2.0;
         private string _inspectModelPath = string.Empty;
+        private bool _locateRoi;
+        private double _locateSeconds = 1.5;
 
         public bool KeepStills
         {
@@ -625,6 +666,8 @@ namespace MatroxFrameGrabber.Infrastructure
             public bool? Inspect { get; set; }
             public double? InspectSeconds { get; set; }
             public string InspectModelPath { get; set; }
+            public bool? LocateRoi { get; set; }
+            public double? LocateSeconds { get; set; }
             public bool? AutoCalibrate { get; set; }
             public double? AutoCalibrateMinMinutes { get; set; }
             public double? AutoCalibrateMaxChange { get; set; }
@@ -681,6 +724,8 @@ namespace MatroxFrameGrabber.Infrastructure
                         s._inspect = dto.Inspect ?? false;
                         s._inspectSeconds = dto.InspectSeconds ?? 2.0;
                         s._inspectModelPath = dto.InspectModelPath ?? string.Empty;
+                        s._locateRoi = dto.LocateRoi ?? false;
+                        s._locateSeconds = dto.LocateSeconds ?? 1.5;
                         s._autoCalibrate = dto.AutoCalibrate ?? false;
                         s._autoCalibrateMinMinutes = dto.AutoCalibrateMinMinutes ?? 30.0;
                         s._autoCalibrateMaxChange = dto.AutoCalibrateMaxChange ?? 2.0;
@@ -851,6 +896,8 @@ namespace MatroxFrameGrabber.Infrastructure
                     Inspect = _inspect,
                     InspectSeconds = _inspectSeconds,
                     InspectModelPath = _inspectModelPath,
+                    LocateRoi = _locateRoi,
+                    LocateSeconds = _locateSeconds,
                     AutoCalibrate = _autoCalibrate,
                     AutoCalibrateMinMinutes = _autoCalibrateMinMinutes,
                     AutoCalibrateMaxChange = _autoCalibrateMaxChange,

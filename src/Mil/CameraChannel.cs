@@ -126,6 +126,50 @@ namespace MatroxFrameGrabber.Mil
         private int _inspectBusy;                 // Interlocked: one inspection in flight
         private long _inspections, _inspectSkipped;
         private double _inspectUsTotal, _inspectUsMax;
+
+        // The locator: the SAME inspector, shown the whole screen instead of the region, so it
+        // can say where the region should be. It shares _inspectBusy with the patrol above -
+        // IScreenInspector is not thread safe by contract, and one flag is the whole of that
+        // guarantee whichever path got there first.
+        //
+        // It runs on the stats tick, not on the acquisition hook and not on the shared frame
+        // pool: the display buffer is already a full frame in paged memory, tracking a panel is
+        // not a 120 fps question, and this way the feature cannot cost a frame. What the tick
+        // does is the MIL read; the letterbox and the inference are on a worker.
+        private RoiLocator _locator;
+        private BgrLetterbox _locatorBox;
+        private ScreenFinding[] _locatorFindings;
+        private byte[] _locatorPlanar, _locatorR, _locatorG, _locatorB;
+        private readonly Stopwatch _locatorClock = new Stopwatch();
+        private long _locatorNextMs, _locatorSkipped, _locatorRuns;
+        private double _locatorUsTotal, _locatorUsMax;
+
+        // What the inspector last saw, in acquired-frame pixels, for the overlay to draw. Set by
+        // whichever path ran - the patrol looking inside the region, or the locator looking at the
+        // whole screen - and cleared the moment a look comes back with nothing, so a red rectangle
+        // on screen always means "being found right now" rather than "was found at some point".
+        // Writes the first look's model input to a PNG, once per run. The app and the harness
+        // disagreed about the same frame - the harness scored 0.244 on a still the app's own
+        // StillRing had written, while the app's locator reported nothing in 195 looks - and no
+        // amount of reading either path settles which pixels the model is actually being handed.
+        private bool _locatorInputDumped;
+
+        private ChannelRoi _lastFinding;
+        private float _lastFindingScore;
+        private volatile bool _hasFinding;
+
+        // The worker decides; the tick applies. SetAnalysisRoi raises property changes that
+        // bindings are on, and the tick is already the thread those belong to - so the decision
+        // waits here for at most one tick rather than marshalling.
+        private ChannelRoi _locatorPending;
+        private bool _locatorHasPending, _locatorPendingGrew;
+        private float _locatorPendingScore;
+
+        // Whether the display buffer holds a frame from THIS run yet. Without it the first look
+        // of a run reads the previous run's last frame - which is the failure this feature would
+        // wear best, because a region proposed from the scene before the equipment was moved
+        // looks entirely plausible.
+        private long _dispCopies;
         private FlickerDetector _flicker;
         private FlipDetector _flip;
 
@@ -1931,6 +1975,30 @@ namespace MatroxFrameGrabber.Mil
             if (_patrol != null)
                 MilErrorLog.Note($"{Name}: inspector patrol every {_patrol.EverySeconds:0.##} s");
 
+            // The locator needs the same two things the patrol does - a real inspector and a
+            // non-zero interval - and one more: it moves the analysis region, so it is off unless
+            // somebody turned it on.
+            double locateEvery = Output?.LocateSeconds ?? 0.0;
+            _locator = (Output?.LocateRoi ?? false) && _inspector.InputWidth > 0 && locateEvery > 0.0
+                ? new RoiLocator()
+                : null;
+            _locatorBox = null;
+            _locatorFindings = null;
+            _locatorSkipped = 0;
+            _locatorUsTotal = _locatorUsMax = 0.0;
+            _locatorHasPending = false;
+            _locatorInputDumped = false;
+            _locatorRuns = 0;
+            _hasFinding = false;
+            _dispCopies = 0;
+            _locatorClock.Restart();
+            // Staggered by channel so three cameras do not read 2.37 MB on the same tick. The
+            // read is on the UI thread; that is the one part of this a person could feel.
+            _locatorNextMs = _index * 500L;
+            if (_locator != null)
+                MilErrorLog.Note($"{Name}: ROI locator on - looks at the whole frame every "
+                               + $"{locateEvery:0.##} s; {_locator}");
+
             _letterbox = null;
             _findings = null;
             _inspections = 0;
@@ -2223,6 +2291,36 @@ namespace MatroxFrameGrabber.Mil
                                     + "still running - the patrol rate is above what this model can keep up with"
                                     : string.Empty));
 
+            if (_locator != null)
+            {
+                // Every outcome, not just the moves. A locator that looked 200 times and never
+                // found anything and one that never looked at all are the same silence otherwise,
+                // and with the model we have today the first is what actually happens.
+                MilErrorLog.Note(
+                    $"{Name}: {_locator}"
+                  + (_locator.Looks > 0
+                        ? $", mean {_locatorUsTotal / _locator.Looks:F0} us / max {_locatorUsMax:F0} us "
+                        + "(letterbox + inference + decode, off the acquisition thread)"
+                        : string.Empty)
+                  + (_locatorSkipped > 0
+                        ? $", {_locatorSkipped} look(s) skipped because an inspection was already running"
+                        : string.Empty)
+                  + (_locator.Seen == 0 && _locator.Looks > 0
+                        ? " - NOTHING was ever found, so the region never moved. That is the "
+                        + "hold interlock doing its job."
+                        : string.Empty)
+                  + (_locator.Seen > 0 && _locator.Moves == 0 && _locator.FrozenLooks > 0
+                        ? " - the target WAS found, and the region did not move because a fault "
+                        + "was running on this channel for those looks. Check what is firing "
+                        + "before reading this as the locator not working."
+                        : string.Empty));
+            }
+            _hasFinding = false;
+            _locator = null;
+            _locatorBox = null;
+            _locatorFindings = null;
+            _locatorClock.Stop();
+
             _inspector?.Dispose();
             _inspector = null;
             _patrol = null;
@@ -2356,14 +2454,341 @@ namespace MatroxFrameGrabber.Mil
             _findings ??= new ScreenFinding[16];
             int n = inspector.Inspect(bgr, _findings);
 
+            // Model space -> region space -> FRAME space. The last step is the one that was
+            // missing: `ScreenFinding` says in its own documentation that its coordinates are
+            // acquired-frame pixels, and this path was leaving them relative to the region. It
+            // never showed, because the only consumer was a log line that said "in the region".
+            // The overlay is a second consumer, and it would have drawn the box in the wrong place.
             for (int i = 0; i < n; i++)
             {
                 ScreenFinding f = _findings[i];
                 _letterbox.ToFrame(f.X, f.Y, f.Width, f.Height,
                                    out float fx, out float fy, out float fw, out float fh);
+                _findings[i] = new ScreenFinding(f.Kind, f.Label, f.Score, fx + rx, fy + ry, fw, fh);
+
                 MilErrorLog.Note($"{Name}: finding frame {frameNumber} - {f.Kind} "
-                               + $"(\"{f.Label}\") {f.Score:F3} at {fx:F0},{fy:F0} "
-                               + $"{fw:F0}x{fh:F0} in the region");
+                               + $"(\"{f.Label}\") {f.Score:F3} at {fx + rx:F0},{fy + ry:F0} "
+                               + $"{fw:F0}x{fh:F0} in the frame");
+            }
+
+            // **The overlay is NOT fed from here.** This path searches inside the region, so its
+            // answer is inside the region by construction and says nothing about where the target
+            // is. Publishing from both paths put two different questions in one field: the patrol
+            // came back empty every two seconds and wiped whatever the locator had just found, and
+            // the rectangle on screen blinked for no reason a person could see. The locator owns
+            // that field.
+        }
+
+        /// <summary>
+        /// One turn of the ROI locator, on the stats tick: apply what the last look decided, then
+        /// maybe take another look.
+        ///
+        /// **Applying first, on this thread, is the point of the split.** The worker cannot call
+        /// <see cref="SetAnalysisRoi"/> - it raises property changes that bindings are on - so it
+        /// leaves the decision here and the next tick applies it. At 500 ms that is not a latency
+        /// worth marshalling for, and it keeps the region changing on exactly the thread the
+        /// operator's own drag changes it on.
+        ///
+        /// **Nothing happens until this run has written the display buffer.** A stopped grab
+        /// leaves the previous run's last frame sitting there - `SaveSnapshotToOutput` is gated on
+        /// the same fact and learned it the hard way - and a region proposed from the scene before
+        /// the equipment was moved is the wrong answer wearing the right face.
+        /// </summary>
+        private void LocatorTick()
+        {
+            RoiLocator locator = _locator;
+            if (locator == null) return;
+
+            if (_locatorHasPending)
+            {
+                _locatorHasPending = false;
+                ChannelRoi before = _analysisRoi;
+
+                // Not "by operator": a person's rectangle resets what the locator was confirming,
+                // and the locator must not reset itself for its own move.
+                SetAnalysisRoi(_locatorPending, byOperator: false);
+
+                MilErrorLog.Note($"{Name}: locator moved the region {before} -> {_analysisRoi} "
+                               + $"(score {_locatorPendingScore:F2})");
+                if (_locatorPendingGrew)
+                    MilErrorLog.Note($"{Name}: locator changed the region SIZE - the thresholds "
+                                   + "were measured over the old one and no longer describe this "
+                                   + "channel. Re-calibrate, or put the size back.");
+            }
+
+            IScreenInspector inspector = _inspector;
+            if (inspector == null || inspector.InputWidth <= 0) return;
+            if (!_isGrabbing || _dispBufId == MIL.M_NULL) return;
+            if (Volatile.Read(ref _dispCopies) <= 0) return;
+            if (_locatorClock.ElapsedMilliseconds < _locatorNextMs) return;
+
+            double every = Output?.LocateSeconds ?? 0.0;
+            if (every <= 0.0) return;
+
+            // Shared with the patrol: one inspection at a time per channel, whichever asked first.
+            if (Interlocked.CompareExchange(ref _inspectBusy, 1, 0) != 0)
+            {
+                _locatorSkipped++;
+                return;
+            }
+
+            _locatorNextMs = _locatorClock.ElapsedMilliseconds + (long)(every * 1000.0);
+
+            if (!ReadDisplayForLocator(out int w, out int h))
+            {
+                Interlocked.Exchange(ref _inspectBusy, 0);
+                return;
+            }
+
+            // Read here, judged here, inferred on a worker. The first two are cheap; the inference
+            // is about 8.5 ms beside a grab and would be felt as a stutter on this thread.
+            bool faultRunning = AnyFaultRunning();
+            ChannelRoi current = _analysisRoi;
+
+            Task.Run(() =>
+            {
+                long start = Stopwatch.GetTimestamp();
+                try
+                {
+                    if (_locatorBox == null || _locatorBox.SourceWidth != w || _locatorBox.SourceHeight != h)
+                    {
+                        _locatorBox = new BgrLetterbox(w, h, inspector.InputWidth, inspector.InputHeight);
+                        MilErrorLog.Note($"{Name}: locator letterbox - {_locatorBox}");
+                    }
+                    _locatorFindings ??= new ScreenFinding[16];
+
+                    byte[] bgr = _locatorBox.Fill(_locatorPlanar, w, h, 0, 0);
+
+                    if (!_locatorInputDumped)
+                    {
+                        _locatorInputDumped = true;
+                        DumpLocatorInput(bgr, inspector.InputWidth, inspector.InputHeight);
+                    }
+
+                    int n = inspector.Inspect(bgr, _locatorFindings);
+
+
+                    // Model space back to frame space before anything judges the numbers. The
+                    // letterbox was built for the whole frame, so what comes out is already in the
+                    // space the analysis region lives in - no offset to add. That is the reason
+                    // the locator is shown the whole frame rather than a crop.
+                    for (int i = 0; i < n; i++)
+                    {
+                        ScreenFinding f = _locatorFindings[i];
+                        _locatorBox.ToFrame(f.X, f.Y, f.Width, f.Height,
+                                            out float fx, out float fy, out float fw, out float fh);
+                        _locatorFindings[i] = new ScreenFinding(f.Kind, f.Label, f.Score, fx, fy, fw, fh);
+                    }
+
+                    PublishFinding(_locatorFindings, n);
+
+                    RoiLocatorDecision d = locator.Look(_locatorFindings, n, current, w, h, faultRunning);
+                    if (d.Moved)
+                    {
+                        _locatorPending = d.Roi;
+                        _locatorPendingScore = d.Score;
+                        _locatorPendingGrew = d.SizeChanged;
+                        _locatorHasPending = true;
+                    }
+                    else if (d.Outcome == RoiLocatorOutcome.Confirming)
+                    {
+                        MilErrorLog.Note($"{Name}: locator is confirming a different box "
+                                       + $"(score {d.Score:F2}, overlap {d.Iou:F2}, "
+                                       + $"look {d.Streak} of {locator.DwellLooks})");
+                    }
+                }
+                catch (Exception e)
+                {
+                    MilErrorLog.Write($"{Name}: ROI locator", e);
+                }
+                finally
+                {
+                    double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
+                    _locatorUsTotal += us;
+                    if (us > _locatorUsMax) _locatorUsMax = us;
+                    Interlocked.Exchange(ref _inspectBusy, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        /// The box the inspector last reported, in acquired-frame pixels - the same space the
+        /// analysis region is in, so the overlay needs no conversion.
+        ///
+        /// Returns false when the last look found nothing. **That is the common case here**: the
+        /// model in hand is a green-object detector and these panels are not green, so an overlay
+        /// that kept showing the last box would be showing something that is no longer true.
+        /// </summary>
+        public bool TryGetLastFinding(out ChannelRoi roi, out float score)
+        {
+            if (_hasFinding)
+            {
+                roi = _lastFinding;
+                score = _lastFindingScore;
+                return true;
+            }
+            roi = ChannelRoi.FullFrame;
+            score = 0f;
+            return false;
+        }
+
+        /// <summary>
+        /// Records the best of what a look returned, or clears it when a look returned nothing.
+        ///
+        /// Called from the inspection workers. The fields are written here and read on the tick;
+        /// `_hasFinding` is volatile and written last, so the tick never sees the flag before the
+        /// rectangle it refers to.
+        /// </summary>
+        /// <remarks>
+        /// Called from the locator worker only - see the note in <c>Inspect</c> for why the patrol
+        /// must not also write here.
+        /// </remarks>
+        private void PublishFinding(ScreenFinding[] findings, int count)
+        {
+            if (findings == null || count <= 0)
+            {
+                _hasFinding = false;
+                return;
+            }
+
+            ScreenFinding best = findings[0];
+            for (int i = 1; i < count && i < findings.Length; i++)
+                if (findings[i].Score > best.Score) best = findings[i];
+
+            if (best.Width <= 0f || best.Height <= 0f)
+            {
+                _hasFinding = false;
+                return;
+            }
+
+            _lastFinding = new ChannelRoi((int)Math.Round(best.X), (int)Math.Round(best.Y),
+                                          (int)Math.Round(best.Width), (int)Math.Round(best.Height));
+            _lastFindingScore = best.Score;
+            _hasFinding = true;
+        }
+
+        /// <summary>
+        /// Whether any detector on this channel is inside a fault right now.
+        ///
+        /// The locator asks before it moves anything. A region that follows a box while the panel
+        /// is faulty can walk the detectors off the very thing they are judging, and nothing else
+        /// in the app would say so - the lane goes quiet, and quiet reads as healthy.
+        /// </summary>
+        private bool AnyFaultRunning() =>
+            (_detector?.InEvent ?? false)
+         || (_blackout?.InBlackout ?? false)
+         || (_washout?.InWashout ?? false)
+         || (_freeze?.InFreeze ?? false)
+         || (_colorShift?.InColorShift ?? false)
+         || (_flicker?.InFlicker ?? false)
+         || (_flip?.InFlip ?? false);
+
+        /// <summary>
+        /// Reads the whole display buffer into the planar gbrp layout <see cref="BgrLetterbox"/>
+        /// takes. On the tick, because everything else that touches this buffer is on this thread.
+        ///
+        /// **The band order is the trap.** `MbufChildColor` indexes 0/1/2 as R/G/B and the
+        /// letterbox reads planes as G/B/R - the layout `FrameExtractor` produces, because it is
+        /// what ffmpeg takes. Getting it wrong raises nothing and logs nothing: the model simply
+        /// stops finding anything, which is indistinguishable from the model we have today.
+        /// </summary>
+        private bool ReadDisplayForLocator(out int width, out int height)
+        {
+            width = height = 0;
+            MIL_ID red = MIL.M_NULL, green = MIL.M_NULL, blue = MIL.M_NULL;
+            try
+            {
+                int w = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                int h = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+                MIL_INT bands = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
+
+                // The same refusal BrightnessMeter makes: raw bytes out of a deeper buffer are the
+                // high byte only, and a picture pinned near white is worse than no picture.
+                if (w <= 0 || h <= 0 || bands < 3
+                    || MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BIT, MIL.M_NULL) > 8)
+                    return false;
+
+                int plane = w * h;
+                if (_locatorPlanar == null || _locatorPlanar.Length != plane * 3)
+                {
+                    _locatorPlanar = new byte[plane * 3];
+                    _locatorR = new byte[plane];
+                    _locatorG = new byte[plane];
+                    _locatorB = new byte[plane];
+                }
+
+                MIL.MbufChildColor(_dispBufId, 0, ref red);
+                MIL.MbufChildColor(_dispBufId, 1, ref green);
+                MIL.MbufChildColor(_dispBufId, 2, ref blue);
+
+                // MbufGet2d, not MbufGet: these buffers carry row padding, and a padded read into
+                // a tight array shears the rows.
+                MIL.MbufGet2d(red, 0, 0, w, h, _locatorR);
+                MIL.MbufGet2d(green, 0, 0, w, h, _locatorG);
+                MIL.MbufGet2d(blue, 0, 0, w, h, _locatorB);
+
+                Buffer.BlockCopy(_locatorG, 0, _locatorPlanar, 0, plane);
+                Buffer.BlockCopy(_locatorB, 0, _locatorPlanar, plane, plane);
+                Buffer.BlockCopy(_locatorR, 0, _locatorPlanar, plane * 2, plane);
+
+                width = w;
+                height = h;
+                return true;
+            }
+            catch (MILException)
+            {
+                // A buffer can be freed underneath the tick when a camera is reloaded. Losing one
+                // look costs nothing, and the run summary says how many were lost.
+                return false;
+            }
+            finally
+            {
+                if (blue != MIL.M_NULL) MIL.MbufFree(blue);
+                if (green != MIL.M_NULL) MIL.MbufFree(green);
+                if (red != MIL.M_NULL) MIL.MbufFree(red);
+            }
+        }
+
+        /// <summary>
+        /// Writes exactly what the model was handed - the letterboxed, interleaved BGR block -
+        /// so it can be opened and compared against what the harness feeds from a still.
+        ///
+        /// Once per run, on the worker, and failures are swallowed: this is instrumentation, and
+        /// instrumentation that can stop a grab is worse than no instrumentation.
+        /// </summary>
+        private void DumpLocatorInput(byte[] bgr, int width, int height)
+        {
+            try
+            {
+                if (bgr == null || width <= 0 || height <= 0) return;
+
+                // BGR to BGRA, which is the smallest format WPF will encode without a palette.
+                var bgra = new byte[width * height * 4];
+                for (int i = 0, o = 0; i < width * height; i++, o += 4)
+                {
+                    bgra[o] = bgr[i * 3];
+                    bgra[o + 1] = bgr[i * 3 + 1];
+                    bgra[o + 2] = bgr[i * 3 + 2];
+                    bgra[o + 3] = 255;
+                }
+
+                var source = System.Windows.Media.Imaging.BitmapSource.Create(
+                    width, height, 96, 96, System.Windows.Media.PixelFormats.Bgra32,
+                    null, bgra, width * 4);
+
+                string folder = Output?.OutputFolder ?? AppContext.BaseDirectory;
+                string path = System.IO.Path.Combine(folder, $"locator-input-{SafeName()}.png");
+
+                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(source));
+                using (var fs = System.IO.File.Create(path))
+                    encoder.Save(fs);
+
+                MilErrorLog.Note($"{Name}: locator input written - {width}x{height} -> {path}");
+            }
+            catch (Exception e)
+            {
+                MilErrorLog.Write($"{Name}: locator input dump", e);
             }
         }
 
@@ -2392,6 +2817,9 @@ namespace MatroxFrameGrabber.Mil
                 // the acquired, already-decimated frame — so no conversion belongs here.
                 if (BrightnessEnabled)
                     _brightness.Sample(_dispBufId, _analysisRoi);
+
+                // The ROI locator rides the same tick and the same buffer, for the same reason.
+                LocatorTick();
 
                 // Frames the board dropped because the host could not take them fast enough.
                 // Read on every tick, not only while RAW-recording: this is the acceptance
@@ -2557,7 +2985,10 @@ namespace MatroxFrameGrabber.Mil
                     _lastDispCopyMs = now;
             }
             if (copyToDisplay)
+            {
                 MIL.MbufCopy(grabbedBuffer, displayBuffer);
+                _dispCopies++;   // read by the locator to know the buffer is this run's
+            }
 
             // ---- Event tier: every frame, so a window can be cut out of it later ----
             IVideoSink events = _eventSink;
@@ -4483,11 +4914,20 @@ namespace MatroxFrameGrabber.Mil
             SetAnalysisRoi(new ChannelRoi(Math.Max(0, offsetX), Math.Max(0, offsetY), width, height));
         }
 
-        private void SetAnalysisRoi(ChannelRoi requested)
+        /// <param name="byOperator">
+        /// Whether a person asked for this. When they did, the locator forgets what it was
+        /// confirming: **a rectangle somebody drew is a new starting point, not a proposal to be
+        /// argued with**, and a streak collected against the old one would otherwise move the
+        /// region back out from under them a few looks later.
+        /// </param>
+        private void SetAnalysisRoi(ChannelRoi requested, bool byOperator = true)
         {
             ChannelRoi snapped = requested;
             if (!requested.IsFullFrame && TryGetFrameSize(out int fw, out int fh))
                 snapped = requested.Snap(fw, fh);
+
+            if (byOperator)
+                _locator?.Reset();
 
             _analysisRoi = snapped;
             Output?.SetRoi(_index, snapped);
