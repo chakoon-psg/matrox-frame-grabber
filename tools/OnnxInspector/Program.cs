@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using MatroxFrameGrabber.Infrastructure;
 
 namespace OnnxInspectorHarness
 {
@@ -23,6 +24,14 @@ namespace OnnxInspectorHarness
     ///
     ///   OnnxInspector bench  &lt;model.onnx&gt; [--threads N] [--iterations N] [--warmup N]
     ///       inference latency. Run it beside a grab to get the number that matters.
+    ///
+    ///   OnnxInspector locator &lt;model.onnx&gt; [--threads N] [--iterations N] [--warmup N]
+    ///                         [--frame WxH] [--region WxH]
+    ///       end to end: letterbox out of a planar frame, run the graph, decode - which is
+    ///       exactly what `CameraChannel.Inspect` does. `bench` answers how fast the graph is;
+    ///       this answers how many times a second a channel could be inspected, which is the
+    ///       question a patrol rate is set from. With no geometry given it walks the three the
+    ///       app can actually hand it (ROI crop, full frame at decimation 2, full frame at 1).
     /// </summary>
     internal static class Program
     {
@@ -33,6 +42,10 @@ namespace OnnxInspectorHarness
                 Console.Error.WriteLine(
                     "usage: OnnxInspector probe <model.onnx>\n" +
                     "       OnnxInspector bench <model.onnx> [--threads N] [--iterations N] [--warmup N]\n" +
+                    "       OnnxInspector locator <model.onnx> [--threads N] [--iterations N] [--warmup N]\n" +
+                    "                             [--frame WxH] [--region WxH]\n" +
+                    "       OnnxInspector locate <model.onnx> --image <frame.png> [--roi x,y,w,h]\n" +
+                    "                            [--simulate x,y,w,h] [--looks N] [--out out.png]\n" +
                     "       OnnxInspector selftest <model.onnx>");
                 return 1;
             }
@@ -49,6 +62,9 @@ namespace OnnxInspectorHarness
             {
                 case "probe": return Probe(model);
                 case "bench": return Bench(model, args);
+                case "locator": return Locator(model, args);
+                case "locate": return LocateDemo.Run(model, args);
+                case "peek": return PeekDemo.Run(model, args);
                 case "selftest": return SelfTest(model);
                 default:
                     Console.Error.WriteLine($"unknown verb: {verb}");
@@ -150,6 +166,172 @@ namespace OnnxInspectorHarness
             return 0;
         }
 
+
+        /// <summary>
+        /// Times one whole inspection - letterbox, graph, decode - for the geometries the app
+        /// can hand it, and prints how many of those fit in a second.
+        ///
+        /// **Why this is not `bench`.** `bench` feeds the graph a tensor that is already the right
+        /// shape, so it measures the graph. What decides a patrol rate is the whole call:
+        /// `CameraChannel.Inspect` fills the letterbox out of the shared planar frame first, and
+        /// that cost depends on which geometry the region has. Measured 2026-09-16, the letterbox
+        /// is 0.4 ms for an ROI crop and 1.5 ms for a full frame beside a grab - small beside the
+        /// inference, but not nothing, and the ratio is not the ratio of the pixel counts (12.5x
+        /// of them, 2.9x of the time: the crop is an upscale, so its loop reads one source pixel
+        /// per destination pixel and pays loop overhead instead of bandwidth).
+        ///
+        /// **Run it beside a grab.** Idle numbers are about 2.4x optimistic here - the same trap
+        /// the published 2.77 ms was. And check what the app reports missing afterwards: on
+        /// 2026-09-16 a control run with this harness switched off lost *more* frames than the
+        /// run beside it, which is how "the inspector does not eat frames" was established rather
+        /// than assumed.
+        ///
+        /// The frame is synthetic. A graph's timing does not depend on what is in the tensor, and
+        /// a picture would invite reading the findings as if they meant something.
+        /// </summary>
+        private static int Locator(string model, string[] args)
+        {
+            int threads = IntArg(args, "--threads", 0);
+            int iterations = IntArg(args, "--iterations", 200);
+            int warmup = IntArg(args, "--warmup", 20);
+
+            using IScreenInspector inspector =
+                new MatroxFrameGrabber.Onnx.OnnxScreenInspector(model, 0.3f, 0.5f, 16, threads);
+
+            Console.WriteLine($"inspector : {inspector.Describe}");
+            Console.WriteLine($"iterations: {iterations} (warmup {warmup})");
+            Console.WriteLine();
+
+            bool haveFrame = TrySize(args, "--frame", out int fw, out int fh);
+            bool haveRegion = TrySize(args, "--region", out int rw, out int rh);
+
+            if (haveFrame || haveRegion)
+            {
+                if (!haveFrame) { fw = rw; fh = rh; }
+                if (!haveRegion) { rw = fw; rh = fh; }
+                if (rw > fw || rh > fh)
+                {
+                    Console.Error.WriteLine($"region {rw}x{rh} does not fit in frame {fw}x{fh}");
+                    return 1;
+                }
+                LocatorCase(inspector, "custom", fw, fh, rw, rh, iterations, warmup);
+                return 0;
+            }
+
+            // The three the app can actually produce. The ROI is one of the rig's measured ones
+            // (Camera 0, 284x176) rather than a round number, because the point of the first row
+            // is that the current wiring UPSCALES - the region is smaller than the model input.
+            LocatorCase(inspector, "A  ROI crop, decim 2   (current wiring)", 1024, 772, 284, 176, iterations, warmup);
+            LocatorCase(inspector, "B  full frame, decim 2 (locator)       ", 1024, 772, 1024, 772, iterations, warmup);
+            LocatorCase(inspector, "C  full frame, decim 1 (locator)       ", 2048, 1544, 2048, 1544, iterations, warmup);
+            return 0;
+        }
+
+        private static void LocatorCase(IScreenInspector inspector, string name,
+                                        int frameW, int frameH, int roiW, int roiH,
+                                        int iterations, int warmup)
+        {
+            byte[] planar = SyntheticFrame(frameW, frameH, roiW, roiH, out int roiX, out int roiY);
+            var box = new BgrLetterbox(roiW, roiH, inspector.InputWidth, inspector.InputHeight);
+            var findings = new ScreenFinding[16];
+
+            for (int i = 0; i < warmup; i++)
+                inspector.Inspect(box.Fill(planar, frameW, frameH, roiX, roiY), findings);
+
+            var fill = new double[iterations];
+            var infer = new double[iterations];
+            var total = new double[iterations];
+            var sw = new Stopwatch();
+            int found = 0;
+
+            for (int i = 0; i < iterations; i++)
+            {
+                sw.Restart();
+                byte[] bgr = box.Fill(planar, frameW, frameH, roiX, roiY);
+                sw.Stop();
+                fill[i] = sw.Elapsed.TotalMilliseconds;
+
+                sw.Restart();
+                found = inspector.Inspect(bgr, findings);
+                sw.Stop();
+                infer[i] = sw.Elapsed.TotalMilliseconds;
+
+                total[i] = fill[i] + infer[i];
+            }
+
+            Array.Sort(fill);
+            Array.Sort(infer);
+            Array.Sort(total);
+            double median = Pct(total, 0.50);
+
+            Console.WriteLine($"{name}   region {roiW}x{roiH} in {frameW}x{frameH}  ->  {box}");
+            Console.WriteLine($"   letterbox  median {Pct(fill, 0.50),7:F3}  p90 {Pct(fill, 0.90),7:F3}  max {fill[fill.Length - 1],7:F3} ms");
+            Console.WriteLine($"   inspect    median {Pct(infer, 0.50),7:F3}  p90 {Pct(infer, 0.90),7:F3}  max {infer[infer.Length - 1],7:F3} ms");
+            Console.WriteLine($"   TOTAL      median {median,7:F3}  p90 {Pct(total, 0.90),7:F3}  max {total[total.Length - 1],7:F3} ms");
+            Console.WriteLine($"   -> {1000.0 / median:F0} inspections/s for one channel; "
+                            + $"a round-robin patrol at 2/s would use {2.0 * median / 10.0:F1}% of that");
+            Console.WriteLine($"   findings: {found}");
+            Console.WriteLine();
+        }
+
+        /// <summary>
+        /// A planar gbrp frame - the layout `FrameExtractor` produces - with a brighter rectangle
+        /// where the panel would be.
+        ///
+        /// Noise rather than flat fills, so a resize that silently did nothing would not produce
+        /// the same numbers as one that worked.
+        /// </summary>
+        private static byte[] SyntheticFrame(int w, int h, int roiW, int roiH,
+                                             out int roiX, out int roiY)
+        {
+            roiX = ((w - roiW) / 2) & ~1;
+            roiY = ((h - roiH) / 2) & ~1;
+
+            int plane = w * h;
+            var b = new byte[plane * 3];
+            var rng = new Random(7);
+
+            for (int i = 0; i < plane; i++)
+            {
+                byte n = (byte)rng.Next(6, 14);
+                b[i] = n;                  // G
+                b[plane + i] = n;          // B
+                b[plane * 2 + i] = n;      // R
+            }
+
+            for (int y = roiY; y < roiY + roiH && y < h; y++)
+                for (int x = roiX; x < roiX + roiW && x < w; x++)
+                {
+                    int i = y * w + x;
+                    b[i] = (byte)rng.Next(180, 230);
+                    b[plane + i] = (byte)rng.Next(30, 60);
+                    b[plane * 2 + i] = (byte)rng.Next(30, 60);
+                }
+
+            return b;
+        }
+
+        /// <summary>Reads <c>--frame 1024x772</c>. Anything unparseable counts as absent.</summary>
+        private static bool TrySize(string[] args, string name, out int w, out int h)
+        {
+            w = h = 0;
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (!string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string[] parts = args[i + 1].Split('x', 'X');
+                if (parts.Length == 2
+                    && int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out w)
+                    && int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out h)
+                    && w > 0 && h > 0)
+                    return true;
+
+                w = h = 0;
+                return false;
+            }
+            return false;
+        }
 
         /// <summary>
         /// Puts a bright green rectangle at a known place and reports where the heatmap peaks.
