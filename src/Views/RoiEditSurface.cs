@@ -32,6 +32,10 @@ namespace MatroxFrameGrabber.Views
         /// <summary>A press this short in either axis is a missed click, not a new rectangle.</summary>
         private const double MinNewDragPixels = 5;
 
+        /// <summary>Control pixels the finding rectangle is pushed out by when it would sit on
+        /// top of the analysis region's border.</summary>
+        private const double Nudge = 2;
+
         private enum DragMode { None, New, Move, Resize }
 
         private readonly FrameworkElement _surface;
@@ -45,6 +49,7 @@ namespace MatroxFrameGrabber.Views
         private bool _offSurface;
         private readonly Rectangle _rect;
         private readonly Rectangle _newRect;
+        private readonly Rectangle _findingRect;
         private readonly Rectangle[] _handles = new Rectangle[8];
 
         private DragMode _mode;
@@ -84,6 +89,19 @@ namespace MatroxFrameGrabber.Views
                 IsHitTestVisible = false,
                 Visibility = Visibility.Collapsed
             };
+            // What the screen inspector found, in red - a different question from the analysis
+            // region, so a different colour and never editable. It is drawn UNDER the region so a
+            // drag handle is never hidden behind something the operator cannot grab.
+            _findingRect = new Rectangle
+            {
+                Stroke = Brushes.Red,
+                StrokeThickness = 1.5,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                IsHitTestVisible = false,
+                Visibility = Visibility.Collapsed
+            };
+            overlay.Children.Add(_findingRect);
             overlay.Children.Add(_rect);
             overlay.Children.Add(_newRect);
 
@@ -263,6 +281,8 @@ namespace MatroxFrameGrabber.Views
                 Hide();
                 return;
             }
+            DrawFinding(map, roi);
+
             // No rectangle to draw is not the same as failing to draw one, and only the second is
             // worth a log line.
             if (roi.IsFullFrame)
@@ -341,6 +361,55 @@ namespace MatroxFrameGrabber.Views
 
         // ----- Drawing -----
 
+        /// <summary>
+        /// Draws what the inspector last found, in red, or hides it when the last look found
+        /// nothing.
+        ///
+        /// **Nudged outwards when it overlaps the analysis region.** The two rectangles are
+        /// usually in the same place - that is the point of the locator - and two 1.5 px borders
+        /// on the same pixels look like one border of an unknown colour. Two control pixels is
+        /// enough to separate them and small enough that nobody reads the red box as being
+        /// bigger than it is; the numbers in the log are the unnudged ones.
+        /// </summary>
+        private void DrawFinding(DisplayMapping map, ChannelRoi roi)
+        {
+            CameraChannel channel = _channel();
+            if (channel == null || !channel.TryGetLastFinding(out ChannelRoi found, out _))
+            {
+                _findingRect.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            double left = map.ToControlX(found.OffsetX);
+            double top = map.ToControlY(found.OffsetY);
+            double w = found.Width * map.Scale;
+            double h = found.Height * map.Scale;
+
+            if (!roi.IsFullFrame && Overlaps(found, roi))
+            {
+                left -= Nudge;
+                top -= Nudge;
+                w += Nudge * 2;
+                h += Nudge * 2;
+            }
+
+            if (w < 1 || h < 1)
+            {
+                _findingRect.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            _findingRect.Margin = new Thickness(left, top, 0, 0);
+            _findingRect.Width = w;
+            _findingRect.Height = h;
+            _findingRect.Visibility = Visibility.Visible;
+        }
+
+        /// <summary>Whether two regions share any pixels. Edges are edges, not indices.</summary>
+        private static bool Overlaps(ChannelRoi a, ChannelRoi b) =>
+            a.OffsetX < b.OffsetX + b.Width && b.OffsetX < a.OffsetX + a.Width &&
+            a.OffsetY < b.OffsetY + b.Height && b.OffsetY < a.OffsetY + a.Height;
+
         private void Draw(ChannelRoi roi, DisplayMapping map)
         {
             if (roi.IsFullFrame)
@@ -397,6 +466,8 @@ namespace MatroxFrameGrabber.Views
 
         private void Hide()
         {
+            // Not the finding rectangle: it answers "is the inspector seeing anything", which is
+            // still worth showing on a channel with no region drawn. DrawFinding hides it.
             _rect.Visibility = Visibility.Collapsed;
             foreach (Rectangle handle in _handles)
                 handle.Visibility = Visibility.Collapsed;

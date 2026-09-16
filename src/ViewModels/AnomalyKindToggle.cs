@@ -65,12 +65,28 @@ namespace MatroxFrameGrabber.ViewModels
             }
         }
 
-        /// <summary>One row per kind, in the order the catalog lists them.</summary>
+        /// <summary>
+        /// One row per kind the TILES judge, in the order the catalog lists them.
+        ///
+        /// **`Unknown` is left out, and that is the whole of the filter.** It is the inspector's
+        /// kind (<see cref="AnomalyCatalog.SourceOf"/> says `Inspector`), no tile detector exists
+        /// for it, and nothing anywhere reads its enabled flag - so the row was a checkbox that
+        /// was permanently greyed out and changed nothing when the settings file was edited by
+        /// hand to tick it. It was harmless while the inspector had no switches of its own; now
+        /// that the window has a SCREEN INSPECTOR section with two that do work, the row is a
+        /// second, dead answer to a question that already has a live one.
+        ///
+        /// The kind itself stays in the enum and in <see cref="AnomalyCatalog.All"/>: findings
+        /// still carry it, settings files still round-trip it, and the day the inspector reports
+        /// something this app can name, it will be by giving that finding a real kind rather than
+        /// by putting this row back.
+        /// </summary>
         internal static IReadOnlyList<AnomalyKindToggle> BuildFor(OutputSettings settings)
         {
             var rows = new List<AnomalyKindToggle>(AnomalyCatalog.Count);
             foreach (AnomalyKind k in AnomalyCatalog.All)
-                rows.Add(new AnomalyKindToggle(settings, k));
+                if (AnomalyCatalog.SourceOf(k) != KindSource.Inspector)
+                    rows.Add(new AnomalyKindToggle(settings, k));
             return rows;
         }
 
