@@ -52,6 +52,12 @@ namespace OnnxInspectorHarness
 
             string verb = args[0];
             string model = args[1];
+
+            // `green` carries no model - it is the model-free finder - so the file check that
+            // every other verb needs would refuse it for the wrong reason.
+            if (string.Equals(verb, "green", StringComparison.Ordinal))
+                return GreenDemo.Run(args);
+
             if (!File.Exists(model))
             {
                 Console.Error.WriteLine($"no such model: {model}");
@@ -65,6 +71,7 @@ namespace OnnxInspectorHarness
                 case "locator": return Locator(model, args);
                 case "locate": return LocateDemo.Run(model, args);
                 case "peek": return PeekDemo.Run(model, args);
+                case "green": return GreenDemo.Run(args);
                 case "selftest": return SelfTest(model);
                 default:
                     Console.Error.WriteLine($"unknown verb: {verb}");

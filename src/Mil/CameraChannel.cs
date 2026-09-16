@@ -137,6 +137,14 @@ namespace MatroxFrameGrabber.Mil
         // not a 120 fps question, and this way the feature cannot cost a frame. What the tick
         // does is the MIL read; the letterbox and the inference are on a worker.
         private RoiLocator _locator;
+
+        // **The locator does not use the model.** Finding a green rectangle is arithmetic - a
+        // share test and a connected component - and measured on this rig's own frames the
+        // arithmetic is right to a pixel where the weights are out by a factor of fourteen in
+        // area (docs/cs-screen-inspector-handover.md). It is also about thirty times cheaper, so
+        // it needs no interlock against the patrol and no model file to be present.
+        private GreenScreenInspector _locatorFinder;
+        private int _locatorBusy;
         private BgrLetterbox _locatorBox;
         private ScreenFinding[] _locatorFindings;
         private byte[] _locatorPlanar, _locatorR, _locatorG, _locatorB;
@@ -1979,9 +1987,9 @@ namespace MatroxFrameGrabber.Mil
             // non-zero interval - and one more: it moves the analysis region, so it is off unless
             // somebody turned it on.
             double locateEvery = Output?.LocateSeconds ?? 0.0;
-            _locator = (Output?.LocateRoi ?? false) && _inspector.InputWidth > 0 && locateEvery > 0.0
-                ? new RoiLocator()
-                : null;
+            bool wantLocator = (Output?.LocateRoi ?? false) && locateEvery > 0.0;
+            _locatorFinder = wantLocator ? new GreenScreenInspector() : null;
+            _locator = wantLocator ? new RoiLocator() : null;
             _locatorBox = null;
             _locatorFindings = null;
             _locatorSkipped = 0;
@@ -1997,7 +2005,7 @@ namespace MatroxFrameGrabber.Mil
             _locatorNextMs = _index * 500L;
             if (_locator != null)
                 MilErrorLog.Note($"{Name}: ROI locator on - looks at the whole frame every "
-                               + $"{locateEvery:0.##} s; {_locator}");
+                               + $"{locateEvery:0.##} s; {_locatorFinder.Describe}; {_locator}");
 
             _letterbox = null;
             _findings = null;
@@ -2300,7 +2308,7 @@ namespace MatroxFrameGrabber.Mil
                     $"{Name}: {_locator}"
                   + (_locator.Looks > 0
                         ? $", mean {_locatorUsTotal / _locator.Looks:F0} us / max {_locatorUsMax:F0} us "
-                        + "(letterbox + inference + decode, off the acquisition thread)"
+                        + "(letterbox + mask + components, off the acquisition thread)"
                         : string.Empty)
                   + (_locatorSkipped > 0
                         ? $", {_locatorSkipped} look(s) skipped because an inspection was already running"
@@ -2317,6 +2325,7 @@ namespace MatroxFrameGrabber.Mil
             }
             _hasFinding = false;
             _locator = null;
+            _locatorFinder = null;
             _locatorBox = null;
             _locatorFindings = null;
             _locatorClock.Stop();
@@ -2516,8 +2525,8 @@ namespace MatroxFrameGrabber.Mil
                                    + "channel. Re-calibrate, or put the size back.");
             }
 
-            IScreenInspector inspector = _inspector;
-            if (inspector == null || inspector.InputWidth <= 0) return;
+            GreenScreenInspector finder = _locatorFinder;
+            if (finder == null) return;
             if (!_isGrabbing || _dispBufId == MIL.M_NULL) return;
             if (Volatile.Read(ref _dispCopies) <= 0) return;
             if (_locatorClock.ElapsedMilliseconds < _locatorNextMs) return;
@@ -2525,8 +2534,11 @@ namespace MatroxFrameGrabber.Mil
             double every = Output?.LocateSeconds ?? 0.0;
             if (every <= 0.0) return;
 
-            // Shared with the patrol: one inspection at a time per channel, whichever asked first.
-            if (Interlocked.CompareExchange(ref _inspectBusy, 1, 0) != 0)
+            // Its own flag, not the patrol's. The finder keeps its own buffers so it is no more
+            // thread safe than the model, but it costs a fraction of a millisecond - there is no
+            // reason for the two to wait on each other, and sharing the flag made the patrol's
+            // empty looks push the locator's out of the way.
+            if (Interlocked.CompareExchange(ref _locatorBusy, 1, 0) != 0)
             {
                 _locatorSkipped++;
                 return;
@@ -2536,7 +2548,7 @@ namespace MatroxFrameGrabber.Mil
 
             if (!ReadDisplayForLocator(out int w, out int h))
             {
-                Interlocked.Exchange(ref _inspectBusy, 0);
+                Interlocked.Exchange(ref _locatorBusy, 0);
                 return;
             }
 
@@ -2552,7 +2564,7 @@ namespace MatroxFrameGrabber.Mil
                 {
                     if (_locatorBox == null || _locatorBox.SourceWidth != w || _locatorBox.SourceHeight != h)
                     {
-                        _locatorBox = new BgrLetterbox(w, h, inspector.InputWidth, inspector.InputHeight);
+                        _locatorBox = new BgrLetterbox(w, h, finder.InputWidth, finder.InputHeight);
                         MilErrorLog.Note($"{Name}: locator letterbox - {_locatorBox}");
                     }
                     _locatorFindings ??= new ScreenFinding[16];
@@ -2562,10 +2574,10 @@ namespace MatroxFrameGrabber.Mil
                     if (!_locatorInputDumped)
                     {
                         _locatorInputDumped = true;
-                        DumpLocatorInput(bgr, inspector.InputWidth, inspector.InputHeight);
+                        DumpLocatorInput(bgr, finder.InputWidth, finder.InputHeight);
                     }
 
-                    int n = inspector.Inspect(bgr, _locatorFindings);
+                    int n = finder.Inspect(bgr, _locatorFindings);
 
 
                     // Model space back to frame space before anything judges the numbers. The
@@ -2606,7 +2618,7 @@ namespace MatroxFrameGrabber.Mil
                     double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
                     _locatorUsTotal += us;
                     if (us > _locatorUsMax) _locatorUsMax = us;
-                    Interlocked.Exchange(ref _inspectBusy, 0);
+                    Interlocked.Exchange(ref _locatorBusy, 0);
                 }
             });
         }

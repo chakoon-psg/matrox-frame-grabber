@@ -105,8 +105,15 @@ namespace MatroxFrameGrabber.Infrastructure
         /// typed in. It is a parameter only so a test can pin it.
         /// </param>
         /// <param name="deadbandIou">
-        /// Overlap with the current region at or above which nothing happens. 0.9 means "a box
-        /// that agrees with the region to within about 5% of its width is the same box".
+        /// Overlap with the current region at or above which nothing happens.
+        ///
+        /// **0.95, and it is a measurement rather than a round number.** It was 0.90 while the
+        /// source of boxes was a model whose answer moved between looks; with the green finder
+        /// the box repeats - 49 looks in a row produced three moves and then nothing - so the
+        /// band exists to stop a pixel of jitter, not to absorb disagreement. At 0.90 the region
+        /// settled 0.919 of the way onto the panel and stopped there, which is 28 px of panel
+        /// left outside it on a 406 px screen; every step this allows is one the finder can
+        /// actually justify.
         /// </param>
         /// <param name="agreeIou">
         /// Overlap two consecutive candidates need for the second to count as agreeing with the
@@ -128,7 +135,7 @@ namespace MatroxFrameGrabber.Infrastructure
         /// in its own words). **Defaults to none, because the right value is a measurement nobody
         /// has made yet** - not because zero is known to be right.
         /// </param>
-        public RoiLocator(float minScore = 0.0f, double deadbandIou = 0.90, double agreeIou = 0.70,
+        public RoiLocator(float minScore = 0.0f, double deadbandIou = 0.95, double agreeIou = 0.70,
                           int dwellLooks = 3, double maxStepFraction = 0.25,
                           double sizeTolerance = 0.05, double insetFraction = 0.0)
         {

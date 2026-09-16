@@ -311,9 +311,9 @@
                 </Grid.ColumnDefinitions>
                 <Label Grid.Column="0" Content="Locate ROI" />
                 <CheckBox Grid.Column="1" VerticalAlignment="Center"
-                          Content="find the target on the whole screen and move the region to it"
+                          Content="find the green screen and move the region onto it"
                           IsChecked="{Binding Output.LocateRoi}"
-                          ToolTip="장비가 옮겨졌을 때 검출 영역이 표적을 따라갑니다&#x0a;디스플레이 버퍼를 500 ms 틱에서 읽으므로 취득 예산을 쓰지 않습니다 — 실측 1회 8.7 ms, 유실 0&#x0a;못 찾으면 움직이지 않고, 사건이 진행 중이면 얼립니다(검출기를 고장에서 떼어 놓지 않기 위해)&#x0a;영역이 바뀌면 그 채널의 임계값은 다시 잡아야 합니다" />
+                          ToolTip="장비가 옮겨졌을 때 검출 영역이 표적을 따라갑니다&#x0a;모델을 쓰지 않습니다 — 초록 비중과 연결 성분으로 찾습니다. 실측 1회 1.6~2.3 ms, 유실 0&#x0a;실측 정확도: 패널 406x275 @294,179 에 대해 410x276 @294,178&#x0a;못 찾으면 움직이지 않고, 사건이 진행 중이면 얼립니다(검출기를 고장에서 떼어 놓지 않기 위해)&#x0a;영역이 바뀌면 그 채널의 임계값은 다시 잡아야 합니다" />
             </Grid>
 
             <Grid Margin="0,0,0,3">
@@ -332,8 +332,8 @@
 
             <TextBlock Margin="0,0,0,10" TextWrapping="Wrap"
                        Foreground="#5A5A5A" FontSize="10"
-                       Text="the weights in hand detect a GREEN target and saturate at about 130x95 px — a green screen filling the panel comes back as a box over part of it. Measured, with the numbers, in docs/cs-screen-inspector-handover.md."
-                       ToolTip="전달받은 가중치는 초록 표적을 찾습니다&#x0a;크기 헤드가 약 130x95 프레임 픽셀에서 포화하므로, 패널을 가득 채운 초록 화면은 일부만 박스로 나옵니다&#x0a;표적이 프레임의 10~15% 정도면 정확합니다(실측: 70 px -> 68 px)" />
+                       Text="the two rows do not share a judge. Inspect runs the ONNX weights; Locate does not — finding a green rectangle is a share test and a connected component, which on this rig lands within a pixel where the weights are out by fourteen times in area. docs/green-screen-locator.md."
+                       ToolTip="두 줄은 서로 다른 것이 판정합니다&#x0a;Inspect 는 ONNX 가중치를 돌립니다&#x0a;Locate 는 모델을 쓰지 않습니다 — 초록 비중 + 연결 성분이고, 이 리그에서 1 px 안에 들어옵니다&#x0a;같은 프레임에서 가중치는 면적이 14배 작은 박스를 냈습니다(크기 헤드 포화)" />
 
             <!-- ============ FOLDERS ============ -->
             <TextBlock Text="FOLDERS" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />

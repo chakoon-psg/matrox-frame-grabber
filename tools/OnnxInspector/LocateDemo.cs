@@ -210,6 +210,13 @@ namespace OnnxInspectorHarness
             }
         }
 
+        /// <summary>`green` draws on the same pictures; a second copy would drift from this one.</summary>
+        internal static void RectPublic(byte[] bgra, int w, int h, ChannelRoi r, byte[] colour, int thickness) =>
+            Rect(bgra, w, h, r, colour, thickness);
+
+        /// <summary>Same reason as RectPublic.</summary>
+        internal static void EncodePublic(string path, byte[] bgra, int w, int h) => Encode(path, bgra, w, h);
+
         private static void Rect(byte[] bgra, int w, int h, ChannelRoi r, byte[] colour, int thickness)
         {
             for (int t = 0; t < thickness; t++)

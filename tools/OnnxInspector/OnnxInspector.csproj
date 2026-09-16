@@ -39,6 +39,7 @@
          app runs, with the same interlocks and the same even-pixel snap. -->
     <Compile Include="..\..\src\Infrastructure\ChannelRoi.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Infrastructure\Detection\RoiLocator.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\GreenScreenInspector.cs" LinkBase="Shared" />
     <Compile Include="..\..\src\Onnx\OnnxScreenInspector.cs" LinkBase="Shared" />
   </ItemGroup>
 
