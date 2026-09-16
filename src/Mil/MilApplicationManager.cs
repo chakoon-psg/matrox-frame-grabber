@@ -107,6 +107,27 @@ namespace MatroxFrameGrabber.Mil
                                  dcfName: "M_DEFAULT");
                 _channels.Add(channel);
             }
+
+            // The tally, always, even when it is the number everybody expects.
+            //
+            // A port with nothing plugged into it and a board another process is already holding
+            // fail identically and silently - MdigAlloc throws either way, and the catch that
+            // makes an empty port normal makes a busy board invisible. Measured the expensive
+            // way: a leftover instance held this board for sixteen hours while sixteen scheduled
+            // runs started, logged "grabbing for 3600s", allocated no camera, exited zero and
+            // wrote no summary. Nothing in the log said the word camera at all. One line would
+            // have said it sixteen times.
+            int present = 0;
+            foreach (CameraChannel c in _channels)
+                if (c.CameraPresent) present++;
+
+            string tally = $"cameras present: {present} of {DigitizerCount} digitizers";
+            if (present == 0)
+                MilErrorLog.Note($"{tally} - NOTHING WILL BE GRABBED. Either no camera is "
+                               + "connected, or another process already holds this board "
+                               + "(check for a second MatroxFrameGrabber.exe)");
+            else
+                MilErrorLog.Note(tally);
         }
 
         private void AllocateSystem()

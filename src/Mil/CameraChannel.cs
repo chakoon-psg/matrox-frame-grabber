@@ -104,6 +104,83 @@ namespace MatroxFrameGrabber.Mil
         private long _rejectedSeen;
         private AnomalyDetector _detector;
 
+        // The sustained-kind detector, beside the event-kind one rather than inside it. They
+        // cannot share a state machine: Dropout measures a fall against a running baseline and
+        // confirms on one frame, Blackout measures an absolute level with hysteresis and must not.
+        private BlackoutDetector _blackout;
+        private WashoutDetector _washout;
+        private FreezeDetector _freeze;
+        private ColorShiftDetector _colorShift;
+
+        // The screen inspector and the three things it needs. All null unless a model loaded,
+        // and all released at stop - so a build without src/Onnx carries five null fields.
+        private IScreenInspector _inspector;
+        private ScreenPatrol _patrol;
+
+        // Owned by the worker, never touched from the acquisition thread. IScreenInspector says
+        // it is not thread safe, and one inspection at a time per channel is what makes that
+        // true here - the busy flag below is the whole of that guarantee.
+        private BgrLetterbox _letterbox;
+        private ScreenFinding[] _findings;
+
+        private int _inspectBusy;                 // Interlocked: one inspection in flight
+        private long _inspections, _inspectSkipped;
+        private double _inspectUsTotal, _inspectUsMax;
+
+        // The locator: the SAME inspector, shown the whole screen instead of the region, so it
+        // can say where the region should be. It shares _inspectBusy with the patrol above -
+        // IScreenInspector is not thread safe by contract, and one flag is the whole of that
+        // guarantee whichever path got there first.
+        //
+        // It runs on the stats tick, not on the acquisition hook and not on the shared frame
+        // pool: the display buffer is already a full frame in paged memory, tracking a panel is
+        // not a 120 fps question, and this way the feature cannot cost a frame. What the tick
+        // does is the MIL read; the letterbox and the inference are on a worker.
+        private RoiLocator _locator;
+
+        // **The locator does not use the model.** Finding a green rectangle is arithmetic - a
+        // share test and a connected component - and measured on this rig's own frames the
+        // arithmetic is right to a pixel where the weights are out by a factor of fourteen in
+        // area (docs/cs-screen-inspector-handover.md). It is also about thirty times cheaper, so
+        // it needs no interlock against the patrol and no model file to be present.
+        private GreenScreenInspector _locatorFinder;
+        private int _locatorBusy;
+        private BgrLetterbox _locatorBox;
+        private ScreenFinding[] _locatorFindings;
+        private byte[] _locatorPlanar, _locatorR, _locatorG, _locatorB;
+        private readonly Stopwatch _locatorClock = new Stopwatch();
+        private long _locatorNextMs, _locatorSkipped, _locatorRuns;
+        private double _locatorUsTotal, _locatorUsMax;
+
+        // What the inspector last saw, in acquired-frame pixels, for the overlay to draw. Set by
+        // whichever path ran - the patrol looking inside the region, or the locator looking at the
+        // whole screen - and cleared the moment a look comes back with nothing, so a red rectangle
+        // on screen always means "being found right now" rather than "was found at some point".
+        // Writes the first look's model input to a PNG, once per run. The app and the harness
+        // disagreed about the same frame - the harness scored 0.244 on a still the app's own
+        // StillRing had written, while the app's locator reported nothing in 195 looks - and no
+        // amount of reading either path settles which pixels the model is actually being handed.
+        private bool _locatorInputDumped;
+
+        private ChannelRoi _lastFinding;
+        private float _lastFindingScore;
+        private volatile bool _hasFinding;
+
+        // The worker decides; the tick applies. SetAnalysisRoi raises property changes that
+        // bindings are on, and the tick is already the thread those belong to - so the decision
+        // waits here for at most one tick rather than marshalling.
+        private ChannelRoi _locatorPending;
+        private bool _locatorHasPending, _locatorPendingGrew;
+        private float _locatorPendingScore;
+
+        // Whether the display buffer holds a frame from THIS run yet. Without it the first look
+        // of a run reads the previous run's last frame - which is the failure this feature would
+        // wear best, because a region proposed from the scene before the equipment was moved
+        // looks entirely plausible.
+        private long _dispCopies;
+        private FlickerDetector _flicker;
+        private FlipDetector _flip;
+
         // Events cross from the acquisition thread to the stats tick through this queue. Raising
         // them from the hook would put the grab behind whatever a UI handler decides to do.
         private readonly ConcurrentQueue<AnomalyEvent> _anomalies = new ConcurrentQueue<AnomalyEvent>();
@@ -563,6 +640,367 @@ namespace MatroxFrameGrabber.Mil
         private string _coherenceInput;
 
         /// <summary>
+        /// Blackout's levels as typed. **Luma, 0-255, not a fraction** - the one thing an operator
+        /// can get wrong here is reading these as Dropout's units, where 0.05 is a sensible
+        /// number and would mean "never fire" in luma.
+        /// </summary>
+        public string BlackoutEnterInput
+        {
+            get => _blackoutEnterInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutEnterLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutEnterInput = value; RaisePropertyChanged(nameof(BlackoutEnterInput)); }
+        }
+
+        public string BlackoutExitInput
+        {
+            get => _blackoutExitInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutExitLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutExitInput = value; RaisePropertyChanged(nameof(BlackoutExitInput)); }
+        }
+
+        public string BlackoutSpreadInput
+        {
+            get => _blackoutSpreadInput ??= Detection.For(AnomalyKind.Blackout)
+                        .BlackoutMaxSpread.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _blackoutSpreadInput = value; RaisePropertyChanged(nameof(BlackoutSpreadInput)); }
+        }
+
+        private string _blackoutEnterInput;
+        private string _blackoutExitInput;
+        private string _blackoutSpreadInput;
+
+        /// <summary>
+        /// The dwells in the units they act in, and what the panel last read.
+        ///
+        /// The live reading is here because the three levels above are meaningless without it:
+        /// "6 luma" says nothing until you can see that this panel sits at 37 and keeps 40 of
+        /// structure. It is the number that makes the threshold defensible on screen rather than
+        /// in a log nobody opens.
+        /// </summary>
+        public string BlackoutHint
+        {
+            get
+            {
+                BlackoutThresholds t = Detection.ResolveBlackout(AnomalyKind.Blackout);
+                string dwell = $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                if (!AnomalyCatalog.Implemented(AnomalyKind.Blackout))
+                    return dwell;
+                return _blackout != null
+                    ? $"{dwell} · now {BlackoutLuma:0.#} luma, spread {BlackoutSpread:0.#}"
+                      + (InBlackout ? $" · BLACK for {BlackoutRunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Blackout on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Applies the typed Blackout levels. All three or none, like Dropout's pair - a
+        /// half-applied hysteresis is worse than neither.
+        /// </summary>
+        public bool ApplyBlackoutThresholds()
+        {
+            if (!double.TryParse(_blackoutEnterInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double enter) ||
+                !double.TryParse(_blackoutExitInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double exit) ||
+                !double.TryParse(_blackoutSpreadInput, NumberStyles.Float, CultureInfo.InvariantCulture, out double spread))
+                return false;
+
+            KindSettings k = Detection.For(AnomalyKind.Blackout);
+            k.BlackoutEnterLuma = enter;
+            k.BlackoutExitLuma = exit;
+            k.BlackoutMaxSpread = spread;
+            k.Clamp();                     // lifts an exit that is not above the entry
+            Output?.SaveThresholds();
+
+            // Show what was kept, not what was typed.
+            _blackoutEnterInput = null;
+            _blackoutExitInput = null;
+            _blackoutSpreadInput = null;
+            RaisePropertyChanged(nameof(BlackoutEnterInput));
+            RaisePropertyChanged(nameof(BlackoutExitInput));
+            RaisePropertyChanged(nameof(BlackoutSpreadInput));
+            RaisePropertyChanged(nameof(BlackoutHint));
+
+            MilErrorLog.Note($"{Name}: {AnomalyKind.Blackout} levels now dark at or below "
+                           + $"{k.BlackoutEnterLuma:0.#} luma and flat within {k.BlackoutMaxSpread:0.#}, "
+                           + $"back at {k.BlackoutExitLuma:0.#} - takes effect on the next Start");
+            return true;
+        }
+
+
+        // ----- Washout, Freeze and ColorShift -----
+        //
+        // Three kinds shipped with settings and no way to reach them, which is the same as
+        // shipping a number nobody can check. Each row is the kind's own units, and each hint
+        // carries what the panel actually reads - a threshold is not defensible on screen until
+        // the live figure is beside it.
+
+        /// <summary>Washout's entry level, in luma. Bright, not a fraction.</summary>
+        public string WashoutEnterInput
+        {
+            get => _washoutEnterInput ??= Detection.For(AnomalyKind.Washout)
+                        .WashoutEnterLuma.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _washoutEnterInput = value; RaisePropertyChanged(nameof(WashoutEnterInput)); }
+        }
+
+        /// <summary>How much detail may remain inside a tile. This is the test that decides.</summary>
+        public string WashoutDetailInput
+        {
+            get => _washoutDetailInput ??= Detection.For(AnomalyKind.Washout)
+                        .WashoutMaxDetail.ToString("0.#", CultureInfo.InvariantCulture);
+            set { _washoutDetailInput = value; RaisePropertyChanged(nameof(WashoutDetailInput)); }
+        }
+
+        private string _washoutEnterInput;
+        private string _washoutDetailInput;
+
+        public string WashoutHint
+        {
+            get
+            {
+                WashoutThresholds t = Detection.ResolveWashout(AnomalyKind.Washout);
+                string dwell = $"back≤{t.ExitLuma:0.#}, flat≤{t.MaxSpread:0.#}, "
+                             + $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                return _washout != null
+                    ? $"{dwell} · now {_washout.LastLuma:0.#} luma, detail {_washout.LastDetail:0.#}"
+                      + (InWashout ? $" · WHITE for {_washout.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Washout on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Freeze's entry, in luma of change per frame. **A floor, not a ceiling** - it has to sit
+        /// *under* the sensor noise, so a number that looks safely small here is the one that
+        /// makes the detector fire on a live picture.
+        /// </summary>
+        public string FreezeEnterInput
+        {
+            get => _freezeEnterInput ??= Detection.For(AnomalyKind.Freeze)
+                        .FreezeEnterDelta.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _freezeEnterInput = value; RaisePropertyChanged(nameof(FreezeEnterInput)); }
+        }
+
+        public string FreezeExitInput
+        {
+            get => _freezeExitInput ??= Detection.For(AnomalyKind.Freeze)
+                        .FreezeExitDelta.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _freezeExitInput = value; RaisePropertyChanged(nameof(FreezeExitInput)); }
+        }
+
+        private string _freezeEnterInput;
+        private string _freezeExitInput;
+
+        public string FreezeHint
+        {
+            get
+            {
+                FreezeThresholds t = Detection.ResolveFreeze(AnomalyKind.Freeze);
+                string dwell = $"dwell {t.EnterMs:0}/{t.RecoverMs:0} ms";
+                return _freeze != null
+                    ? $"{dwell} · now {_freeze.LastChange:0.####} luma/frame"
+                      + (InFreeze ? $" · FROZEN for {_freeze.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{dwell} · not watching (switch Freeze on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// Flip's ratio: how much better a mirror has to fit than the unturned frame.
+        ///
+        /// The two gates beside it - how much the pair changed, how asymmetric the picture is -
+        /// are in the hint and not editable. They are the conditions under which the question can
+        /// be asked at all, not a sensitivity anybody should be tuning by feel.
+        /// </summary>
+        public string FlipRatioInput
+        {
+            get => _flipRatioInput ??= Detection.For(AnomalyKind.Flip)
+                        .FlipMaxMatchRatio.ToString("0.###", CultureInfo.InvariantCulture);
+            set { _flipRatioInput = value; RaisePropertyChanged(nameof(FlipRatioInput)); }
+        }
+
+        private string _flipRatioInput;
+
+        public string FlipHint
+        {
+            get
+            {
+                FlipThresholds t = Detection.ResolveFlip(AnomalyKind.Flip);
+                string gates = $"pair ≥{t.MinChange:0.#}, asym ≥{t.MinAsymmetry:0.#} luma";
+                if (_flip == null)
+                    return $"{gates} · not watching (switch Flip on in app Settings)";
+                return $"{gates} · now {_flip.LastRatio:0.###} ({_flip.LastAxis}), asym "
+                     + $"{_flip.LastAsymmetry:0.#}, {_flip.Judged} judged / "
+                     + $"{_flip.TooSymmetric} too symmetric"
+                     + (InFlip ? $" · TURNED OVER for {_flip.RunningMs / 1000.0:0.0} s" : string.Empty);
+            }
+        }
+
+        /// <summary>Flicker's entry swing, as a fraction of the window mean.</summary>
+        public string FlickerAmplitudeInput
+        {
+            get => _flickerAmpInput ??= Detection.For(AnomalyKind.Flicker)
+                        .FlickerEnterAmplitude.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _flickerAmpInput = value; RaisePropertyChanged(nameof(FlickerAmplitudeInput)); }
+        }
+
+        private string _flickerAmpInput;
+
+        public string FlickerHint
+        {
+            get
+            {
+                double rate = _frameRate > 0.0 ? _frameRate : 120.0;
+                FlickerThresholds t = Detection.ResolveFlicker(AnomalyKind.Flicker, rate);
+                string band = $"{t.MinHz:0.#}-{t.MaxHz:0.#} Hz, ≥{t.MinCrossings} crossings in "
+                            + $"{t.WindowFrames}f";
+                return _flicker != null
+                    ? $"{band} · now {_flicker.LastAmplitude:0.####} at {_flicker.LastHz:0.#} Hz"
+                      + (InFlicker ? $" · FLICKERING for {_flicker.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{band} · not watching (switch Flicker on in app Settings)";
+            }
+        }
+
+        /// <summary>
+        /// ColorShift's tolerance, in share of the frame's colour. The baseline beside it is
+        /// measured rather than typed, which is why only this one number is editable here.
+        /// </summary>
+        public string ColorShiftDeviationInput
+        {
+            get => _colorShiftDevInput ??= Detection.For(AnomalyKind.ColorShift)
+                        .ColorShiftMaxDeviation.ToString("0.####", CultureInfo.InvariantCulture);
+            set { _colorShiftDevInput = value; RaisePropertyChanged(nameof(ColorShiftDeviationInput)); }
+        }
+
+        private string _colorShiftDevInput;
+
+        public string ColorShiftHint
+        {
+            get
+            {
+                ColorShiftThresholds t = Detection.ResolveColorShift(AnomalyKind.ColorShift);
+                if (!t.Calibrated)
+                    return "no baseline yet - run once and press Use measured. "
+                         + "Until then this kind reports nothing";
+
+                string basis = $"base R {t.BaselineR:0.###} G {t.BaselineG:0.###} B {t.BaselineB:0.###}";
+                return _colorShift != null
+                    ? $"{basis} · now R {_colorShift.LastShareR:0.###} G {_colorShift.LastShareG:0.###} "
+                      + $"B {_colorShift.LastShareB:0.###}, off by {_colorShift.LastDeviation:0.####}"
+                      + (InColorShift ? $" · SHIFTED for {_colorShift.RunningMs / 1000.0:0.0} s" : string.Empty)
+                    : $"{basis} · not watching (switch ColorShift on in app Settings)";
+            }
+        }
+
+        /// <summary>Whether a run has measured a colour baseline that could be adopted.</summary>
+        public bool CanAdoptColorBaseline =>
+            _colourProposal.HasValue && _colourProposal.Value.IsUsable;
+
+        private ColorShiftProposal? _colourProposal;
+
+        /// <summary>
+        /// Takes the measured shares as this camera's baseline.
+        ///
+        /// A separate act from watching, and it has to be: nothing in a frame statistic can tell a
+        /// panel whose colour is correct from one whose colour has been wrong all run and steady
+        /// about it. Only a person knows the run was on a healthy panel - the same reason
+        /// Dropout's histogram proposal is not applied on its own.
+        /// </summary>
+        public bool ApplyColorBaseline()
+        {
+            if (!CanAdoptColorBaseline)
+                return false;
+
+            ColorShiftProposal p = _colourProposal.Value;
+            KindSettings k = Detection.For(AnomalyKind.ColorShift);
+            k.ColorShiftBaselineR = p.BaselineR;
+            k.ColorShiftBaselineG = p.BaselineG;
+            k.ColorShiftBaselineB = p.BaselineB;
+            k.Clamp();
+            Output?.SaveThresholds();
+
+            RaisePropertyChanged(nameof(ColorShiftHint));
+            MilErrorLog.Note($"{Name}: {AnomalyKind.ColorShift} baseline now R {k.ColorShiftBaselineR:F4} "
+                           + $"G {k.ColorShiftBaselineG:F4} B {k.ColorShiftBaselineB:F4} from "
+                           + $"{p.FramesJudged} frames - takes effect on the next Start");
+            return true;
+        }
+
+        /// <summary>
+        /// Applies the typed levels for the three kinds that share this method.
+        ///
+        /// One method rather than three, because each of them is a single number or a pair and
+        /// the failure mode is the same: a value that will not parse leaves every setting alone.
+        /// </summary>
+        public bool ApplySustainedThresholds()
+        {
+            if (!double.TryParse(_washoutEnterInput ?? WashoutEnterInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double wEnter) ||
+                !double.TryParse(_washoutDetailInput ?? WashoutDetailInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double wDetail) ||
+                !double.TryParse(_freezeEnterInput ?? FreezeEnterInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double fEnter) ||
+                !double.TryParse(_freezeExitInput ?? FreezeExitInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double fExit) ||
+                !double.TryParse(_colorShiftDevInput ?? ColorShiftDeviationInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double cDev) ||
+                !double.TryParse(_flickerAmpInput ?? FlickerAmplitudeInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double lAmp) ||
+                !double.TryParse(_flipRatioInput ?? FlipRatioInput, NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out double pRatio))
+                return false;
+
+            KindSettings w = Detection.For(AnomalyKind.Washout);
+            w.WashoutEnterLuma = wEnter;
+            w.WashoutMaxDetail = wDetail;
+            w.Clamp();
+
+            KindSettings f = Detection.For(AnomalyKind.Freeze);
+            f.FreezeEnterDelta = fEnter;
+            f.FreezeExitDelta = fExit;
+            f.Clamp();
+
+            KindSettings c = Detection.For(AnomalyKind.ColorShift);
+            c.ColorShiftMaxDeviation = cDev;
+            c.Clamp();
+
+            KindSettings l = Detection.For(AnomalyKind.Flicker);
+            l.FlickerEnterAmplitude = lAmp;
+            l.Clamp();
+
+            KindSettings p = Detection.For(AnomalyKind.Flip);
+            p.FlipMaxMatchRatio = pRatio;
+            p.Clamp();
+
+            Output?.SaveThresholds();
+
+            // Show what was kept, not what was typed.
+            _washoutEnterInput = null;
+            _washoutDetailInput = null;
+            _freezeEnterInput = null;
+            _freezeExitInput = null;
+            _colorShiftDevInput = null;
+            _flickerAmpInput = null;
+            _flipRatioInput = null;
+            RaisePropertyChanged(nameof(FlipRatioInput));
+            RaisePropertyChanged(nameof(FlipHint));
+            RaisePropertyChanged(nameof(FlickerAmplitudeInput));
+            RaisePropertyChanged(nameof(FlickerHint));
+            RaisePropertyChanged(nameof(WashoutEnterInput));
+            RaisePropertyChanged(nameof(WashoutDetailInput));
+            RaisePropertyChanged(nameof(FreezeEnterInput));
+            RaisePropertyChanged(nameof(FreezeExitInput));
+            RaisePropertyChanged(nameof(ColorShiftDeviationInput));
+            RaisePropertyChanged(nameof(WashoutHint));
+            RaisePropertyChanged(nameof(FreezeHint));
+            RaisePropertyChanged(nameof(ColorShiftHint));
+
+            MilErrorLog.Note($"{Name}: washout enter {w.WashoutEnterLuma:0.#} luma detail "
+                           + $"{w.WashoutMaxDetail:0.#}; freeze {f.FreezeEnterDelta:0.####} in / "
+                           + $"{f.FreezeExitDelta:0.####} out; colorshift {c.ColorShiftMaxDeviation:0.####} "
+                           + $"share; flicker {l.FlickerEnterAmplitude:0.####} relative; "
+                           + $"flip ratio {p.FlipMaxMatchRatio:0.###} "
+                           + "- all take effect on the next Start");
+            return true;
+        }
+
+        /// <summary>
         /// The thresholds that are not on the pane, in the units they actually act in. Frames are
         /// what the detector counts, but nobody reasons in frames at 124 fps -- and the same frame
         /// count means a different duration at a different exposure, which is exactly the sort of
@@ -606,6 +1044,7 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(DepthInput));
             RaisePropertyChanged(nameof(CoherenceInput));
             RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(BlackoutHint));
             RaisePropertyChanged(nameof(DetectionKindsText));
 
             // Logged as resolved rather than as stored: milliseconds are what a person sets and
@@ -696,6 +1135,48 @@ namespace MatroxFrameGrabber.Mil
         /// have to be chosen from the distribution these take on a healthy panel.
         /// </summary>
         public double DetectionDepth => _detector?.LastDepth ?? 0.0;
+
+        /// <summary>Tile-median luma of the last frame judged, which is what Blackout judges on.</summary>
+        public double BlackoutLuma => _blackout?.LastLuma ?? 0.0;
+
+        /// <summary>Range of the tile means - how much structure the picture still has.</summary>
+        public double BlackoutSpread => _blackout?.LastSpread ?? 0.0;
+
+        /// <summary>Whether the picture is gone right now. A sustained fault is a state, not an event.</summary>
+        public bool InBlackout => _blackout?.InBlackout ?? false;
+
+        /// <summary>How long it has been gone, in ms, or 0.</summary>
+        public double BlackoutRunningMs => _blackout?.RunningMs ?? 0.0;
+
+        /// <summary>Mean per-tile deviation on the last frame - the detail the picture still has.</summary>
+        public double WashoutDetail => _washout?.LastDetail ?? 0.0;
+
+        /// <summary>Whether the picture is washed out right now.</summary>
+        public bool InWashout => _washout?.InWashout ?? false;
+
+        /// <summary>Mean change in tile means on the last frame, in luma - what Freeze judges.</summary>
+        public double FreezeChange => _freeze?.LastChange ?? 0.0;
+
+        /// <summary>Whether the picture has stopped being updated.</summary>
+        public bool InFreeze => _freeze?.InFreeze ?? false;
+
+        /// <summary>Furthest any band sat from its measured baseline, in share. 0 if uncalibrated.</summary>
+        public double ColorDeviation => _colorShift?.LastDeviation ?? 0.0;
+
+        /// <summary>Whether the colour has come away from what this camera measured as its own.</summary>
+        public bool InColorShift => _colorShift?.InColorShift ?? false;
+
+        /// <summary>How far brightness swung across the last window, as a fraction of its mean.</summary>
+        public double FlickerAmplitude => _flicker?.LastAmplitude ?? 0.0;
+
+        /// <summary>Whether the picture is oscillating rather than stepping.</summary>
+        public bool InFlicker => _flicker?.InFlicker ?? false;
+
+        /// <summary>Which way the picture is turned over, if it is.</summary>
+        public FlipAxis FlipAxis => _flip?.Axis ?? Infrastructure.FlipAxis.None;
+
+        /// <summary>Whether the picture has been turned over during this run.</summary>
+        public bool InFlip => _flip?.InFlip ?? false;
         public double DetectionCoherence => _detector?.LastCoherence ?? 0.0;
         public double DetectionBaseline => _detector?.Baseline ?? 0.0;
 
@@ -1435,8 +1916,178 @@ namespace MatroxFrameGrabber.Mil
             // leave this channel unwatched. And --no-detect goes through the same gate, so that
             // switch reports DetectionOff as well instead of a channel that looks Healthy while
             // judging nothing.
-            bool watching = DetectionEnabled && Detection.EnabledCount > 0;
-            _detector = watching ? new AnomalyDetector(DetectionThresholds) : null;
+            // Per kind, not one flag for both. EnabledCount tells us somebody is watching
+            // something implemented; it does not say which, and building the event detector
+            // because Blackout is on would leave a Dropout judge nobody asked for reporting on
+            // the same frames.
+            bool wantDropout = DetectionEnabled && Detection.For(AnomalyKind.Dropout).Enabled
+                            && AnomalyCatalog.Implemented(AnomalyKind.Dropout);
+            bool wantBlackout = DetectionEnabled && Detection.For(AnomalyKind.Blackout).Enabled
+                             && AnomalyCatalog.Implemented(AnomalyKind.Blackout);
+
+            _detector = wantDropout ? new AnomalyDetector(DetectionThresholds) : null;
+            _blackout = wantBlackout
+                ? new BlackoutDetector(Detection.ResolveBlackout(AnomalyKind.Blackout))
+                : null;
+
+            bool wantWashout = DetectionEnabled && Detection.For(AnomalyKind.Washout).Enabled
+                            && AnomalyCatalog.Implemented(AnomalyKind.Washout);
+            _washout = wantWashout
+                ? new WashoutDetector(Detection.ResolveWashout(AnomalyKind.Washout))
+                : null;
+
+            bool wantFreeze = DetectionEnabled && Detection.For(AnomalyKind.Freeze).Enabled
+                           && AnomalyCatalog.Implemented(AnomalyKind.Freeze);
+            _freeze = wantFreeze
+                ? new FreezeDetector(Detection.ResolveFreeze(AnomalyKind.Freeze))
+                : null;
+
+            bool wantColour = DetectionEnabled && Detection.For(AnomalyKind.ColorShift).Enabled
+                           && AnomalyCatalog.Implemented(AnomalyKind.ColorShift);
+            _colorShift = wantColour
+                ? new ColorShiftDetector(Detection.ResolveColorShift(AnomalyKind.ColorShift))
+                : null;
+
+            // The only kind that changes what the reduction gathers. Three more adds per pixel,
+            // inside the acquisition budget - so it is asked for rather than always paid.
+            _reducer.WantBands = _colorShift != null;
+
+            // The one detector whose settings need the rate before the first frame: its window
+            // is set in milliseconds and counted in frames, and a window of the wrong length
+            // changes which frequencies exist rather than only how sure the answer is. The rate
+            // from the previous run is the best estimate available here, and the resolved window
+            // is logged in both units so a wrong one is visible rather than inferred.
+            double rateForWindow = _frameRate > 0.0 ? _frameRate : 120.0;
+            bool wantFlicker = DetectionEnabled && Detection.For(AnomalyKind.Flicker).Enabled
+                            && AnomalyCatalog.Implemented(AnomalyKind.Flicker);
+            _flicker = wantFlicker
+                ? new FlickerDetector(Detection.ResolveFlicker(AnomalyKind.Flicker, rateForWindow))
+                : null;
+
+            // The inspector is not one of the kinds - it is a second judge with its own
+            // switch, because whether a model runs is a different question from which faults are
+            // watched for. It costs nothing when off: the factory hands back a null inspector and
+            // the hook's `if` is false.
+            _inspector = ScreenInspectorFactory.Create(
+                Output?.Inspect ?? false,
+                Output?.InspectModelPath,
+                AppContext.BaseDirectory,
+                new ScreenInspectorOptions());
+            MilErrorLog.Note($"{Name}: inspector - {_inspector.Describe}");
+
+            // The patrol only exists when there is something for it to feed. A null inspector
+            // reports an input size of zero, which is the cheapest way to ask "is this real".
+            _patrol = _inspector.InputWidth > 0 && (Output?.InspectSeconds ?? 0.0) > 0.0
+                ? new ScreenPatrol(Output.InspectSeconds)
+                : null;
+            if (_patrol != null)
+                MilErrorLog.Note($"{Name}: inspector patrol every {_patrol.EverySeconds:0.##} s");
+
+            // The locator needs the same two things the patrol does - a real inspector and a
+            // non-zero interval - and one more: it moves the analysis region, so it is off unless
+            // somebody turned it on.
+            double locateEvery = Output?.LocateSeconds ?? 0.0;
+            bool wantLocator = (Output?.LocateRoi ?? false) && locateEvery > 0.0;
+            _locatorFinder = wantLocator ? new GreenScreenInspector() : null;
+            _locator = wantLocator ? new RoiLocator() : null;
+            _locatorBox = null;
+            _locatorFindings = null;
+            _locatorSkipped = 0;
+            _locatorUsTotal = _locatorUsMax = 0.0;
+            _locatorHasPending = false;
+            _locatorInputDumped = false;
+            _locatorRuns = 0;
+            _hasFinding = false;
+            _dispCopies = 0;
+            _locatorClock.Restart();
+            // Staggered by channel so three cameras do not read 2.37 MB on the same tick. The
+            // read is on the UI thread; that is the one part of this a person could feel.
+            _locatorNextMs = _index * 500L;
+            if (_locator != null)
+                MilErrorLog.Note($"{Name}: ROI locator on - looks at the whole frame every "
+                               + $"{locateEvery:0.##} s; {_locatorFinder.Describe}; {_locator}");
+
+            _letterbox = null;
+            _findings = null;
+            _inspections = 0;
+            _inspectSkipped = 0;
+            _inspectBusy = 0;
+            _inspectUsTotal = 0.0;
+            _inspectUsMax = 0.0;
+
+            bool wantFlip = DetectionEnabled && Detection.For(AnomalyKind.Flip).Enabled
+                         && AnomalyCatalog.Implemented(AnomalyKind.Flip);
+            _flip = wantFlip
+                ? new FlipDetector(Detection.ResolveFlip(AnomalyKind.Flip))
+                : null;
+
+            bool watching = _detector != null || _blackout != null || _washout != null
+                         || _freeze != null || _colorShift != null || _flicker != null
+                         || _flip != null;
+            if (_flip != null)
+            {
+                FlipThresholds pt = Detection.ResolveFlip(AnomalyKind.Flip);
+                MilErrorLog.Note($"{Name}: flip watch on - a mirror has to fit "
+                               + $"{pt.MaxMatchRatio:0.###} as well as the unturned frame, on a "
+                               + $"pair that changed at least {pt.MinChange:0.#} luma and a "
+                               + $"picture at least {pt.MinAsymmetry:0.#} luma asymmetric, dwell "
+                               + $"{pt.EnterMs:0} ms in / {pt.RecoverMs:0} ms out. **It watches "
+                               + "for the moment of the turn, so a rig that was already flipped "
+                               + "when this run started reads as normal.**");
+            }
+            if (_flicker != null)
+            {
+                FlickerThresholds lt = Detection.ResolveFlicker(AnomalyKind.Flicker, rateForWindow);
+                MilErrorLog.Note($"{Name}: flicker watch on - swing at or above "
+                               + $"{lt.EnterAmplitude:0.####} of the mean, steady under "
+                               + $"{lt.ExitAmplitude:0.####}, only between {lt.MinHz:0.#} and "
+                               + $"{lt.MaxHz:0.#} Hz with at least {lt.MinCrossings} crossings, "
+                               + $"window {lt.WindowFrames}f ({lt.WindowFrames / rateForWindow * 1000.0:0} ms "
+                               + $"at {rateForWindow:0.###} fps), dwell {lt.EnterMs:0} ms in / "
+                               + $"{lt.RecoverMs:0} ms out");
+            }
+            if (_colorShift != null)
+            {
+                ColorShiftThresholds ct = Detection.ResolveColorShift(AnomalyKind.ColorShift);
+                MilErrorLog.Note(ct.Calibrated
+                    ? $"{Name}: colorshift watch on - baseline R {ct.BaselineR:F4} "
+                    + $"G {ct.BaselineG:F4} B {ct.BaselineB:F4}, fault past {ct.MaxDeviation:F4} "
+                    + $"share, back at {ct.ExitDeviation:F4}, dwell {ct.EnterMs:0} ms in / "
+                    + $"{ct.RecoverMs:0} ms out, ignored below {ct.MinLuma:0.#} luma"
+                    : $"{Name}: colorshift MEASURING ONLY - no baseline has been calibrated for "
+                    + "this camera, so nothing will be reported this run. Read the proposal at "
+                    + "stop and put it in the camera settings.");
+            }
+            if (_freeze != null)
+            {
+                FreezeThresholds ft = Detection.ResolveFreeze(AnomalyKind.Freeze);
+                MilErrorLog.Note($"{Name}: freeze watch on - stopped at or below "
+                               + $"{ft.EnterDelta:0.####} luma/frame, moving again at "
+                               + $"{ft.ExitDelta:0.####}, dwell {ft.EnterMs:0} ms in / "
+                               + $"{ft.RecoverMs:0} ms out. **This threshold is a floor, not a "
+                               + "ceiling** - it must sit under the sensor noise, so check the "
+                               + "proposal at stop.");
+            }
+            if (_washout != null)
+            {
+                WashoutThresholds wt = Detection.ResolveWashout(AnomalyKind.Washout);
+                MilErrorLog.Note($"{Name}: washout watch on - bright at or above "
+                               + $"{wt.EnterLuma:0.#} luma with spread within {wt.MaxSpread:0.#} "
+                               + $"and detail within {wt.MaxDetail:0.#}, back at {wt.ExitLuma:0.#}, "
+                               + $"dwell {wt.EnterMs:0} ms in / {wt.RecoverMs:0} ms out");
+            }
+            if (_blackout != null)
+            {
+                BlackoutThresholds bt = Detection.ResolveBlackout(AnomalyKind.Blackout);
+                // In milliseconds, not frames. The rate is not measured yet at this point in
+                // the start-up, so a frame count printed here would read 1 and be a lie about
+                // what the detector will do - which is how the missing RateKnown guard was found.
+                MilErrorLog.Note($"{Name}: blackout watch on - dark at or below "
+                               + $"{bt.EnterLuma:0.#} luma and flat within {bt.MaxSpread:0.#}, "
+                               + $"back at {bt.ExitLuma:0.#}, "
+                               + $"dwell {bt.EnterMs:0} ms in / {bt.RecoverMs:0} ms out "
+                               + "(resolved to frames once the rate is measured)");
+            }
             if (!watching)
                 MilErrorLog.Note($"{Name}: detection off - "
                                + (DetectionEnabled
@@ -1514,10 +2165,101 @@ namespace MatroxFrameGrabber.Mil
                   + $"{_detector.CoherenceSaves} turned away by coherence alone; "
                   + $"{_detector.Observed} frames judged");
 
+            if (DetectionEnabled && _blackout != null)
+            {
+                MilErrorLog.Note($"{Name}: {_blackout.Propose()}");
+                MilErrorLog.Note($"{Name}: blackout floor - last frame {_blackout.LastLuma:F1} luma, "
+                               + $"spread {_blackout.LastSpread:F1}; "
+                               + $"{(_blackout.InBlackout ? "STILL BLACK" : "picture present")} at stop; "
+                               + $"{_blackout.Judged} frames judged, "
+                               + $"{_blackout.FramesSkippedForGaps} dwell restarts on gaps");
+            }
+
             // A fault still running when the grab ends would otherwise never be reported at all.
             AnomalyEvent? tail = _detector?.Flush();
             if (tail.HasValue)
                 RecordAnomaly(tail.Value);
+
+            // Same for a blackout the dwell had not yet confirmed: a panel that died four frames
+            // before the run ended would be lost entirely.
+            AnomalyEvent? stillGone = _blackout?.Flush();
+            if (stillGone.HasValue)
+                RecordAnomaly(stillGone.Value);
+
+            if (DetectionEnabled && _washout != null)
+            {
+                MilErrorLog.Note($"{Name}: {_washout.Propose()}");
+                MilErrorLog.Note($"{Name}: washout ceiling - last frame {_washout.LastLuma:F1} luma, "
+                               + $"spread {_washout.LastSpread:F1}, detail {_washout.LastDetail:F1}; "
+                               + $"{(_washout.InWashout ? "STILL WHITE" : "picture present")} at stop; "
+                               + $"{_washout.Judged} frames judged");
+            }
+
+            AnomalyEvent? stillWhite = _washout?.Flush();
+            if (stillWhite.HasValue)
+                RecordAnomaly(stillWhite.Value);
+
+            if (DetectionEnabled && _freeze != null)
+            {
+                MilErrorLog.Note($"{Name}: {_freeze.Propose()}");
+                MilErrorLog.Note($"{Name}: freeze - last change {_freeze.LastChange:F4} luma/frame; "
+                               + $"{(_freeze.InFreeze ? "STILL FROZEN" : "picture moving")} at stop; "
+                               + $"{_freeze.Judged} frames judged");
+            }
+
+            AnomalyEvent? stillStuck = _freeze?.Flush();
+            if (stillStuck.HasValue)
+                RecordAnomaly(stillStuck.Value);
+
+            if (DetectionEnabled && _colorShift != null)
+            {
+                // Held past the detector's own lifetime: the operator presses Use measured after
+                // the run has stopped, which is exactly when _colorShift becomes null.
+                _colourProposal = _colorShift.Propose();
+                RaisePropertyChanged(nameof(CanAdoptColorBaseline));
+                MilErrorLog.Note($"{Name}: {_colorShift.Propose()}");
+                MilErrorLog.Note($"{Name}: colorshift - last shares R {_colorShift.LastShareR:F4} "
+                               + $"G {_colorShift.LastShareG:F4} B {_colorShift.LastShareB:F4}; "
+                               + (_colorShift.Calibrated
+                                    ? $"deviation {_colorShift.LastDeviation:F4} at stop"
+                                    : "no baseline, so nothing was judged")
+                               + $"; {_colorShift.Judged} frames bright enough to judge");
+            }
+
+            AnomalyEvent? stillShifted = _colorShift?.Flush();
+            if (stillShifted.HasValue)
+                RecordAnomaly(stillShifted.Value);
+
+            if (DetectionEnabled && _flicker != null)
+            {
+                MilErrorLog.Note($"{Name}: {_flicker.Propose()}");
+                MilErrorLog.Note($"{Name}: flicker - last window swung {_flicker.LastAmplitude:F4} "
+                               + $"of its mean, {_flicker.LastCrossings} crossings "
+                               + $"({_flicker.LastHz:F1} Hz); "
+                               + $"{(_flicker.InFlicker ? "STILL FLICKERING" : "steady")} at stop; "
+                               + $"{_flicker.Judged} windows judged");
+            }
+
+            AnomalyEvent? stillSwinging = _flicker?.Flush();
+            if (stillSwinging.HasValue)
+                RecordAnomaly(stillSwinging.Value);
+
+            if (DetectionEnabled && _flip != null)
+            {
+                MilErrorLog.Note($"{Name}: {_flip.Propose()}");
+                MilErrorLog.Note($"{Name}: flip - {_flip.Judged} pairs judged, "
+                               + $"{_flip.TooSymmetric} too symmetric to judge; "
+                               + $"{(_flip.InFlip ? $"TURNED OVER ({_flip.Axis})" : "upright")} at stop"
+                               + (_flip.Judged < 1
+                                    ? ". No pair changed enough to compare - these panels move "
+                                    + "about 0.06 luma a frame, so a still rig gives this kind "
+                                    + "almost nothing to work with until something moves"
+                                    : string.Empty));
+            }
+
+            AnomalyEvent? stillTurned = _flip?.Flush();
+            if (stillTurned.HasValue)
+                RecordAnomaly(stillTurned.Value);
 
             if (_stills != null && _stills.IsAllocated)
             {
@@ -1528,6 +2270,12 @@ namespace MatroxFrameGrabber.Mil
                                + $"max {_stills.MaxExportMs:F1} ms, total {_stills.ExportMsSum:F1} ms");
             }
 
+            // Auto-calibration, before the detector is released - it is the source of every
+            // number the decision rests on. After the floor and proposal lines above, so the log
+            // reads in the order a person would reason: here is the floor, here is what it
+            // proposes, here is what was done about it.
+            RunAutoCalibration();
+
             // Before releasing it: LogGrabSummary reads these, and a detector that is gone reports
             // nothing rather than what it found.
             _rejectedAtStop = _detector?.EventsRejectedForSpread ?? 0;
@@ -1536,6 +2284,62 @@ namespace MatroxFrameGrabber.Mil
                 _lastProposal = _detector.Propose(
                     DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
             _detector = null;
+            _blackout = null;
+            _washout = null;
+            _freeze = null;
+            if (_inspections > 0 || _inspectSkipped > 0)
+                MilErrorLog.Note($"{Name}: inspector - {_inspections} frame(s) inspected"
+                               + (_inspections > 0
+                                    ? $", mean {_inspectUsTotal / _inspections:F0} us / "
+                                    + $"max {_inspectUsMax:F0} us (crop + letterbox + inference + decode, "
+                                    + "off the acquisition thread)"
+                                    : string.Empty)
+                               + (_inspectSkipped > 0
+                                    ? $", {_inspectSkipped} skipped because the previous one was "
+                                    + "still running - the patrol rate is above what this model can keep up with"
+                                    : string.Empty));
+
+            if (_locator != null)
+            {
+                // Every outcome, not just the moves. A locator that looked 200 times and never
+                // found anything and one that never looked at all are the same silence otherwise,
+                // and with the model we have today the first is what actually happens.
+                MilErrorLog.Note(
+                    $"{Name}: {_locator}"
+                  + (_locator.Looks > 0
+                        ? $", mean {_locatorUsTotal / _locator.Looks:F0} us / max {_locatorUsMax:F0} us "
+                        + "(letterbox + mask + components, off the acquisition thread)"
+                        : string.Empty)
+                  + (_locatorSkipped > 0
+                        ? $", {_locatorSkipped} look(s) skipped because an inspection was already running"
+                        : string.Empty)
+                  + (_locator.Seen == 0 && _locator.Looks > 0
+                        ? " - NOTHING was ever found, so the region never moved. That is the "
+                        + "hold interlock doing its job."
+                        : string.Empty)
+                  + (_locator.Seen > 0 && _locator.Moves == 0 && _locator.FrozenLooks > 0
+                        ? " - the target WAS found, and the region did not move because a fault "
+                        + "was running on this channel for those looks. Check what is firing "
+                        + "before reading this as the locator not working."
+                        : string.Empty));
+            }
+            _hasFinding = false;
+            _locator = null;
+            _locatorFinder = null;
+            _locatorBox = null;
+            _locatorFindings = null;
+            _locatorClock.Stop();
+
+            _inspector?.Dispose();
+            _inspector = null;
+            _patrol = null;
+            _letterbox = null;
+            _findings = null;
+
+            _colorShift = null;
+            _flicker = null;
+            _flip = null;
+            _reducer.WantBands = false;
             RaisePropertyChanged(nameof(CalibrationText));
             RaiseCommandStates();
 
@@ -1556,6 +2360,448 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(IsGrabbing));
             RaisePropertyChanged(nameof(StatusText));
             RaiseCommandStates();
+        }
+
+        /// <summary>
+        /// Hands one already-extracted frame to a worker, and returns immediately.
+        ///
+        /// **The inference does not run here.** This is the acquisition hook, and `CLAUDE.md`
+        /// is explicit that whatever is added to it runs inside the frame budget - measured, an
+        /// inspection is about 5 ms against a period of 8.3. It survived on the hook only because
+        /// it runs one frame in 240 and the grab ring absorbs a single stall; that is luck rather
+        /// than design, and a busier machine or a slower model would turn it into lost frames.
+        /// Evidence dumps had the same shape of problem and were moved to a worker; so is this.
+        ///
+        /// **One inspection in flight per channel.** A second patrol tick arriving while the
+        /// worker is busy is dropped and counted rather than queued: the inspector is not thread
+        /// safe by contract, a queue would only delay frames that are already stale, and a count
+        /// of skips is the honest way to find out the rate is too high.
+        /// </summary>
+        private void QueueInspection(FrameExtractor frames, byte[] frame, long frameNumber)
+        {
+            IScreenInspector inspector = _inspector;
+            if (inspector == null || frames == null || frame == null) return;
+
+            if (Interlocked.CompareExchange(ref _inspectBusy, 1, 0) != 0)
+            {
+                Interlocked.Increment(ref _inspectSkipped);
+                return;
+            }
+
+            // The hold has to be taken here, on the acquisition thread, before the worker starts:
+            // taking it inside the task would race the caller's own Release below.
+            if (!frames.AddHold(frame))
+            {
+                Interlocked.Exchange(ref _inspectBusy, 0);
+                return;
+            }
+
+            // The extractor is the authority on the shared array's geometry - it is what laid
+            // the three planes out. Asking the grab buffer would be wrong off this thread anyway,
+            // because by the time the worker runs the board may have reused it.
+            ChannelRoi roi = _analysisRoi;
+            int w = frames.Width, h = frames.Height;
+            if (w <= 0 || h <= 0 || frames.Bands != 3)
+            {
+                frames.Release(frame);
+                Interlocked.Exchange(ref _inspectBusy, 0);
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                long start = Stopwatch.GetTimestamp();
+                try
+                {
+                    Inspect(inspector, frame, w, h, roi, frameNumber);
+                }
+                catch (Exception e)
+                {
+                    MilErrorLog.Write($"{Name}: inspector on frame {frameNumber}", e);
+                }
+                finally
+                {
+                    double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
+                    _inspections++;
+                    _inspectUsTotal += us;
+                    if (us > _inspectUsMax) _inspectUsMax = us;
+
+                    frames.Release(frame);
+                    Interlocked.Exchange(ref _inspectBusy, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        /// The inspection itself, on the worker. Crops the analysis region out of the shared
+        /// frame, letterboxes it, runs the model and logs what came back.
+        ///
+        /// Findings are logged and go no further. Acting on them needs a model trained on our
+        /// faults and a rule for what happens when the inspector and a tile detector disagree
+        /// about the same frame, and neither exists (docs/adr/0002).
+        /// </summary>
+        private void Inspect(IScreenInspector inspector, byte[] frame, int frameWidth,
+                             int frameHeight, ChannelRoi roi, long frameNumber)
+        {
+            bool full = roi.IsFullFrame;
+            int rx = full ? 0 : roi.OffsetX;
+            int ry = full ? 0 : roi.OffsetY;
+            int rw = full ? frameWidth : roi.Width;
+            int rh = full ? frameHeight : roi.Height;
+            if (rw <= 0 || rh <= 0 || rx + rw > frameWidth || ry + rh > frameHeight) return;
+
+            // Built on the first inspection, because the region is not known before one runs -
+            // and rebuilt if it changes, rather than quietly mixing two geometries.
+            if (_letterbox == null || _letterbox.SourceWidth != rw || _letterbox.SourceHeight != rh)
+            {
+                _letterbox = new BgrLetterbox(rw, rh, inspector.InputWidth, inspector.InputHeight);
+                MilErrorLog.Note($"{Name}: inspector letterbox - {_letterbox}");
+            }
+
+            byte[] bgr = _letterbox.Fill(frame, frameWidth, frameHeight, rx, ry);
+
+            _findings ??= new ScreenFinding[16];
+            int n = inspector.Inspect(bgr, _findings);
+
+            // Model space -> region space -> FRAME space. The last step is the one that was
+            // missing: `ScreenFinding` says in its own documentation that its coordinates are
+            // acquired-frame pixels, and this path was leaving them relative to the region. It
+            // never showed, because the only consumer was a log line that said "in the region".
+            // The overlay is a second consumer, and it would have drawn the box in the wrong place.
+            for (int i = 0; i < n; i++)
+            {
+                ScreenFinding f = _findings[i];
+                _letterbox.ToFrame(f.X, f.Y, f.Width, f.Height,
+                                   out float fx, out float fy, out float fw, out float fh);
+                _findings[i] = new ScreenFinding(f.Kind, f.Label, f.Score, fx + rx, fy + ry, fw, fh);
+
+                MilErrorLog.Note($"{Name}: finding frame {frameNumber} - {f.Kind} "
+                               + $"(\"{f.Label}\") {f.Score:F3} at {fx + rx:F0},{fy + ry:F0} "
+                               + $"{fw:F0}x{fh:F0} in the frame");
+            }
+
+            // **The overlay is NOT fed from here.** This path searches inside the region, so its
+            // answer is inside the region by construction and says nothing about where the target
+            // is. Publishing from both paths put two different questions in one field: the patrol
+            // came back empty every two seconds and wiped whatever the locator had just found, and
+            // the rectangle on screen blinked for no reason a person could see. The locator owns
+            // that field.
+        }
+
+        /// <summary>
+        /// One turn of the ROI locator, on the stats tick: apply what the last look decided, then
+        /// maybe take another look.
+        ///
+        /// **Applying first, on this thread, is the point of the split.** The worker cannot call
+        /// <see cref="SetAnalysisRoi"/> - it raises property changes that bindings are on - so it
+        /// leaves the decision here and the next tick applies it. At 500 ms that is not a latency
+        /// worth marshalling for, and it keeps the region changing on exactly the thread the
+        /// operator's own drag changes it on.
+        ///
+        /// **Nothing happens until this run has written the display buffer.** A stopped grab
+        /// leaves the previous run's last frame sitting there - `SaveSnapshotToOutput` is gated on
+        /// the same fact and learned it the hard way - and a region proposed from the scene before
+        /// the equipment was moved is the wrong answer wearing the right face.
+        /// </summary>
+        private void LocatorTick()
+        {
+            RoiLocator locator = _locator;
+            if (locator == null) return;
+
+            if (_locatorHasPending)
+            {
+                _locatorHasPending = false;
+                ChannelRoi before = _analysisRoi;
+
+                // Not "by operator": a person's rectangle resets what the locator was confirming,
+                // and the locator must not reset itself for its own move.
+                SetAnalysisRoi(_locatorPending, byOperator: false);
+
+                MilErrorLog.Note($"{Name}: locator moved the region {before} -> {_analysisRoi} "
+                               + $"(score {_locatorPendingScore:F2})");
+                if (_locatorPendingGrew)
+                    MilErrorLog.Note($"{Name}: locator changed the region SIZE - the thresholds "
+                                   + "were measured over the old one and no longer describe this "
+                                   + "channel. Re-calibrate, or put the size back.");
+            }
+
+            GreenScreenInspector finder = _locatorFinder;
+            if (finder == null) return;
+            if (!_isGrabbing || _dispBufId == MIL.M_NULL) return;
+            if (Volatile.Read(ref _dispCopies) <= 0) return;
+            if (_locatorClock.ElapsedMilliseconds < _locatorNextMs) return;
+
+            double every = Output?.LocateSeconds ?? 0.0;
+            if (every <= 0.0) return;
+
+            // Its own flag, not the patrol's. The finder keeps its own buffers so it is no more
+            // thread safe than the model, but it costs a fraction of a millisecond - there is no
+            // reason for the two to wait on each other, and sharing the flag made the patrol's
+            // empty looks push the locator's out of the way.
+            if (Interlocked.CompareExchange(ref _locatorBusy, 1, 0) != 0)
+            {
+                _locatorSkipped++;
+                return;
+            }
+
+            _locatorNextMs = _locatorClock.ElapsedMilliseconds + (long)(every * 1000.0);
+
+            if (!ReadDisplayForLocator(out int w, out int h))
+            {
+                Interlocked.Exchange(ref _locatorBusy, 0);
+                return;
+            }
+
+            // Read here, judged here, inferred on a worker. The first two are cheap; the inference
+            // is about 8.5 ms beside a grab and would be felt as a stutter on this thread.
+            bool faultRunning = AnyFaultRunning();
+            ChannelRoi current = _analysisRoi;
+
+            Task.Run(() =>
+            {
+                long start = Stopwatch.GetTimestamp();
+                try
+                {
+                    if (_locatorBox == null || _locatorBox.SourceWidth != w || _locatorBox.SourceHeight != h)
+                    {
+                        _locatorBox = new BgrLetterbox(w, h, finder.InputWidth, finder.InputHeight);
+                        MilErrorLog.Note($"{Name}: locator letterbox - {_locatorBox}");
+                    }
+                    _locatorFindings ??= new ScreenFinding[16];
+
+                    byte[] bgr = _locatorBox.Fill(_locatorPlanar, w, h, 0, 0);
+
+                    if (!_locatorInputDumped)
+                    {
+                        _locatorInputDumped = true;
+                        DumpLocatorInput(bgr, finder.InputWidth, finder.InputHeight);
+                    }
+
+                    int n = finder.Inspect(bgr, _locatorFindings);
+
+
+                    // Model space back to frame space before anything judges the numbers. The
+                    // letterbox was built for the whole frame, so what comes out is already in the
+                    // space the analysis region lives in - no offset to add. That is the reason
+                    // the locator is shown the whole frame rather than a crop.
+                    for (int i = 0; i < n; i++)
+                    {
+                        ScreenFinding f = _locatorFindings[i];
+                        _locatorBox.ToFrame(f.X, f.Y, f.Width, f.Height,
+                                            out float fx, out float fy, out float fw, out float fh);
+                        _locatorFindings[i] = new ScreenFinding(f.Kind, f.Label, f.Score, fx, fy, fw, fh);
+                    }
+
+                    PublishFinding(_locatorFindings, n);
+
+                    RoiLocatorDecision d = locator.Look(_locatorFindings, n, current, w, h, faultRunning);
+                    if (d.Moved)
+                    {
+                        _locatorPending = d.Roi;
+                        _locatorPendingScore = d.Score;
+                        _locatorPendingGrew = d.SizeChanged;
+                        _locatorHasPending = true;
+                    }
+                    else if (d.Outcome == RoiLocatorOutcome.Confirming)
+                    {
+                        MilErrorLog.Note($"{Name}: locator is confirming a different box "
+                                       + $"(score {d.Score:F2}, overlap {d.Iou:F2}, "
+                                       + $"look {d.Streak} of {locator.DwellLooks})");
+                    }
+                }
+                catch (Exception e)
+                {
+                    MilErrorLog.Write($"{Name}: ROI locator", e);
+                }
+                finally
+                {
+                    double us = (Stopwatch.GetTimestamp() - start) * 1_000_000.0 / Stopwatch.Frequency;
+                    _locatorUsTotal += us;
+                    if (us > _locatorUsMax) _locatorUsMax = us;
+                    Interlocked.Exchange(ref _locatorBusy, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        /// The box the inspector last reported, in acquired-frame pixels - the same space the
+        /// analysis region is in, so the overlay needs no conversion.
+        ///
+        /// Returns false when the last look found nothing. **That is the common case here**: the
+        /// model in hand is a green-object detector and these panels are not green, so an overlay
+        /// that kept showing the last box would be showing something that is no longer true.
+        /// </summary>
+        public bool TryGetLastFinding(out ChannelRoi roi, out float score)
+        {
+            if (_hasFinding)
+            {
+                roi = _lastFinding;
+                score = _lastFindingScore;
+                return true;
+            }
+            roi = ChannelRoi.FullFrame;
+            score = 0f;
+            return false;
+        }
+
+        /// <summary>
+        /// Records the best of what a look returned, or clears it when a look returned nothing.
+        ///
+        /// Called from the inspection workers. The fields are written here and read on the tick;
+        /// `_hasFinding` is volatile and written last, so the tick never sees the flag before the
+        /// rectangle it refers to.
+        /// </summary>
+        /// <remarks>
+        /// Called from the locator worker only - see the note in <c>Inspect</c> for why the patrol
+        /// must not also write here.
+        /// </remarks>
+        private void PublishFinding(ScreenFinding[] findings, int count)
+        {
+            if (findings == null || count <= 0)
+            {
+                _hasFinding = false;
+                return;
+            }
+
+            ScreenFinding best = findings[0];
+            for (int i = 1; i < count && i < findings.Length; i++)
+                if (findings[i].Score > best.Score) best = findings[i];
+
+            if (best.Width <= 0f || best.Height <= 0f)
+            {
+                _hasFinding = false;
+                return;
+            }
+
+            _lastFinding = new ChannelRoi((int)Math.Round(best.X), (int)Math.Round(best.Y),
+                                          (int)Math.Round(best.Width), (int)Math.Round(best.Height));
+            _lastFindingScore = best.Score;
+            _hasFinding = true;
+        }
+
+        /// <summary>
+        /// Whether any detector on this channel is inside a fault right now.
+        ///
+        /// The locator asks before it moves anything. A region that follows a box while the panel
+        /// is faulty can walk the detectors off the very thing they are judging, and nothing else
+        /// in the app would say so - the lane goes quiet, and quiet reads as healthy.
+        /// </summary>
+        private bool AnyFaultRunning() =>
+            (_detector?.InEvent ?? false)
+         || (_blackout?.InBlackout ?? false)
+         || (_washout?.InWashout ?? false)
+         || (_freeze?.InFreeze ?? false)
+         || (_colorShift?.InColorShift ?? false)
+         || (_flicker?.InFlicker ?? false)
+         || (_flip?.InFlip ?? false);
+
+        /// <summary>
+        /// Reads the whole display buffer into the planar gbrp layout <see cref="BgrLetterbox"/>
+        /// takes. On the tick, because everything else that touches this buffer is on this thread.
+        ///
+        /// **The band order is the trap.** `MbufChildColor` indexes 0/1/2 as R/G/B and the
+        /// letterbox reads planes as G/B/R - the layout `FrameExtractor` produces, because it is
+        /// what ffmpeg takes. Getting it wrong raises nothing and logs nothing: the model simply
+        /// stops finding anything, which is indistinguishable from the model we have today.
+        /// </summary>
+        private bool ReadDisplayForLocator(out int width, out int height)
+        {
+            width = height = 0;
+            MIL_ID red = MIL.M_NULL, green = MIL.M_NULL, blue = MIL.M_NULL;
+            try
+            {
+                int w = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_X, MIL.M_NULL);
+                int h = (int)MIL.MbufInquire(_dispBufId, MIL.M_SIZE_Y, MIL.M_NULL);
+                MIL_INT bands = MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BAND, MIL.M_NULL);
+
+                // The same refusal BrightnessMeter makes: raw bytes out of a deeper buffer are the
+                // high byte only, and a picture pinned near white is worse than no picture.
+                if (w <= 0 || h <= 0 || bands < 3
+                    || MIL.MbufInquire(_dispBufId, MIL.M_SIZE_BIT, MIL.M_NULL) > 8)
+                    return false;
+
+                int plane = w * h;
+                if (_locatorPlanar == null || _locatorPlanar.Length != plane * 3)
+                {
+                    _locatorPlanar = new byte[plane * 3];
+                    _locatorR = new byte[plane];
+                    _locatorG = new byte[plane];
+                    _locatorB = new byte[plane];
+                }
+
+                MIL.MbufChildColor(_dispBufId, 0, ref red);
+                MIL.MbufChildColor(_dispBufId, 1, ref green);
+                MIL.MbufChildColor(_dispBufId, 2, ref blue);
+
+                // MbufGet2d, not MbufGet: these buffers carry row padding, and a padded read into
+                // a tight array shears the rows.
+                MIL.MbufGet2d(red, 0, 0, w, h, _locatorR);
+                MIL.MbufGet2d(green, 0, 0, w, h, _locatorG);
+                MIL.MbufGet2d(blue, 0, 0, w, h, _locatorB);
+
+                Buffer.BlockCopy(_locatorG, 0, _locatorPlanar, 0, plane);
+                Buffer.BlockCopy(_locatorB, 0, _locatorPlanar, plane, plane);
+                Buffer.BlockCopy(_locatorR, 0, _locatorPlanar, plane * 2, plane);
+
+                width = w;
+                height = h;
+                return true;
+            }
+            catch (MILException)
+            {
+                // A buffer can be freed underneath the tick when a camera is reloaded. Losing one
+                // look costs nothing, and the run summary says how many were lost.
+                return false;
+            }
+            finally
+            {
+                if (blue != MIL.M_NULL) MIL.MbufFree(blue);
+                if (green != MIL.M_NULL) MIL.MbufFree(green);
+                if (red != MIL.M_NULL) MIL.MbufFree(red);
+            }
+        }
+
+        /// <summary>
+        /// Writes exactly what the model was handed - the letterboxed, interleaved BGR block -
+        /// so it can be opened and compared against what the harness feeds from a still.
+        ///
+        /// Once per run, on the worker, and failures are swallowed: this is instrumentation, and
+        /// instrumentation that can stop a grab is worse than no instrumentation.
+        /// </summary>
+        private void DumpLocatorInput(byte[] bgr, int width, int height)
+        {
+            try
+            {
+                if (bgr == null || width <= 0 || height <= 0) return;
+
+                // BGR to BGRA, which is the smallest format WPF will encode without a palette.
+                var bgra = new byte[width * height * 4];
+                for (int i = 0, o = 0; i < width * height; i++, o += 4)
+                {
+                    bgra[o] = bgr[i * 3];
+                    bgra[o + 1] = bgr[i * 3 + 1];
+                    bgra[o + 2] = bgr[i * 3 + 2];
+                    bgra[o + 3] = 255;
+                }
+
+                var source = System.Windows.Media.Imaging.BitmapSource.Create(
+                    width, height, 96, 96, System.Windows.Media.PixelFormats.Bgra32,
+                    null, bgra, width * 4);
+
+                string folder = Output?.OutputFolder ?? AppContext.BaseDirectory;
+                string path = System.IO.Path.Combine(folder, $"locator-input-{SafeName()}.png");
+
+                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(source));
+                using (var fs = System.IO.File.Create(path))
+                    encoder.Save(fs);
+
+                MilErrorLog.Note($"{Name}: locator input written - {width}x{height} -> {path}");
+            }
+            catch (Exception e)
+            {
+                MilErrorLog.Write($"{Name}: locator input dump", e);
+            }
         }
 
         /// <summary>Raised when a recording stops on its own (ffmpeg died); carries the error text.</summary>
@@ -1583,6 +2829,9 @@ namespace MatroxFrameGrabber.Mil
                 // the acquired, already-decimated frame — so no conversion belongs here.
                 if (BrightnessEnabled)
                     _brightness.Sample(_dispBufId, _analysisRoi);
+
+                // The ROI locator rides the same tick and the same buffer, for the same reason.
+                LocatorTick();
 
                 // Frames the board dropped because the host could not take them fast enough.
                 // Read on every tick, not only while RAW-recording: this is the acceptance
@@ -1676,8 +2925,17 @@ namespace MatroxFrameGrabber.Mil
             RaisePropertyChanged(nameof(FramesMissed));
             // The watched kinds live in the app settings, which is a second window that can be open
             // at the same time as this camera's. Nothing here hears that change, so it is re-read
-            // on the tick - the convention for every other live value.
+            // on the tick - the convention for every other live value. The same goes for the
+            // hints: each carries a live reading, and BlackoutHint was raised only when someone
+            // applied a threshold - so the one line that exists to say what the panel is doing
+            // right now sat stale.
             RaisePropertyChanged(nameof(DetectionKindsText));
+            RaisePropertyChanged(nameof(BlackoutHint));
+            RaisePropertyChanged(nameof(WashoutHint));
+            RaisePropertyChanged(nameof(FreezeHint));
+            RaisePropertyChanged(nameof(ColorShiftHint));
+            RaisePropertyChanged(nameof(FlickerHint));
+            RaisePropertyChanged(nameof(FlipHint));
             RaisePropertyChanged(nameof(StatusText));
             RaisePropertyChanged(nameof(RecordingActive));
             RaisePropertyChanged(nameof(RecordingBannerText));
@@ -1739,7 +2997,10 @@ namespace MatroxFrameGrabber.Mil
                     _lastDispCopyMs = now;
             }
             if (copyToDisplay)
+            {
                 MIL.MbufCopy(grabbedBuffer, displayBuffer);
+                _dispCopies++;   // read by the locator to know the buffer is this run's
+            }
 
             // ---- Event tier: every frame, so a window can be cut out of it later ----
             IVideoSink events = _eventSink;
@@ -1754,7 +3015,13 @@ namespace MatroxFrameGrabber.Mil
             var eventsHost = events as IHostFrameSink;
             var sessionHost = session as IHostFrameSink;
 
-            if (eventsHost != null || sessionHost != null)
+            // The inspector wants the same bytes the sinks want, so it asks here rather than
+            // reading the frame again. ShouldInspect is evaluated once and its answer reused
+            // below - calling it twice would advance the patrol's clock twice.
+            bool inspectThisFrame = _patrol != null
+                                 && _patrol.ShouldInspect(frameNumber, timeStampSec);
+
+            if (eventsHost != null || sessionHost != null || inspectThisFrame)
             {
                 FrameExtractor frames = _frames;
                 // Nothing is read out while every encoder is behind: the live view comes first,
@@ -1764,7 +3031,8 @@ namespace MatroxFrameGrabber.Mil
                 EvidenceRing evidence = _evidence;
                 bool room = (eventsHost?.WantsFrame(frameNumber) ?? false)
                          || (sessionHost?.WantsFrame(frameNumber) ?? false)
-                         || evidence != null;
+                         || evidence != null
+                         || inspectThisFrame;
                 byte[] frame = room && frames != null ? frames.Extract(grabbedBuffer) : null;
 
                 eventsHost?.FeedShared(frame, frameNumber);
@@ -1773,6 +3041,12 @@ namespace MatroxFrameGrabber.Mil
                 // One memcpy, on the acquisition thread. The bytes are already in the layout the
                 // lossless encoder wants, so this is the whole cost of keeping them.
                 if (frame != null) evidence?.Add(frame, frameNumber, timeStampSec);
+
+                // Same contract as the sinks: take a hold before queueing, and the worker
+                // releases it. Done before the caller's own release below, or the array could go
+                // back to the pool while the inspector is still reading it.
+                if (frame != null && inspectThisFrame)
+                    QueueInspection(frames, frame, frameNumber);
 
                 // The caller's own hold, last: each sink added its own before queueing, so the
                 // array cannot go back to the pool while either writer is still reading it.
@@ -1806,7 +3080,14 @@ namespace MatroxFrameGrabber.Mil
                 return;
 
             AnomalyDetector detector = _detector;
-            if (detector == null)
+            BlackoutDetector blackout = _blackout;
+            WashoutDetector washout = _washout;
+            FreezeDetector freeze = _freeze;
+            ColorShiftDetector colour = _colorShift;
+            FlickerDetector flicker = _flicker;
+            FlipDetector flip = _flip;
+            if (detector == null && blackout == null && washout == null && freeze == null
+             && colour == null && flicker == null && flip == null)
                 return;
 
             // A failed reduction leaves the grid empty, and an empty grid is not a dark one -
@@ -1818,14 +3099,77 @@ namespace MatroxFrameGrabber.Mil
             _grid.FrameNumber = frameNumber;
             _history.Add(_grid, timeStampSec);
 
-            AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
-            if (closed.HasValue)
-                RecordAnomaly(closed.Value);
+            // Both judges read the same reduction. The reduction is the expensive half
+            // (200 us of an 8333 us period, measured); the second judge adds one pass over 64
+            // tile means to find their range.
+            if (detector != null)
+            {
+                AnomalyEvent? closed = detector.Observe(_grid, timeStampSec);
+                if (closed.HasValue)
+                    RecordAnomaly(closed.Value);
 
-            // Taken here rather than on the tick: the detector is only ever touched from this
-            // thread, so draining it needs no lock, and the queue below is what crosses over.
-            while (detector.TryTakeRejected(out AnomalyEvent turned))
-                _rejections.Enqueue(turned);
+                // Taken here rather than on the tick: the detector is only ever touched from this
+                // thread, so draining it needs no lock, and the queue below is what crosses over.
+                while (detector.TryTakeRejected(out AnomalyEvent turned))
+                    _rejections.Enqueue(turned);
+            }
+
+            // Emits on confirm rather than on close, and only once for a fault that lasts hours.
+            // That is also while the evidence ring still holds the transition, which is the
+            // diagnostic moment - the picture going, not the black afterwards.
+            if (blackout != null)
+            {
+                AnomalyEvent? gone = blackout.Observe(_grid, timeStampSec);
+                if (gone.HasValue)
+                    RecordAnomaly(gone.Value);
+            }
+
+            // Third judge, same reduction. It reads one more number off the grid - the mean of
+            // the per-tile deviations - which is what tells a white UI screen from a saturated
+            // panel; the levels alone cannot.
+            if (washout != null)
+            {
+                AnomalyEvent? white = washout.Observe(_grid, timeStampSec);
+                if (white.HasValue)
+                    RecordAnomaly(white.Value);
+            }
+
+            // Fourth judge, and the only one that keeps a copy of the previous grid - it is the
+            // one asking what changed rather than what this frame is.
+            if (freeze != null)
+            {
+                AnomalyEvent? stuck = freeze.Observe(_grid, timeStampSec);
+                if (stuck.HasValue)
+                    RecordAnomaly(stuck.Value);
+            }
+
+            // Fifth judge, and the only one that does not read the tile means at all - it reads
+            // the per-band totals the same pass gathered. Luma cannot see what it is looking for.
+            if (colour != null)
+            {
+                AnomalyEvent? shifted = colour.Observe(_grid, timeStampSec);
+                if (shifted.HasValue)
+                    RecordAnomaly(shifted.Value);
+            }
+
+            // Sixth judge, and the only one that answers about a stretch of time rather than a
+            // frame - it reports nothing until its window has filled, which is correct rather
+            // than a limitation: an oscillation is not a property of one frame.
+            if (flicker != null)
+            {
+                AnomalyEvent? swinging = flicker.Observe(_grid, timeStampSec);
+                if (swinging.HasValue)
+                    RecordAnomaly(swinging.Value);
+            }
+
+            // Seventh judge, and the only one that asks about the tile *arrangement* rather than
+            // the numbers in it. Every figure the other six read is invariant under a mirror.
+            if (flip != null)
+            {
+                AnomalyEvent? turned = flip.Observe(_grid, timeStampSec);
+                if (turned.HasValue)
+                    RecordAnomaly(turned.Value);
+            }
 
             // ---- Lossless stills: the detector says which frame each slot wants ----
             //
@@ -1835,13 +3179,87 @@ namespace MatroxFrameGrabber.Mil
             StillRing stills = _stills;
             if (stills != null)
             {
-                double dev = detector.LastDepth;
-                if (detector.EnteredThisFrame)
-                    stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec, dev);
-                if (detector.DeepenedThisFrame)
-                    stills.Keep(StillRing.Slot.Extreme, grabbedBuffer, frameNumber, timeStampSec, dev);
-                if (detector.RecoveredThisFrame)
-                    stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec, dev);
+                double dev = detector?.LastDepth ?? 0.0;
+                if (detector != null)
+                {
+                    if (detector.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec, dev);
+                    if (detector.DeepenedThisFrame)
+                        stills.Keep(StillRing.Slot.Extreme, grabbedBuffer, frameNumber, timeStampSec, dev);
+                    if (detector.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec, dev);
+                }
+
+                // After the event detector on purpose. A blackout onset is usually also a fall, so
+                // both can want the same slot on the same frame, and the more specific finding is
+                // the one worth keeping the picture for. There is no Extreme here - a blackout has
+                // no depth to deepen into, it is either gone or it is not.
+                if (blackout != null)
+                {
+                    if (blackout.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    blackout.LastLuma);
+                    if (blackout.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    blackout.LastLuma);
+                }
+
+                if (washout != null)
+                {
+                    if (washout.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    washout.LastLuma);
+                    if (washout.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    washout.LastLuma);
+                }
+
+                // Freeze keeps its picture even though the picture looks fine, because that is
+                // the finding: the onset still and the reference from 258 ms earlier are the same
+                // image, and a pair that is bit-identical is the only evidence a freeze leaves.
+                // A clip cannot show it - x264 encodes a still screen to nearly nothing and the
+                // result looks the same as a screen that was meant to be still.
+                if (freeze != null)
+                {
+                    if (freeze.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    freeze.LastChange);
+                    if (freeze.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    freeze.LastChange);
+                }
+
+                // ColorShift after the brightness kinds, and last but for Flip, because it is the
+                // most specific thing that can be true of a frame that is otherwise normal - and
+                // because it is the one kind whose still is worth more than its numbers. The
+                // deviation says a band moved; the picture says which way it went wrong.
+                if (colour != null)
+                {
+                    if (colour.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    colour.LastDeviation);
+                    if (colour.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    colour.LastDeviation);
+                }
+
+                // Flip last: if a turn coincides with anything else, the turn is what the picture
+                // has to show, and one look at the still settles a finding that took a comparison
+                // of tile arrangements to reach.
+                if (flip != null)
+                {
+                    if (flip.EnteredThisFrame)
+                        stills.Keep(StillRing.Slot.Onset, grabbedBuffer, frameNumber, timeStampSec,
+                                    1.0 - flip.LastRatio);
+                    if (flip.RecoveredThisFrame)
+                        stills.Keep(StillRing.Slot.Recovered, grabbedBuffer, frameNumber, timeStampSec,
+                                    1.0 - flip.LastRatio);
+                }
+
+                // **Flicker deliberately keeps nothing.** Its finding is a property of a second of
+                // video, and one frame of an oscillation is just a frame at one phase - a still
+                // that shows nothing wrong, filed as evidence that something was. The clip is the
+                // right artefact for this kind, and it already gets one.
 
                 // A healthy frame from up to 258 ms back, so the pair shows what changed.
                 //
@@ -1849,7 +3267,13 @@ namespace MatroxFrameGrabber.Mil
                 // event is open: measured, an event over frames 8140-8142 was still unexported when
                 // frame 8192 came round and refreshed the reference, so the "frame from before the
                 // fall" was one from 52 frames after it. The tick can be up to 500 ms behind.
-                if (!detector.InEvent
+                if (!(detector?.InEvent ?? false)
+                    && !(blackout?.InBlackout ?? false)
+                    && !(washout?.InWashout ?? false)
+                    && !(freeze?.InFreeze ?? false)
+                    && !(colour?.InColorShift ?? false)
+                    && !(flicker?.InFlicker ?? false)
+                    && !(flip?.InFlip ?? false)
                     && !stills.Has(StillRing.Slot.Onset)
                     && frameNumber % StillRing.ReferenceEveryFrames == 0)
                     stills.Keep(StillRing.Slot.Reference, grabbedBuffer, frameNumber, timeStampSec, dev);
@@ -2330,6 +3754,55 @@ namespace MatroxFrameGrabber.Mil
 
             _evidence = null;
             _evidenceClips = null;
+        }
+
+        /// <summary>
+        /// Lets the finished run move its own threshold, if the option is on and the run earned it.
+        ///
+        /// Every outcome is logged, including every refusal. This feature spends most of its life
+        /// declining, and a feature that silently does nothing cannot be told from a broken one.
+        /// </summary>
+        private void RunAutoCalibration()
+        {
+            OutputSettings o = Output;
+            AnomalyDetector d = _detector;
+            if (o == null || d == null || !DetectionEnabled) return;
+
+            AutoCalibrationPolicy policy = o.CalibrationPolicy;
+            if (!policy.Enabled) return;      // silent only in the one case a person chose
+
+            DepthProposal p = d.Propose(DetectionThresholds.FalsePositiveBudgetPerHour, _frameRate);
+            KindSettings k = Detection.For(AnomalyKind.Dropout);
+
+            AutoCalibrationDecision decision = policy.Decide(
+                currentThreshold: k.Deviation,
+                floor: d.MaxCoherentNormalDepth,
+                framesJudged: d.Observed,
+                fps: _frameRate,
+                anomalies: Interlocked.CompareExchange(ref _anomalyCount, 0, 0),
+                rejectedForSpread: d.EventsRejectedForSpread,
+                framesMissed: _framesMissed,
+                proposalUsable: p.IsUsable);
+
+            if (!decision.Adopted)
+            {
+                MilErrorLog.Note($"{Name}: {decision}");
+                return;
+            }
+
+            Detection.ApplyAutoCalibration(
+                AnomalyKind.Dropout, decision.To,
+                DateTime.Now.ToString("s", CultureInfo.InvariantCulture),
+                decision.Frames, decision.Floor);
+            o.SaveThresholds();
+
+            _depthInput = null;
+            RaisePropertyChanged(nameof(DepthInput));
+            RaisePropertyChanged(nameof(DetectionHint));
+            RaisePropertyChanged(nameof(CalibrationText));
+
+            MilErrorLog.Note($"{Name}: {decision} - was {decision.From:0.####}, "
+                           + $"kept as PreviousDeviation so it can be put back");
         }
 
         /// <summary>
@@ -3453,11 +4926,20 @@ namespace MatroxFrameGrabber.Mil
             SetAnalysisRoi(new ChannelRoi(Math.Max(0, offsetX), Math.Max(0, offsetY), width, height));
         }
 
-        private void SetAnalysisRoi(ChannelRoi requested)
+        /// <param name="byOperator">
+        /// Whether a person asked for this. When they did, the locator forgets what it was
+        /// confirming: **a rectangle somebody drew is a new starting point, not a proposal to be
+        /// argued with**, and a streak collected against the old one would otherwise move the
+        /// region back out from under them a few looks later.
+        /// </param>
+        private void SetAnalysisRoi(ChannelRoi requested, bool byOperator = true)
         {
             ChannelRoi snapped = requested;
             if (!requested.IsFullFrame && TryGetFrameSize(out int fw, out int fh))
                 snapped = requested.Snap(fw, fh);
+
+            if (byOperator)
+                _locator?.Reset();
 
             _analysisRoi = snapped;
             Output?.SetRoi(_index, snapped);

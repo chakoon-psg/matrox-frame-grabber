@@ -116,11 +116,27 @@ namespace MatroxFrameGrabber.Tests
         }
 
         [Fact]
-        public void Only_dropout_counts_as_running_even_if_another_kind_is_switched_on()
+        public void A_kind_counts_as_running_only_when_it_has_a_detector()
         {
+            // Written as a property rather than against a named kind. It used to switch Flip on
+            // as the example of a kind with no detector - and then Flip got one, which is the day
+            // this test had least business failing. Every kind has a detector as of 2026-09-13,
+            // so the unimplemented branch cannot be exercised by naming one; the property holds
+            // either way and starts checking that branch again the moment a kind is added.
             var s = new DetectionSettings();
-            s.For(AnomalyKind.Washout).Enabled = true;   // no detector for it yet
-            Assert.Equal(1, s.EnabledCount);
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+                s.For(k).Enabled = true;
+
+            int implemented = 0;
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+                if (AnomalyCatalog.Implemented(k)) implemented++;
+
+            Assert.Equal(implemented, s.EnabledCount);
+
+            // And switching one off takes exactly one off the count, if it had a detector.
+            s.For(AnomalyKind.Washout).Enabled = false;
+            Assert.Equal(implemented - (AnomalyCatalog.Implemented(AnomalyKind.Washout) ? 1 : 0),
+                         s.EnabledCount);
         }
 
         // ----- migration -----
@@ -279,13 +295,110 @@ namespace MatroxFrameGrabber.Tests
     /// <summary>What is known about each kind without asking a detector.</summary>
     public class AnomalyCatalogTests
     {
+        /// <summary>
+        /// Two kinds have a detector, and they are different kinds of detector. Dropout measures
+        /// a fall relative to a running baseline and confirms on one frame; Blackout measures an
+        /// absolute level with hysteresis and must not. The rest have none yet, and the settings
+        /// window says so rather than hiding them.
+        /// </summary>
+        /// <summary>
+        /// The catalog and the settings window have to agree about which kinds are real, whatever
+        /// the count happens to be.
+        ///
+        /// Written as a property rather than a list: the first two versions of this test froze
+        /// "only Dropout" and then "two kinds", and each broke the day a detector was added -
+        /// which is the one day the test should have been silent. What matters is that
+        /// `Implemented` and `EnabledCount` never disagree, and that every kind is decidable.
+        /// </summary>
         [Fact]
-        public void Only_dropout_has_a_detector()
+        public void Implemented_kinds_are_the_ones_that_count_as_running()
         {
-            Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Dropout));
             foreach (AnomalyKind k in AnomalyCatalog.All)
-                if (k != AnomalyKind.Dropout)
-                    Assert.False(AnomalyCatalog.Implemented(k), $"{k} has no detector yet");
+            {
+                var s = new DetectionSettings();
+                foreach (AnomalyKind off in AnomalyCatalog.All)
+                    s.For(off).Enabled = false;
+
+                s.For(k).Enabled = true;
+
+                Assert.Equal(AnomalyCatalog.Implemented(k) ? 1 : 0, s.EnabledCount);
+            }
+
+            // And Dropout in particular, which is the one every other measurement rests on.
+            Assert.True(AnomalyCatalog.Implemented(AnomalyKind.Dropout));
+        }
+
+        /// <summary>
+        /// A sustained kind is one that holds no baseline, so none of them needs the event cap
+        /// Dropout cannot do without. Anything implemented is one or the other, never neither.
+        /// </summary>
+        [Fact]
+        public void Every_implemented_kind_is_either_sustained_or_an_event_kind()
+        {
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+            {
+                if (!AnomalyCatalog.Implemented(k))
+                {
+                    Assert.False(AnomalyCatalog.IsSustained(k), $"{k} has no detector to be either");
+                    continue;
+                }
+
+                bool sustained = AnomalyCatalog.IsSustained(k);
+                if (k == AnomalyKind.Dropout)
+                    Assert.False(sustained, "Dropout confirms on a single frame");
+                else
+                    Assert.True(sustained, $"{k} is implemented but claims to be neither");
+            }
+        }
+
+        /// <summary>
+        /// Which of the two judges it. The caller needs this because they take different settings
+        /// and emit on different occasions - one on close, one on confirm.
+        /// </summary>
+        [Fact]
+        public void The_sustained_kinds_are_the_ones_that_stay()
+        {
+            Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Blackout));
+            Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Washout));
+            Assert.True(AnomalyCatalog.IsSustained(AnomalyKind.Freeze));
+            Assert.False(AnomalyCatalog.IsSustained(AnomalyKind.Dropout));
+        }
+
+        /// <summary>
+        /// Washout's levels run the other way round, and reading them as Blackout's would make
+        /// the detector either silent or permanently on.
+        /// </summary>
+        [Fact]
+        public void Washout_resolves_a_hysteresis_that_falls_to_recover()
+        {
+            var s = new DetectionSettings();
+
+            WashoutThresholds t = s.ResolveWashout(AnomalyKind.Washout);
+
+            Assert.True(t.ExitLuma < t.EnterLuma, "recovery is a fall, not a rise");
+            Assert.InRange(t.EnterLuma, 1.0, 255.0);
+            Assert.True(t.MaxDetail > 0.0, "the structure test is what decides this kind");
+        }
+
+        /// <summary>
+        /// Blackout's knobs are luma, and Dropout's are a fraction. Reading one as the other is a
+        /// 0.05-against-255 mistake that would silence or saturate the detector, so the defaults
+        /// are checked to be in the right units.
+        /// </summary>
+        [Fact]
+        public void Blackout_resolves_absolute_levels_and_a_hysteresis()
+        {
+            var s = new DetectionSettings();
+
+            BlackoutThresholds t = s.ResolveBlackout(AnomalyKind.Blackout);
+
+            Assert.InRange(t.EnterLuma, 1.0, 254.0);      // luma, not a fraction
+            Assert.True(t.ExitLuma > t.EnterLuma, "the pair has to be a hysteresis");
+            Assert.True(t.MaxSpread > 0.0);
+            // Its own field, not DebounceMs. Sharing that one meant sharing its default, which
+            // is Dropout's calibrated 161 ms - a third of what a sustained kind should wait.
+            Assert.Equal(s.For(AnomalyKind.Blackout).BlackoutEnterMs, t.EnterMs, 3);
+            Assert.True(t.EnterMs >= 500.0, "a sustained kind waits half a second, not 161 ms");
         }
 
         [Fact]

@@ -98,6 +98,14 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- Detection region: which pixels the anomaly metrics are computed over. Software
@@ -171,11 +179,151 @@
                         ToolTip="Saved to settings; takes effect on the next Start" />
             </StackPanel>
 
+            <!-- Blackout's three, and they are luma rather than a fraction. Its own row because
+                 it is its own detector: Dropout measures a fall against a running baseline and
+                 confirms on one frame, this measures an absolute level with hysteresis and must
+                 not. Sharing the row would suggest sharing the units, and 0.05 luma means "never
+                 fire". -->
+            <Label Grid.Row="3" Grid.Column="0" Content="Blackout" />
+            <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="dark≤" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="blackout" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding BlackoutEnterInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="화면이 사라진 것으로 볼 luma (0~255, 비율이 아님)&#x0a;실측: 작동 중인 패널은 121.6 / 90.4 / 36.9 luma로 바닥을 칩니다" />
+                <TextBlock Text="back≥" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="blackout" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding BlackoutExitInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="화면이 돌아온 것으로 볼 luma. dark보다 높아야 합니다 — 그 간격이 히스테리시스이고, 없으면 경계에 앉은 패널이 몇 프레임마다 사건을 냅니다" />
+                <TextBlock Text="flat≤" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="blackout" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding BlackoutSpreadInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="타일 평균의 범위. 이것이 꺼진 패널과 어두운 화면을 가릅니다&#x0a;어두운 화면도 화면이라 타일이 서로 다르고, 꺼진 패널은 센서 잡음뿐이라 타일이 일치합니다&#x0a;절대 레벨 캘리브레이션 없이도 동작하는 절반입니다" />
+                <Button Content="Apply" Margin="6,0,0,0" Click="ApplyBlackout_Click"
+                        ToolTip="Saved to settings; takes effect on the next Start" />
+            </StackPanel>
+
+            <!-- The live reading beside the levels, because "6 luma" says nothing until you can
+                 see that this panel sits at 37 and keeps 40 of structure. -->
+            <Label Grid.Row="4" Grid.Column="0" Content="" />
+            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding BlackoutHint}" Margin="0,0,0,5"
+                       VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                       TextTrimming="CharacterEllipsis" ToolTip="{Binding BlackoutHint}" />
+
+
+            <!-- Washout. Two of its four, and deliberately the two that matter: the level says
+                 where to look and detail decides. spread and the dwells are in the hint because
+                 nobody has had to move them. -->
+            <Label Grid.Row="5" Grid.Column="0" Content="Washout" />
+            <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="bright≥" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding WashoutEnterInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="포화된 것으로 볼 luma (0~255)&#x0a;실측: 작동 중인 패널의 천장은 116.9 / 82.6 / 34.9 luma입니다" />
+                <TextBlock Text="detail≤" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="42" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding WashoutDetailInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="타일 **안**에 남은 무늬의 양. 판정하는 것은 밝기가 아니라 이것입니다&#x0a;흰 배경 UI는 글자와 아이콘이 있어 detail이 남고, 포화된 패널은 아무것도 없습니다&#x0a;실측: 정상 화면 21.5 / 19.7 / 6.3" />
+                <TextBlock Text="{Binding WashoutHint}" Margin="6,0,6,0" MaxWidth="300"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding WashoutHint}" />
+            </StackPanel>
+
+            <!-- Freeze. **Its threshold is a floor, not a ceiling** - every other row here fires
+                 when the number is exceeded and this one fires when it is not reached, so the
+                 labels say so rather than leaving it to the units. -->
+            <Label Grid.Row="6" Grid.Column="0" Content="Freeze" />
+            <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="still≤" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="52" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding FreezeEnterInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="프레임당 타일 평균의 변화량. 이 **밑으로** 내려가면 멈춘 것입니다&#x0a;다른 임계값과 방향이 반대라, 안전해 보이는 작은 값이 오히려 살아 있는 화면에서 오검출을 냅니다&#x0a;실측 센서 잡음 바닥 0.0567 / 0.0450 / 0.0234 luma/frame" />
+                <TextBlock Text="moving≥" Margin="6,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="52" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding FreezeExitInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="다시 움직이는 것으로 볼 변화량. still보다 높아야 합니다 — 그 간격이 히스테리시스입니다" />
+                <TextBlock Text="{Binding FreezeHint}" Margin="6,0,6,0" MaxWidth="300"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding FreezeHint}" />
+            </StackPanel>
+
+            <!-- ColorShift. The only kind whose reference is measured rather than typed, so the
+                 row is one tolerance and a button that takes what the run saw. -->
+            <Label Grid.Row="7" Grid.Column="0" Content="Color" />
+            <StackPanel Grid.Row="7" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="off by≥" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="52" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding ColorShiftDeviationInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="밴드 하나의 비중이 기준에서 얼마나 벗어나면 이상인지 (0~1)&#x0a;밴드가 빠지면 0.33, 두 밴드가 뒤바뀌면 둘의 차이만큼 움직입니다 — 그래서 느슨하게 둡니다&#x0a;좁게 잡으면 화면 자체의 색 변화를 이상으로 보고합니다" />
+                <Button Content="Use measured" Margin="6,0,0,0" Click="ApplyColorBaseline_Click"
+                        IsEnabled="{Binding CanAdoptColorBaseline}"
+                        ToolTip="이번 실행이 잰 밴드 비중을 이 카메라의 기준으로 삼습니다&#x0a;정상 패널에서 돌린 실행에만 누를 것 — 통계는 색이 내내 틀어진 채 안정적이었던 실행을 가려내지 못합니다" />
+                <TextBlock Text="{Binding ColorShiftHint}" Margin="6,0,6,0" MaxWidth="300"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding ColorShiftHint}" />
+            </StackPanel>
+
+            <!-- Flicker. The amplitude is relative, and the band and crossing count are in the
+                 hint rather than editable: they are what separates this from a dropout and from a
+                 backlight alias, and neither is a number an operator should be tuning by feel. -->
+            <Label Grid.Row="8" Grid.Column="0" Content="Flicker" />
+            <StackPanel Grid.Row="8" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="swing≥" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="52" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding FlickerAmplitudeInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="구간 평균 대비 밝기가 흔들리는 폭 (비율, luma가 아님)&#x0a;세 패널이 116.9 / 82.6 / 34.9 luma로 세 배 차이라, luma로 두면 한 대만 잡고 나머지는 놓칩니다&#x0a;p10~p90을 씁니다 — 프레임 하나가 한 구간의 폭을 정하지 않도록" />
+                <TextBlock Text="{Binding FlickerHint}" Margin="6,0,6,0" MaxWidth="340"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding FlickerHint}" />
+            </StackPanel>
+
+            <!-- Flip. Not one figure here is a brightness: every brightness-derived scalar is
+                 invariant under a mirror, which is why this row exists at all. The two gates are
+                 in the hint because they say when the question can be asked, not how sensitive
+                 the answer is. -->
+            <Label Grid.Row="9" Grid.Column="0" Content="Flip" />
+            <StackPanel Grid.Row="9" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,3">
+                <TextBlock Text="mirror fits≤" Margin="0,0,3,0" VerticalAlignment="Center"
+                           Foreground="#9A9A9A" FontSize="10" />
+                <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                         Tag="sustained" KeyDown="SettingsField_KeyDown"
+                         Text="{Binding FlipRatioInput, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="뒤집은 직전 프레임이 안 뒤집은 직전 프레임보다 얼마나 잘 맞아야 하는지 (비율)&#x0a;0.25면 네 배 잘 맞아야 합니다. 밝기가 아니라 타일 배치를 비교합니다&#x0a;**뒤집히는 순간**을 봅니다 — 시작할 때 이미 뒤집혀 있었으면 정상으로 읽습니다" />
+                <TextBlock Text="{Binding FlipHint}" Margin="6,0,6,0" MaxWidth="340"
+                           VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding FlipHint}" />
+            </StackPanel>
+
+            <!-- One Apply for the five rows above, because each is one number or a pair and
+                 they fail the same way: a value that will not parse leaves all of them alone. -->
+            <Label Grid.Row="10" Grid.Column="0" Content="" />
+            <StackPanel Grid.Row="10" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,5">
+                <Button Content="Apply the five sustained kinds" Click="ApplySustained_Click"
+                        ToolTip="Washout · Freeze · Color · Flicker · Flip. Saved to settings; takes effect on the next Start" />
+            </StackPanel>
+
             <!-- The budget and the share, because the split is invisible otherwise: five
                  detectors each allowed one false positive an hour is five an hour, and the total
                  is the number anybody was told to expect. -->
-            <Label Grid.Row="3" Grid.Column="0" Content="Budget" />
-            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding BudgetText}" Margin="0,0,0,3"
+            <Label Grid.Row="11" Grid.Column="0" Content="Budget" />
+            <TextBlock Grid.Row="11" Grid.Column="1" Text="{Binding BudgetText}" Margin="0,0,0,3"
                        VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10"
                        TextTrimming="CharacterEllipsis" ToolTip="{Binding BudgetText}" />
 
@@ -184,8 +332,8 @@
                  because it costs nothing, but only a person can say the run was on a healthy
                  panel. TextTrimming rather than a fixed width, so a window shows all of it and a
                  pane shows as much as it has room for. -->
-            <Label Grid.Row="4" Grid.Column="0" Content="Calib" />
-            <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal">
+            <Label Grid.Row="12" Grid.Column="0" Content="Calib" />
+            <StackPanel Grid.Row="12" Grid.Column="1" Orientation="Horizontal">
                 <TextBlock Text="{Binding CalibrationText}" VerticalAlignment="Center"
                            Foreground="#9A9A9A" FontSize="10"
                            TextTrimming="CharacterEllipsis"

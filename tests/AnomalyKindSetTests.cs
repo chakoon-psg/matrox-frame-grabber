@@ -189,9 +189,23 @@ namespace MatroxFrameGrabber.Tests
         [Fact]
         public void A_kind_that_is_on_without_a_detector_is_marked_as_such()
         {
-            bool[] on = AnomalyKindSet.FromNames(new[] { "Dropout", "Flip" });
+            // Every kind has a detector as of 2026-09-13, so this is a property over the catalog
+            // rather than a named example: the marker appears on exactly the kinds that have no
+            // detector. Today that is none of them and the assertion is that none is marked -
+            // which is the same check, and it starts having teeth again when a kind is added.
+            var names = new string[AnomalyCatalog.Count];
+            for (int i = 0; i < AnomalyCatalog.All.Length; i++)
+                names[i] = AnomalyCatalog.All[i].ToString();
+            bool[] on = AnomalyKindSet.FromNames(names);
 
-            Assert.Contains("Flip (미구현)", AnomalyKindSet.Describe(on));
+            string text = AnomalyKindSet.Describe(on);
+            foreach (AnomalyKind k in AnomalyCatalog.All)
+            {
+                if (AnomalyCatalog.Implemented(k))
+                    Assert.DoesNotContain($"{k} (미구현)", text);
+                else
+                    Assert.Contains($"{k} (미구현)", text);
+            }
         }
 
         [Fact]

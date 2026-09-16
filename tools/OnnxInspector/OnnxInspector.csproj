@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- No window and no MIL. This harness exists so the model can be developed and measured
+         without the app, which is the same reason tools/MilVideoSink exists. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>OnnxInspectorHarness</RootNamespace>
+    <AssemblyName>OnnxInspector</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- For the `locate` demo only: PNG decode and encode, and rectangles drawn into the pixels.
+         Framework references, not a package - the one image dependency this repository already
+         refused to take was OpenCV, and taking a smaller one for a harness would be the same
+         mistake at a smaller size. -->
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+  </ItemGroup>
+
+  <!-- Source-included rather than copied, so the harness measures the same letterbox and decoder
+       the app would run. A number measured here is a number about the app. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\Infrastructure\Detection\ScreenFinding.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\IScreenInspector.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\BgrLetterbox.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\CenterNetDecoder.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\AnomalyKind.cs" LinkBase="Shared" />
+    <!-- `locator` times the inspector the app runs, not a second copy of it: the session setup,
+         the input tensor reuse and the decode all have to be the app's for the number to be
+         about the app. ScreenInspectorFactory comes along for ScreenInspectorOptions. -->
+    <Compile Include="..\..\src\Infrastructure\Detection\ScreenInspectorFactory.cs" LinkBase="Shared" />
+    <!-- `locate` drives the real decision maker, not a sketch of one: the same RoiLocator the
+         app runs, with the same interlocks and the same even-pixel snap. -->
+    <Compile Include="..\..\src\Infrastructure\ChannelRoi.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\RoiLocator.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Infrastructure\Detection\GreenScreenInspector.cs" LinkBase="Shared" />
+    <Compile Include="..\..\src\Onnx\OnnxScreenInspector.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+</Project>

@@ -70,7 +70,54 @@
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
             <TextBlock Text="thresholds, ROI and calibration are per camera — open a camera's own Settings"
-                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,10" TextWrapping="Wrap" />
+                       Foreground="#5A5A5A" FontSize="10" Margin="0,0,0,8" TextWrapping="Wrap" />
+
+            <!-- Auto-calibration.
+                 App-wide, like the kind checkboxes and for the same reason: whether a machine may
+                 move a threshold on its own is one policy for the rig, not a per-camera taste.
+                 The value it writes is per camera, because that is where thresholds live.
+
+                 Off by default. It is here because the rig is sometimes unattended for days, and
+                 a threshold nobody can adjust is worse than one that tightens itself - but every
+                 word in the tooltip is a condition it has to clear first, and it will decline far
+                 more often than it acts. That is the intended behaviour, not a fault. -->
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Auto-calibrate" />
+                <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                          Content="let a quiet run tighten Dropout on its own"
+                          IsChecked="{Binding Output.AutoCalibrate}"
+                          ToolTip="사람이 없는 동안 임계값을 스스로 조일 수 있게 합니다. 기본 꺼짐&#x0a;&#x0a;**Dropout 하나만** 건드립니다. 나머지 여섯을 제외한 이유는 종류마다 다르고 CLAUDE.md에 표로 있습니다&#x0a;**조이기만 하고 풀지 않습니다** — 조용한 한 시간은 그 시간이 조용했다는 증거이지 장비가 조용하다는 증거가 아닙니다(실측: 같은 리그가 0.0289와 0.0087)&#x0a;&#x0a;그랩을 멈출 때 판정하고, 채택하지 않았으면 그 이유를 로그에 남깁니다" />
+            </Grid>
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Needs" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox Width="46" FontSize="11" VerticalContentAlignment="Center"
+                             Text="{Binding Output.AutoCalibrateMinMinutes, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="이 시간보다 짧은 실행은 채택하지 않습니다 (분)&#x0a;5분은 오검출 예산을 11.8/시간까지만 분해합니다 — 1/시간을 보이려면 한 시간이 필요합니다" />
+                    <TextBlock Text="min of quiet running, and at most" Margin="6,0,6,0"
+                               VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                    <TextBox Width="40" FontSize="11" VerticalContentAlignment="Center"
+                             Text="{Binding Output.AutoCalibrateMaxChange, UpdateSourceTrigger=LostFocus}"
+                             ToolTip="한 번에 바꿀 수 있는 배수의 상한&#x0a;이보다 큰 변화가 필요하다면 그건 캘리브레이션이 아니라 리그가 달라진 것이고, 사람이 봐야 합니다" />
+                    <TextBlock Text="× change" Margin="6,0,0,0"
+                               VerticalAlignment="Center" Foreground="#9A9A9A" FontSize="10" />
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Margin="0,0,0,10" TextWrapping="Wrap"
+                       Foreground="#5A5A5A" FontSize="10"
+                       Text="it declines more often than it acts: the run must have reported nothing, missed nothing, and still want a tighter value than the one in place. Every refusal says which condition failed, in mil-errors.log."
+                       ToolTip="거절 사유는 전부 로그에 남습니다 — SwitchedOff / TooShort / NotQuiet / Degraded / NoProposal / WouldLoosen / TooBigAChange / NotWorthIt&#x0a;&#x0a;&quot;사건 0건&quot; 조건이 되먹임 고리를 끊습니다: 임계값↑ → 사건↓ → 바닥 계산에서 빠지는 프레임↓ → 바닥↑ → 임계값↑" />
+
 
             <!-- ============ RECORDING (the session file) ============ -->
             <TextBlock Text="RECORDING" Foreground="#6F6F6F" FontSize="10" Margin="0,2,0,1" />
@@ -233,6 +280,60 @@
                        Foreground="#5A5A5A" FontSize="10"
                        Text="the clip is always H.264 — it is cut from the rolling ring, and a lossless ring would be 884 MB/s across three channels. The stills are the part that can be measured again."
                        ToolTip="사건 클립은 세션 녹화 설정을 따르지 않습니다&#x0a;세그먼트 링 버퍼는 그랩이 도는 동안 계속 쓰이므로 무손실로 돌리면 하루 76 TB — SSD 총 수명이 약 750 TB입니다&#x0a;그래서 클립은 문맥이고, 재측정은 무손실 정지화면으로 합니다" />
+
+            <!-- ============ SCREEN INSPECTOR (cs) ============ -->
+            <!-- Two checkboxes for two different questions, which is why they are not one.
+                 `Inspect` hands the model the analysis region and asks what is wrong inside it;
+                 `Locate` hands it the whole screen and asks where the target is, and moves the
+                 region to the answer. The second one writes to the region the seven tile
+                 detectors measure, so it has to be switchable on its own.
+                 Both are off by default: the weights in hand find a green target and these
+                 panels are not green unless the DUT is showing a green screen. See
+                 docs/cs-screen-inspector-handover.md. -->
+            <TextBlock Text="SCREEN INSPECTOR (cs)" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Inspect" />
+                <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                          Content="run the model over the analysis region"
+                          IsChecked="{Binding Output.Inspect}"
+                          ToolTip="판독기가 분석 ROI 안을 보고 무엇이 잘못됐는지 답합니다&#x0a;실측: 취득 옆 1회 약 6.5 ms, 2초에 한 장이면 duty 0.3% — 3채널 120 fps에서 유실 0&#x0a;findings 는 로그로만 갑니다(RecordAnomaly 를 부르지 않습니다)" />
+            </Grid>
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Locate ROI" />
+                <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                          Content="find the green screen and move the region onto it"
+                          IsChecked="{Binding Output.LocateRoi}"
+                          ToolTip="장비가 옮겨졌을 때 검출 영역이 표적을 따라갑니다&#x0a;모델을 쓰지 않습니다 — 초록 비중과 연결 성분으로 찾습니다. 실측 1회 1.6~2.3 ms, 유실 0&#x0a;실측 정확도: 패널 406x275 @294,179 에 대해 410x276 @294,178&#x0a;못 찾으면 움직이지 않고, 사건이 진행 중이면 얼립니다(검출기를 고장에서 떼어 놓지 않기 위해)&#x0a;영역이 바뀌면 그 채널의 임계값은 다시 잡아야 합니다" />
+            </Grid>
+
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition SharedSizeGroup="AppSettingsLabel" Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Column="0" Content="Every" />
+                <TextBox Grid.Column="1" Width="60" VerticalContentAlignment="Center"
+                         Text="{Binding Output.LocateSeconds, StringFormat=0.##}"
+                         ToolTip="한 채널이 전체 화면을 보는 간격(초). 0 이면 끕니다&#x0a;기본 1.5초 — 세 채널이 틱마다 한 대씩 돌아 UI 스레드에 읽기가 겹치지 않습니다&#x0a;장비 이동은 초 단위로 일어나는 일이 아니라 더 촘촘할 이유가 없습니다" />
+                <TextBlock Grid.Column="2" Text="seconds per camera" VerticalAlignment="Center"
+                           Margin="6,0,0,0" Foreground="{StaticResource MutedTextBrush}" FontSize="10" />
+            </Grid>
+
+            <TextBlock Margin="0,0,0,10" TextWrapping="Wrap"
+                       Foreground="#5A5A5A" FontSize="10"
+                       Text="the two rows do not share a judge. Inspect runs the ONNX weights; Locate does not — finding a green rectangle is a share test and a connected component, which on this rig lands within a pixel where the weights are out by fourteen times in area. docs/green-screen-locator.md."
+                       ToolTip="두 줄은 서로 다른 것이 판정합니다&#x0a;Inspect 는 ONNX 가중치를 돌립니다&#x0a;Locate 는 모델을 쓰지 않습니다 — 초록 비중 + 연결 성분이고, 이 리그에서 1 px 안에 들어옵니다&#x0a;같은 프레임에서 가중치는 면적이 14배 작은 박스를 냈습니다(크기 헤드 포화)" />
 
             <!-- ============ FOLDERS ============ -->
             <TextBlock Text="FOLDERS" Foreground="#6F6F6F" FontSize="10" Margin="0,4,0,5" />

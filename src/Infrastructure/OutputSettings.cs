@@ -35,6 +35,9 @@ namespace MatroxFrameGrabber.Infrastructure
         private string _segmentFolder = DefaultSegmentFolder;
         private bool _keepStills = true;
         private double _evidenceSeconds = DefaultEvidenceSeconds;
+        private bool _autoCalibrate;
+        private double _autoCalibrateMinMinutes = 30.0;
+        private double _autoCalibrateMaxChange = 2.0;
         private bool[] _enabledKinds = AnomalyKindSet.Default();
 
         private string _outputFolder = DefaultFolder;
@@ -190,6 +193,96 @@ namespace MatroxFrameGrabber.Infrastructure
         /// clip is x264 at CRF 23, so re-running the detector over it would not reproduce the
         /// deviation that was reported, while a lossless still of the extreme frame would.
         /// </summary>
+        /// <summary>
+        /// Whether a screen inspector runs at all. Off by default.
+        ///
+        /// App-wide rather than per camera, by the same rule as the kind checkboxes: whether a
+        /// model judges this rig is one policy, and a report where camera 1 was inspected and
+        /// camera 2 was not cannot be read.
+        /// </summary>
+        public bool Inspect
+        {
+            get => _inspect;
+            set { if (_inspect != value) { _inspect = value; RaiseChanged(nameof(Inspect)); Save(); } }
+        }
+
+        /// <summary>
+        /// How often each camera hands a frame to the inspector, in seconds. 0 switches the
+        /// patrol off and leaves only whatever event path exists.
+        ///
+        /// Seconds rather than a rate because that is how the cost is reasoned about: one frame
+        /// every two seconds across three cameras is 1.5 inferences a second, against a measured
+        /// ceiling of about 212.
+        /// </summary>
+        public double InspectSeconds
+        {
+            get => _inspectSeconds;
+            set
+            {
+                double v = double.IsNaN(value) || value < 0.0 ? 0.0 : (value > 3600.0 ? 3600.0 : value);
+                if (_inspectSeconds != v) { _inspectSeconds = v; RaiseChanged(nameof(InspectSeconds)); Save(); }
+            }
+        }
+
+        /// <summary>
+        /// Where the model file is. Empty means look beside the app, the way ffmpeg is found.
+        /// </summary>
+        public string InspectModelPath
+        {
+            get => _inspectModelPath;
+            set
+            {
+                string v = value ?? string.Empty;
+                if (!string.Equals(_inspectModelPath, v, StringComparison.Ordinal))
+                { _inspectModelPath = v; RaiseChanged(nameof(InspectModelPath)); Save(); }
+            }
+        }
+
+        /// <summary>
+        /// Whether the inspector also looks at the WHOLE screen and moves each camera's analysis
+        /// region to what it finds. Off by default.
+        ///
+        /// **A different job from <see cref="Inspect"/>, done by the same model.** `Inspect` hands
+        /// it the region and asks what is wrong inside it; this hands it the screen and asks where
+        /// the region should be - which is what the rig needs when the equipment has been moved.
+        /// The second one is why the model was brought in: on its own the region only ever moves
+        /// when somebody drags it.
+        ///
+        /// App-wide, like `Inspect`, and for the same reason: a rig where camera 1 follows the
+        /// panel and camera 2 does not produces a report nobody can read.
+        /// </summary>
+        public bool LocateRoi
+        {
+            get => _locateRoi;
+            set { if (_locateRoi != value) { _locateRoi = value; RaiseChanged(nameof(LocateRoi)); Save(); } }
+        }
+
+        /// <summary>
+        /// How often each camera looks at the whole screen, in seconds. 0 switches it off.
+        ///
+        /// The default staggers three cameras one stats tick apart, so the looks do not land on
+        /// the same tick - the read happens on the UI thread and three 2.37 MB reads at once is
+        /// the one part of this a person would feel.
+        ///
+        /// It is a slow loop on purpose. Equipment is moved by hand, not at 120 fps, and measured
+        /// cost is about 8.5 ms a look beside a grab - 1.7% of one core at this rate.
+        /// </summary>
+        public double LocateSeconds
+        {
+            get => _locateSeconds;
+            set
+            {
+                double v = double.IsNaN(value) || value < 0.0 ? 0.0 : (value > 3600.0 ? 3600.0 : value);
+                if (_locateSeconds != v) { _locateSeconds = v; RaiseChanged(nameof(LocateSeconds)); Save(); }
+            }
+        }
+
+        private bool _inspect;
+        private double _inspectSeconds = 2.0;
+        private string _inspectModelPath = string.Empty;
+        private bool _locateRoi;
+        private double _locateSeconds = 1.5;
+
         public bool KeepStills
         {
             get => _keepStills;
@@ -215,6 +308,69 @@ namespace MatroxFrameGrabber.Infrastructure
         /// here is RAM and not time: measured 2026-09-11 on three channels over 120 s, +-3 s lost
         /// 8/7/8 frames of 15100 while writing 13 GB of evidence, and +-2 s lost 5/1/1.
         /// </summary>
+        /// <summary>
+        /// Lets a finished run move its own thresholds, when nobody can be at the bench to say
+        /// the run was on a healthy panel.
+        ///
+        /// **Off by default and meant to stay off on a rig somebody can reach.** The manual
+        /// path - Use proposal, in a camera's own settings - exists because only a person can
+        /// confirm that a quiet run was quiet for the right reason. This replaces that judgement
+        /// with conditions a machine can check (see <see cref="AutoCalibrationPolicy"/>), which is
+        /// weaker, and it is switched on only when the alternative is thresholds that nobody
+        /// updates at all.
+        ///
+        /// App-wide rather than per camera, because it is a policy about how the rig is operated.
+        /// The thresholds it moves stay per camera, as they must - the dimmest of three produced
+        /// nine shallow false positives where the other two produced none.
+        /// </summary>
+        public bool AutoCalibrate
+        {
+            get => _autoCalibrate;
+            set { if (_autoCalibrate != value) { _autoCalibrate = value; RaiseChanged(nameof(AutoCalibrate)); Save(); } }
+        }
+
+        /// <summary>
+        /// How long a run has to be before it may move anything, in minutes.
+        ///
+        /// Five minutes resolves a false-positive budget only to 11.8/hour against a target of 1,
+        /// so a run that short measures a quieter rig than the one that has to survive the night.
+        /// </summary>
+        public double AutoCalibrateMinMinutes
+        {
+            get => _autoCalibrateMinMinutes;
+            set
+            {
+                double v = value < 1.0 ? 1.0 : (value > 1440.0 ? 1440.0 : value);
+                if (Math.Abs(_autoCalibrateMinMinutes - v) < 1e-9) return;
+                _autoCalibrateMinMinutes = v;
+                RaiseChanged(nameof(AutoCalibrateMinMinutes));
+                Save();
+            }
+        }
+
+        /// <summary>
+        /// The largest factor one run may move a threshold by.
+        ///
+        /// A jump bigger than this is a changed rig, not a calibration - a light moved, an
+        /// exposure changed, a camera came loose - and it is declined so a person looks.
+        /// </summary>
+        public double AutoCalibrateMaxChange
+        {
+            get => _autoCalibrateMaxChange;
+            set
+            {
+                double v = value < 1.1 ? 1.1 : (value > 100.0 ? 100.0 : value);
+                if (Math.Abs(_autoCalibrateMaxChange - v) < 1e-9) return;
+                _autoCalibrateMaxChange = v;
+                RaiseChanged(nameof(AutoCalibrateMaxChange));
+                Save();
+            }
+        }
+
+        /// <summary>The policy this settings object describes.</summary>
+        public AutoCalibrationPolicy CalibrationPolicy =>
+            new AutoCalibrationPolicy(AutoCalibrate, AutoCalibrateMinMinutes, AutoCalibrateMaxChange);
+
         public double EvidenceSeconds
         {
             get => _evidenceSeconds;
@@ -507,6 +663,14 @@ namespace MatroxFrameGrabber.Infrastructure
             public string SegmentFolder { get; set; }
             public bool? KeepStills { get; set; }
             public double? EvidenceSeconds { get; set; }
+            public bool? Inspect { get; set; }
+            public double? InspectSeconds { get; set; }
+            public string InspectModelPath { get; set; }
+            public bool? LocateRoi { get; set; }
+            public double? LocateSeconds { get; set; }
+            public bool? AutoCalibrate { get; set; }
+            public double? AutoCalibrateMinMinutes { get; set; }
+            public double? AutoCalibrateMaxChange { get; set; }
             public int[] ChannelDecimation { get; set; }
 
             // AnomalyThresholds is a plain mutable class with a parameterless constructor, so
@@ -554,6 +718,17 @@ namespace MatroxFrameGrabber.Infrastructure
                             ? 0.0 : (ev < 0.5 ? 0.5 : (ev > 30.0 ? 30.0 : ev));
                         s._segmentFolder = string.IsNullOrWhiteSpace(dto.SegmentFolder)
                             ? DefaultSegmentFolder : dto.SegmentFolder;
+
+                        // Absent means off, which is what a file written before the option
+                        // existed should mean.
+                        s._inspect = dto.Inspect ?? false;
+                        s._inspectSeconds = dto.InspectSeconds ?? 2.0;
+                        s._inspectModelPath = dto.InspectModelPath ?? string.Empty;
+                        s._locateRoi = dto.LocateRoi ?? false;
+                        s._locateSeconds = dto.LocateSeconds ?? 1.5;
+                        s._autoCalibrate = dto.AutoCalibrate ?? false;
+                        s._autoCalibrateMinMinutes = dto.AutoCalibrateMinMinutes ?? 30.0;
+                        s._autoCalibrateMaxChange = dto.AutoCalibrateMaxChange ?? 2.0;
 
                         double around = dto.AnomalyClipSeconds ?? DefaultAnomalyClipSeconds;
                         s._anomalyClipSeconds = around <= 0.0
@@ -718,6 +893,14 @@ namespace MatroxFrameGrabber.Infrastructure
                     SegmentFolder = _segmentFolder,
                     KeepStills = _keepStills,
                     EvidenceSeconds = _evidenceSeconds,
+                    Inspect = _inspect,
+                    InspectSeconds = _inspectSeconds,
+                    InspectModelPath = _inspectModelPath,
+                    LocateRoi = _locateRoi,
+                    LocateSeconds = _locateSeconds,
+                    AutoCalibrate = _autoCalibrate,
+                    AutoCalibrateMinMinutes = _autoCalibrateMinMinutes,
+                    AutoCalibrateMaxChange = _autoCalibrateMaxChange,
                     ChannelDecimation = (int[])_channelDecimation.Clone(),
                     ChannelDetection = _channelDetection
                 };
